@@ -127,7 +127,15 @@ const COLOR_FILL_GREEN  = Color4.create(FILL_GREEN_COLOR.r,  FILL_GREEN_COLOR.g,
 const COLOR_MARKER      = Color4.create(MARKER_COLOR.r,      MARKER_COLOR.g,      MARKER_COLOR.b,      1)
 const COLOR_THRESHOLD   = Color4.create(THRESHOLD_COLOR.r,   THRESHOLD_COLOR.g,   THRESHOLD_COLOR.b,   1)
 
-const BLOOM_RATIO = BLOOM_THRESHOLD / TOTAL_PLANTS
+// v2 — the bloom threshold scales with gardeners present; the server pushes updates
+// via thresholdUpdate and wateringSystem calls setBloomRatio(). Starts at the full
+// v1 ratio so behaviour is unchanged until the first server message arrives.
+let bloomRatio = BLOOM_THRESHOLD / TOTAL_PLANTS
+
+/** Update the ratio at which the fill turns green (current scaled threshold / total). */
+export function setBloomRatio(ratio: number): void {
+  bloomRatio = ratio
+}
 
 // ---------------------------------------------------------------
 // State
@@ -377,7 +385,7 @@ export function setupProgressBars(): void {
 
 export function updateProgressBars(wateredCount: number, total: number): void {
   const ratio    = total > 0 ? Math.min(wateredCount / total, 1) : 0
-  const isGreen  = ratio >= BLOOM_RATIO
+  const isGreen  = ratio >= bloomRatio
   const isOrange = !isGreen && ratio >= ORANGE_RATIO
 
   const albedo   = isGreen ? COLOR_FILL_GREEN  : isOrange ? COLOR_FILL_ORANGE  : COLOR_FILL_RED

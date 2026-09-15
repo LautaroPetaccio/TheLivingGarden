@@ -36,8 +36,13 @@ export const room = registerMessages({
   // ── Server → all clients ──────────────────────────────────
   /** Broadcast when a plant's watered state changes (water or expiry). */
   plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Number, wateredBy: Schemas.String }),
-  /** Broadcast when the bloom threshold is reached. */
-  bloomTriggered:   Schemas.Map({}),
+  /** Broadcast when the bloom threshold is reached.
+   *  scale: thresholdAtFire / BLOOM_THRESHOLD (0–1] — 1 = full-garden bloom,
+   *  below 1 = the smaller, quieter scaled bloom (v2). */
+  bloomTriggered:   Schemas.Map({ scale: Schemas.Number }),
+  /** v2 — current scaled bloom threshold. Sent to a joining player, on full sync,
+   *  and broadcast whenever the gardener count (and so the threshold) changes. */
+  thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),
   /** Top-10 all-time leaderboard — sent to all on water, to joining player on join. */

@@ -41,7 +41,7 @@ import { setupBloomSystem, triggerBloomEvent, endBloom, startBloomClose, isBloom
 import { startPreBloomEffects, startBloomPhases, startBloomCooldown, cancelPreBloom }                             from './bloomEvent'
 import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSystem, triggerBloomSparkles, endBloomSparkles, bloomSparkleSystem } from './sparkleSystem'
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
-import { setupProgressBars, updateProgressBars }              from './progressBarsSystem'
+import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
 import { setupLeaderboardBoards, updateLeaderboardDisplay }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
@@ -67,6 +67,16 @@ import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 //   - Watered expiry  : 6h  → 5min
 //   - Bloom delay     : next 6pm UTC → 10s
 const TEST_MODE = false
+
+// ── v2: scaled bloom threshold ────────────────────────────────
+// Authoritative value arrives via the server's thresholdUpdate message; until
+// then we fall back to the full v1 threshold so behaviour is unchanged.
+let bloomThreshold = BLOOM_THRESHOLD
+// Scale (thresholdAtFire / full threshold) of the currently-active bloom —
+// 1 = full-garden spectacle; below 1 = the smaller, quieter solo/duo bloom.
+// Stored here for the FX phase to consume.
+let currentBloomScale = 1
+export function getCurrentBloomScale(): number { return currentBloomScale }
 
 // ── Animation clip names (must match GLB exactly) ─────────────
 const ANIM_DROOPY_STATE  = 'CloseIdle'  // droopy idle loop
@@ -341,7 +351,7 @@ function stopBloomResetTicker(): void {
 
 function updateSceneAssets() {
   resolveSceneAssets()
-  const aboveThreshold = computeWateredCount() >= BLOOM_THRESHOLD
+  const aboveThreshold = computeWateredCount() >= bloomThreshold
   // Use only bloomSystem's visual flag — wateringSystem.bloomActive is the gameplay
   // cooldown guard (blocks watering for 65s), not a scene-visibility signal.
   const inBloom        = isBloomActive()
@@ -496,7 +506,7 @@ function updateProgressText() {
   updateBannerHealth(count / TOTAL_PLANTS)
   // Banner state: idle below threshold, countdown at/above threshold (unless bloom active)
   if (!isBloomActive() && !bloomActive) {
-    if (count >= BLOOM_THRESHOLD) {
+    if (count >= bloomThreshold) {
       countdownUnlocked = true   // latches on; only cleared by bloomReset
       // Resume (or start) the client sustain clock
       if (clientSustainStartMs === null) clientSustainStartMs = Date.now()
@@ -1246,7 +1256,19 @@ export function setupWateringSystem(): void {
     }
   })
 
-  room.onMessage('bloomTriggered', () => {
+  room.onMessage('thresholdUpdate', (data) => {
+    if (!data || typeof data.threshold !== 'number' || data.threshold <= 0) return
+    if (data.threshold === bloomThreshold) return
+    bloomThreshold = data.threshold
+    setBloomRatio(bloomThreshold / TOTAL_PLANTS)
+    console.log(`[Client] Bloom threshold now ${bloomThreshold} (${data.gardeners} gardeners)`)
+    // Re-evaluate banner/countdown state — a join can push health below the new
+    // threshold (pause) or a leave can drop the threshold below health (resume).
+    updateProgressText()
+  })
+
+  room.onMessage('bloomTriggered', (data) => {
+    currentBloomScale = typeof data?.scale === 'number' && data.scale > 0 ? Math.min(data.scale, 1) : 1
     stopWateringEmote()
     stopPreBloomTicker()   // stop immediately — prevents stale "1s" from being re-written
     resetClientSustain()   // sustain complete — bloom is firing

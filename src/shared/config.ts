@@ -11,6 +11,21 @@ export const BLOOM_WINDOWS: ReadonlyArray<{ hour: number; minute: number }> = [
 
 export const TOTAL_PLANTS       = 38   // 32 regular + 6 fast
 export const BLOOM_THRESHOLD    = Math.ceil(TOTAL_PLANTS * 0.8)
+
+// ── v2: scaled bloom threshold ───────────────────────────────
+// The threshold scales with gardeners present so a solo player can earn a
+// smaller, quieter bloom (GDD §3 step 2). TUNING: solo sits below the ~12–14
+// plants one player can sustain against 3-minute decay; the step is chosen so
+// the full-garden bloom lands at exactly 4 gardeners (GDD §5 "comfortable at four").
+export const SOLO_BLOOM_THRESHOLD         = 10
+export const BLOOM_THRESHOLD_PER_GARDENER = 7
+
+/** Watered-plant count required to arm the bloom for `gardeners` players present.
+ *  1 → 10, 2 → 17, 3 → 24, 4+ → BLOOM_THRESHOLD (31). */
+export function scaledBloomThreshold(gardeners: number): number {
+  const n = Math.max(1, gardeners)
+  return Math.min(BLOOM_THRESHOLD, SOLO_BLOOM_THRESHOLD + BLOOM_THRESHOLD_PER_GARDENER * (n - 1))
+}
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */
 export const BLOOM_SUSTAIN_MS   = 60_000

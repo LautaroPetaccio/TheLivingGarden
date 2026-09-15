@@ -25,6 +25,7 @@ import {
   BLOOM_RESET_DELAY_MS,
   BLOOM_SUSTAIN_MS,
   BLOOM_WINDOWS,
+  scaledBloomThreshold,
 } from '../shared/config'
 
 // ---------------------------------------------------------------
@@ -40,6 +41,7 @@ const SYNC_RATE_MS    = 5_000                        // min ms between full sync
 let   bloomActive      = false
 let   bloomStartedAt:  number | null = null   // ms timestamp when current bloom began
 let   countdownPaused  = false
+let   bloomScale       = 1                    // thresholdAtFire / BLOOM_THRESHOLD of the active bloom
 
 
 // ── Leaderboard ──────────────────────────────────────────────
@@ -183,6 +185,32 @@ function getWateredCount(): number {
   return count
 }
 
+// ── v2: scaled bloom threshold ───────────────────────────────
+
+/** Bloom threshold scaled to gardeners currently present (solo → small quiet bloom). */
+function currentBloomThreshold(): number {
+  return scaledBloomThreshold(knownPlayers.size)
+}
+
+let lastBroadcastThreshold = -1
+
+/** Send the scaled threshold — targeted to one player, or broadcast when it changed.
+ *  A broadcast-side change also re-evaluates the sustain timer: a join can raise the
+ *  threshold above current health (pause), a leave can drop it below (resume). */
+function sendThreshold(to?: string[]): void {
+  const threshold = currentBloomThreshold()
+  const gardeners = Math.max(1, knownPlayers.size)
+  if (to) {
+    room.send('thresholdUpdate', { threshold, gardeners }, { to })
+    return
+  }
+  if (threshold === lastBroadcastThreshold) return
+  lastBroadcastThreshold = threshold
+  room.send('thresholdUpdate', { threshold, gardeners })
+  console.log(`[Server] Bloom threshold now ${threshold} (${gardeners} gardeners present)`)
+  checkBloomThreshold()
+}
+
 // ── Sustained-health bloom trigger ───────────────────────────
 
 let bloomSustainTimer:     ReturnType<typeof setTimeout> | null = null
@@ -219,13 +247,14 @@ function cancelBloomSustain(): void {
  *  pauses it — without resetting — if health dips below. */
 function checkBloomThreshold(): void {
   if (bloomActive) return
-  const count = getWateredCount()
-  if (count >= BLOOM_THRESHOLD) {
+  const count     = getWateredCount()
+  const threshold = currentBloomThreshold()
+  if (count >= threshold) {
     countdownPaused = false
     if (bloomSustainTimer === null) {
       const remaining = BLOOM_SUSTAIN_MS - bloomSustainElapsedMs
       bloomSustainStartedAt = Date.now()
-      console.log(`[Server] Health ${count}/${BLOOM_THRESHOLD} ≥ threshold — bloom fires in ${Math.ceil(remaining / 1_000)}s (${Math.round(bloomSustainElapsedMs / 1_000)}s already elapsed)`)
+      console.log(`[Server] Health ${count}/${threshold} ≥ threshold — bloom fires in ${Math.ceil(remaining / 1_000)}s (${Math.round(bloomSustainElapsedMs / 1_000)}s already elapsed)`)
       bloomSustainTimer = setTimeout(() => {
         executeTask(async () => {
           bloomSustainTimer     = null
@@ -233,7 +262,7 @@ function checkBloomThreshold(): void {
           // Only reset elapsed after confirming we can bloom — if a plant expired in the
           // same tick, we want checkBloomThreshold() (called on next water) to restart
           // from 0 rather than an incorrect partial value.
-          if (!bloomActive && getWateredCount() >= BLOOM_THRESHOLD) {
+          if (!bloomActive && getWateredCount() >= currentBloomThreshold()) {
             bloomSustainElapsedMs = 0
             triggerBloom()
           } else {
@@ -251,11 +280,13 @@ function checkBloomThreshold(): void {
 
 function triggerBloom(): void {
   if (bloomActive) return
+  const threshold = currentBloomThreshold()
   cancelBloomSustain()
   bloomActive    = true
   bloomStartedAt = Date.now()
-  console.log(`[Server] Bloom triggered! (${getWateredCount()}/${BLOOM_THRESHOLD} plants)`)
-  room.send('bloomTriggered', {})
+  bloomScale     = threshold / BLOOM_THRESHOLD
+  console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)})`)
+  room.send('bloomTriggered', { scale: bloomScale })
   setTimeout(() => executeTask(resetGarden), BLOOM_RESET_DELAY_MS)
 }
 
@@ -316,7 +347,7 @@ function scheduleExpiry(
       console.log(`[Server] Plant expired: ${plantId}`)
       // Pause (not cancel) — preserves elapsed progress; timer resumes when health recovers.
       // Expiry must never start the sustain timer, only pause it.
-      if (getWateredCount() < BLOOM_THRESHOLD) pauseBloomSustain()
+      if (getWateredCount() < currentBloomThreshold()) pauseBloomSustain()
     })
   }, delayMs)
 }
@@ -358,7 +389,7 @@ function scheduleBloomCheck(): void {
   setTimeout(() => {
     executeTask(async () => {
       const count = getWateredCount()
-      console.log(`[Server] Bloom window reached — health ${count}/${BLOOM_THRESHOLD}`)
+      console.log(`[Server] Bloom window reached — health ${count}/${currentBloomThreshold()}`)
       checkBloomThreshold()  // starts/resets sustain timer; bloom fires 60 s later if health holds
       scheduleBloomCheck()   // always reschedule for the next window
     })
@@ -401,11 +432,15 @@ function playerJoinSystem(): void {
       }
 
       broadcastLeaderboard([address])
+      sendThreshold([address])
       // Re-send bloom state to players who join while it is already active
-      if (bloomActive) room.send('bloomTriggered', {}, { to: [address] })
-      console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${BLOOM_THRESHOLD} watered, bloom=${bloomActive})`)
+      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
+      console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
+
+  // v2 — joins/leaves above may have moved the scaled threshold; broadcast only on change
+  sendThreshold()
 }
 
 // ---------------------------------------------------------------
@@ -462,7 +497,7 @@ export async function server(): Promise<void> {
   // start the sustain timer immediately so the bloom can still fire.
   // Without this, the client would start its countdown (seeing count ≥ threshold via
   // requestFullSync) but the server would have no timer — bloom would never trigger.
-  if (restoredCount >= BLOOM_THRESHOLD && !bloomActive) {
+  if (restoredCount >= currentBloomThreshold() && !bloomActive) {
     console.log('[Server] Restored state already at/above bloom threshold — starting sustain timer')
     checkBloomThreshold()
   }
@@ -523,7 +558,7 @@ export async function server(): Promise<void> {
 
       room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName })
       broadcastLeaderboard()
-      console.log(`[Server] ${plantId} watered by ${playerAddress} (${getWateredCount()}/${BLOOM_THRESHOLD} garden)`)
+      console.log(`[Server] ${plantId} watered by ${playerAddress} (${getWateredCount()}/${currentBloomThreshold()} garden)`)
       checkBloomThreshold()
     }
   })
@@ -536,7 +571,7 @@ export async function server(): Promise<void> {
   // ── Message: forceWater80 (test panel) ──────────────────────
   onRoomMessage<Record<string, never>>('forceWater80', async (_data, _address) => {
     if (bloomActive) return
-    const needed = Math.max(0, BLOOM_THRESHOLD - getWateredCount())
+    const needed = Math.max(0, currentBloomThreshold() - getWateredCount())
     if (needed === 0) {
       console.log('[Server] forceWater80: already at/above threshold')
       return
@@ -557,7 +592,7 @@ export async function server(): Promise<void> {
       }
     }
     if (watered > 0) await savePlantStates()
-    console.log(`[Server] forceWater80: watered ${watered} plants (${getWateredCount()}/${BLOOM_THRESHOLD} total)`)
+    console.log(`[Server] forceWater80: watered ${watered} plants (${getWateredCount()}/${currentBloomThreshold()} total)`)
     checkBloomThreshold()
   })
 
@@ -578,8 +613,9 @@ export async function server(): Promise<void> {
       room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '' }, { to: [address] })
     }
     broadcastLeaderboard([address])
-    if (bloomActive) room.send('bloomTriggered', {}, { to: [address] })
-    console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${BLOOM_THRESHOLD} watered)`)
+    sendThreshold([address])
+    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
+    console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 
   // ── Message: setTestOverride ─────────────────────────────────
