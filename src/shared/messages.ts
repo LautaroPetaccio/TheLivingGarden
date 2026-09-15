@@ -20,6 +20,8 @@ export const room = registerMessages({
   setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
   /** Sent on room.onReady so the server re-sends full state even after a client reload. */
   requestFullSync:  Schemas.Map({}),
+  /** v2 — player walked into a falling/landed seed; server validates and awards it. */
+  gatherSeed:       Schemas.Map({ seedId: Schemas.String }),
 
   // ── Server → all clients ─────────────────────────────────
   /** Periodic heartbeat so clients can maintain a clock-offset via clockSync. */
@@ -47,4 +49,11 @@ export const room = registerMessages({
   bloomReset:       Schemas.Map({}),
   /** Top-10 all-time leaderboard — sent to all on water, to joining player on join. */
   leaderboardUpdate: Schemas.Map({ entriesJson: Schemas.String }),
+
+  // ── v2: bloom seeds ──────────────────────────────────────
+  /** Seeds spawned by a bloom (broadcast), or the still-gatherable remainder
+   *  (targeted, on join/fullSync). seedsJson: [{id,x,z,rare,spawnedAt}] */
+  seedsSpawned:     Schemas.Map({ seedsJson: Schemas.String }),
+  /** A seed was claimed — all clients despawn it; the gatherer shows a toast. */
+  seedGathered:     Schemas.Map({ seedId: Schemas.String, by: Schemas.String, byAddress: Schemas.String, rare: Schemas.Boolean }),
 })

@@ -52,6 +52,7 @@ import { room }                             from './shared/messages'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_SUSTAIN_MS, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
+import { setupSeedSystem } from './seedSystem'
 
 // ===============================================================
 // ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -1129,6 +1130,7 @@ export function setupWateringSystem(): void {
   setupPetalSystem()
   setupSparkleSystem()
   setupPlayerTrailSystem()
+  setupSeedSystem()
   setupAmbientFX()
   setupFairyLights()
   setupProgressBars()
