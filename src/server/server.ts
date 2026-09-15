@@ -306,7 +306,12 @@ function scheduleExpiry(
       expired.isWatered = false
       expired.wateredAt = 0
       wateredByMap.delete(plantId)
-      await savePlantStates()
+      // Fail-open: persistence failure must not block the expiry broadcast
+      try {
+        await savePlantStates()
+      } catch (err) {
+        console.error('[Server] scheduleExpiry: failed to persist state:', err)
+      }
       room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '' })
       console.log(`[Server] Plant expired: ${plantId}`)
       // Pause (not cancel) — preserves elapsed progress; timer resumes when health recovers.
@@ -437,9 +442,19 @@ export async function server(): Promise<void> {
 
   console.log(`[Server] ${plantEntities.size} plants registered`)
 
-  // Restore persisted plant states and leaderboard
-  await loadPlantStates()
-  await loadLeaderboard()
+  // Restore persisted plant states and leaderboard.
+  // Fail-open: a Storage API outage must never abort server() — if these throw,
+  // message handlers below would never register and the whole game goes inert.
+  try {
+    await loadPlantStates()
+  } catch (err) {
+    console.error('[Server] loadPlantStates failed — starting with fresh plant state:', err)
+  }
+  try {
+    await loadLeaderboard()
+  } catch (err) {
+    console.error('[Server] loadLeaderboard failed — starting with empty leaderboard:', err)
+  }
   const restoredCount = getWateredCount()
   console.log(`[Server] ${restoredCount} plants currently watered`)
 
@@ -497,8 +512,13 @@ export async function server(): Promise<void> {
       const displayName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
       wateredByMap.set(plantId, displayName)
 
-      await savePlantStates()
-      await saveLeaderboard()
+      // Fail-open: persistence failure must not block the state broadcast below
+      try {
+        await savePlantStates()
+        await saveLeaderboard()
+      } catch (err) {
+        console.error('[Server] waterPlant: failed to persist state:', err)
+      }
       scheduleExpiry(plantId, entity, now, FAST_PLANT_NAMES.has(plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS)
 
       room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName })
@@ -581,7 +601,12 @@ export async function server(): Promise<void> {
     } else {
       leaderboard.set(address, { displayName: data.displayName, total: 0 })
     }
-    await saveLeaderboard()
+    // Fail-open: persistence failure must not block the leaderboard broadcast
+    try {
+      await saveLeaderboard()
+    } catch (err) {
+      console.error('[Server] registerPlayer: failed to persist leaderboard:', err)
+    }
     broadcastLeaderboard([address])
     console.log(`[Server] Registered player: ${data.displayName} (${address})`)
   })

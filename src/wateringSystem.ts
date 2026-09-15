@@ -47,7 +47,7 @@ import { setupLeaderboardBoards, updateLeaderboardDisplay }   from './leaderboar
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
 import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
 import { clockSync } from './shared/clockSync'
-import { movePlayerTo, triggerSceneEmote }  from '~system/RestrictedActions'
+import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_SUSTAIN_MS, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
@@ -86,8 +86,14 @@ const ANIM_UNHEALTHY_IDLE = 'CloseIdle'  // idle loop in UnhealthyRose.glb
 // ── Emote ─────────────────────────────────────────────────────
 const EMOTE_SRC           = 'assets/scene/Models/Emotes/WateringCan_emote.glb'
 const EMOTE_TOTAL_MS      = 2933   // ms — full clip length (keeps emoteActive locked)
-const EMOTE_TRIGGER_MS    = 200    // ms — delay before triggerSceneEmote after movePlayerTo
-const WATER_DISTANCE      = 2      // metres — how close player steps to the plant
+const EMOTE_TRIGGER_MS    = 200    // ms — delay before triggerSceneEmote after click
+
+// ── Pointer reach (Clean The Club model) ─────────────────────
+// maxDistance measures from the CAMERA, not the player — the mobile 3rd-person
+// camera sits 3–5m back, so a small value refuses clicks on plants you're
+// standing next to. Two-gate design: generous camera budget + player-based gate.
+const POINTER_MAX_DIST = 7   // metres, camera-based (PointerEvents maxDistance)
+const MAX_REACH_M      = 4   // metres, horizontal player→plant gate on click
 
 // ── Watering choreography milestones ─────────────────────────
 // t=0           click — player steps to plant, emote fires
@@ -172,7 +178,10 @@ const EXPIRY_TEST_MS = 5 * 60 * 1_000        // 5 minutes (TEST_MODE)
 
 let runtimeTestMode    = TEST_MODE
 let overrideDailyLimit = false
-let useClickbox        = false
+// Default ON: box colliders are immune to per-client visibility semantics — on the
+// mobile client, colliders of GLTF meshes hidden via VisibilityComponent stop
+// receiving pointer events (godot-explorer #1888), which killed watering on mobile.
+let useClickbox        = true
 let dailyWaterLimit    = DAILY_WATER_LIMIT
 
 // ---------------------------------------------------------------
@@ -527,15 +536,33 @@ function showWelcomeProgress() {
 // Plant click registry
 // ---------------------------------------------------------------
 
-const plantRegistry     = new Map<Entity, { clickTarget: Entity; plantName: string; clickboxEntity: Entity | null }>()
+const plantRegistry     = new Map<Entity, { clickTarget: Entity; plantName: string; clickboxEntity: Entity | null; anchor: Entity }>()
 const plantNameToEntity = new Map<string, Entity>()
 
 function enablePlantClick(entity: Entity) {
   const info = plantRegistry.get(entity)
   if (!info) return
   pointerEventsSystem.onPointerDown(
-    { entity: info.clickTarget, opts: { button: InputAction.IA_POINTER, hoverText: 'Water', maxDistance: 3 } },
-    () => waterPlant(entity, info.plantName),
+    { entity: info.clickTarget, opts: { button: InputAction.IA_POINTER, hoverText: 'Water', maxDistance: POINTER_MAX_DIST } },
+    () => {
+      // Player-based reach gate — maxDistance above is camera-based and must stay
+      // generous for mobile; this is the real "how far can I water from" limit.
+      const plantPos  = Transform.getOrNull(entity)?.position
+      const playerPos = Transform.getOrNull(engine.PlayerEntity)?.position
+      if (plantPos && playerPos) {
+        const dx = playerPos.x - plantPos.x
+        const dz = playerPos.z - plantPos.z
+        if (dx * dx + dz * dz > MAX_REACH_M * MAX_REACH_M) {
+          const now = Date.now()
+          if (now - lastBlockedClickMs > BLOCKED_CLICK_COOLDOWN_MS) {
+            lastBlockedClickMs = now
+            showToast('Step a little closer to water this plant', 2_000)
+          }
+          return
+        }
+      }
+      waterPlant(entity, info.plantName)
+    },
   )
   pointerEventsSystem.onPointerHoverEnter({ entity: info.clickTarget }, () => {
     if (!PlantData.get(entity).isWatered) playHoverSound()
@@ -619,21 +646,9 @@ function emoteWatchSystem(): void {
   }
 }
 
-function triggerWateringEmote(plantEntity: Entity) {
-  const plantPos  = Transform.getOrNull(plantEntity)?.position
-  const playerPos = Transform.getOrNull(engine.PlayerEntity)?.position
-  if (plantPos && playerPos) {
-    const dx  = playerPos.x - plantPos.x
-    const dz  = playerPos.z - plantPos.z
-    const len = Math.sqrt(dx * dx + dz * dz)
-    const nx  = len > 0.001 ? dx / len : 0
-    const nz  = len > 0.001 ? dz / len : 1
-    movePlayerTo({
-      newRelativePosition: { x: plantPos.x + nx * WATER_DISTANCE, y: playerPos.y, z: plantPos.z + nz * WATER_DISTANCE },
-      avatarTarget: plantPos,
-    })
-  }
-
+function triggerWateringEmote(_plantEntity: Entity) {
+  // movePlayerTo retired (Clean The Club precedent) — teleport-stepping players
+  // to the plant put them inside geometry; the emote now plays where they stand.
   emoteActive = true
 
   timers.setTimeout(() => {
@@ -878,21 +893,39 @@ function setupPlant(plantName: string) {
       ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
   }
 
-  // Spawn the UnhealthyRose model as a child — sits exactly on top of the plant
+  // Neutral anchor mirroring the plant's transform. Runtime children (rose, drop,
+  // labels, clickbox) parent to THIS instead of the plant entity: on the mobile
+  // client, VisibilityComponent on a parent hides all its children too
+  // (godot-explorer #1888 — reported against this very scene), so hiding the plant
+  // was hiding every rose, drop and label with it. The anchor never gets a
+  // VisibilityComponent, so its children are safe under either semantics.
+  const plantTf = Transform.getOrNull(entity)
+  const anchor  = engine.addEntity()
+  Transform.create(anchor, {
+    position: plantTf ? { ...plantTf.position } : { x: 0, y: 0, z: 0 },
+    rotation: plantTf ? { ...plantTf.rotation } : { x: 0, y: 0, z: 0, w: 1 },
+    scale:    plantTf ? { ...plantTf.scale }    : { x: 1, y: 1, z: 1 },
+    parent:   plantTf?.parent,
+  })
+
+  // Spawn the UnhealthyRose model on the anchor — sits exactly on top of the plant
   const roseEntity = engine.addEntity()
-  Transform.create(roseEntity, { parent: entity })
+  Transform.create(roseEntity, { parent: anchor })
   GltfContainer.create(roseEntity, { src: UNHEALTHY_ROSE_SRC })
   roseMap.set(entity, roseEntity)
 
-  // Start hidden — animator init (deferred below) will set visibility correctly
+  // Fail-open: show the unwatered rose immediately so plants are visible and
+  // clickable even if the deferred animator init below never runs (e.g. the
+  // client kills or stalls the scene runtime mid-startup). The deferred init
+  // corrects visibility for plants the server reports as watered.
   hidePlant(entity)
-  hideRose(entity)
+  showRose(entity)
 
   let clickTarget:    Entity
   let clickboxEntity: Entity | null = null
   if (useClickbox) {
     const clickBox = engine.addEntity()
-    Transform.create(clickBox, { position: { x: 0, y: CLICKBOX_Y, z: 0 }, scale: CLICKBOX_SCALE, parent: entity })
+    Transform.create(clickBox, { position: { x: 0, y: CLICKBOX_Y, z: 0 }, scale: CLICKBOX_SCALE, parent: anchor })
     MeshCollider.setBox(clickBox, ColliderLayer.CL_POINTER)
     clickTarget    = clickBox
     clickboxEntity = clickBox
@@ -900,14 +933,14 @@ function setupPlant(plantName: string) {
     clickTarget = entity
   }
 
-  plantRegistry.set(entity, { clickTarget, plantName, clickboxEntity })
+  plantRegistry.set(entity, { clickTarget, plantName, clickboxEntity, anchor })
   plantNameToEntity.set(plantName, entity)
   entityPlantId.set(entity, plantName)
   enablePlantClick(entity)
 
   // ── Water drop indicator ─────────────────────────────────────
   const dropEnt = engine.addEntity()
-  Transform.create(dropEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: entity })
+  Transform.create(dropEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: anchor })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
   Billboard.create(dropEnt, { billboardMode: BillboardMode.BM_Y })
   waterDropMap.set(entity, dropEnt)
@@ -915,7 +948,7 @@ function setupPlant(plantName: string) {
 
   // "Watered by" label — hidden until plant is watered
   const wateredByLabel = engine.addEntity()
-  Transform.create(wateredByLabel, { position: { x: 0, y: WATERED_BY_Y, z: 0 }, parent: entity })
+  Transform.create(wateredByLabel, { position: { x: 0, y: WATERED_BY_Y, z: 0 }, parent: anchor })
   TextShape.create(wateredByLabel, { text: '', fontSize: FONT_WATERED_BY, textColor: WATERED_BY_COLOR, textWrapping: false })
   Billboard.create(wateredByLabel, { billboardMode: BillboardMode.BM_Y })
   wateredByLabelMap.set(entity, wateredByLabel)
@@ -1040,6 +1073,7 @@ export function setupWateringSystem(): void {
   // Deferred animator setup — ensures GltfContainers have loaded
   timers.setTimeout(() => {
     for (const name of PLANT_NAMES) {
+      try {
       const entity = engine.getEntityOrNullByName(name)
       if (!entity) continue
       const isWatered = PlantData.getOrNull(entity)?.isWatered ?? false
@@ -1074,6 +1108,10 @@ export function setupWateringSystem(): void {
       } else {
         hidePlant(entity)
         showRose(entity)
+      }
+      } catch (err) {
+        // One plant failing (e.g. GLB not loaded yet) must not abort init for the rest
+        console.log(`[WateringSystem] Deferred init failed for ${name}:`, err)
       }
     }
   }, ANIMATOR_INIT_DELAY_MS)
@@ -1435,7 +1473,7 @@ export function setUseClickbox(val: boolean): void {
     PointerEvents.deleteFrom(info.clickTarget)
     if (val) {
       const clickBox = engine.addEntity()
-      Transform.create(clickBox, { position: { x: 0, y: CLICKBOX_Y, z: 0 }, scale: CLICKBOX_SCALE, parent: plantEntity })
+      Transform.create(clickBox, { position: { x: 0, y: CLICKBOX_Y, z: 0 }, scale: CLICKBOX_SCALE, parent: info.anchor })
       MeshCollider.setBox(clickBox, ColliderLayer.CL_POINTER)
       info.clickTarget    = clickBox
       info.clickboxEntity = clickBox
