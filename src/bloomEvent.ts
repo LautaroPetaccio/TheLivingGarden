@@ -53,6 +53,11 @@ let petalLoopGen  = 0
 // Shared intensity state
 // ---------------------------------------------------------------
 let bloomIntensity: 0|1|2 = 0
+// Phase 6: the bloom's FX budget (from bloom scale) caps every intensity call, so a
+// solo bloom can never reach the full spectacle; the variant flavours the timeline.
+let bloomFxCap: 0|1|2 = 2
+let bloomVariantId = 'classic'
+export function getBloomVariantId(): string { return bloomVariantId }
 
 // ---------------------------------------------------------------
 // Internal helpers
@@ -63,8 +68,9 @@ function jitter(ms: number): number {
   return Math.max(0, ms + (Math.random() * 2000 - 1000))
 }
 
-/** Set intensity — drives audio, lampposts, and accent FX. */
-function setIntensity(level: 0|1|2): void {
+/** Set intensity — drives audio, lampposts, and accent FX. Capped by the bloom's FX budget. */
+function setIntensity(requested: 0|1|2): void {
+  const level = (requested > bloomFxCap ? bloomFxCap : requested) as 0|1|2
   bloomIntensity = level
   setBloomAudioIntensity(level)
   setLamppostBloomIntensity(level)
@@ -236,10 +242,14 @@ export function cancelPreBloom(stopFfx = false): void {
 //   540–600 s  → intensity 2  (finale)
 // ---------------------------------------------------------------
 
-export function startBloomPhases(): void {
+/** @param fxLevel  0 = quiet solo bloom, 1 = gentle, 2 = full spectacle (bloomFxLevel of the bloom scale)
+ *  @param variantId BLOOM_VARIANTS id — 'classic' or a rare flavour */
+export function startBloomPhases(fxLevel: 0|1|2 = 2, variantId = 'classic'): void {
   cancelPreBloom()          // cancel pre-bloom timers + loops
   bloomGen++
   const gen = bloomGen
+  bloomFxCap     = fxLevel
+  bloomVariantId = variantId
 
   function after(sec: number, fn: () => void): void {
     timers.setTimeout(() => {
@@ -248,15 +258,50 @@ export function startBloomPhases(): void {
     }, jitter(sec * 1000))
   }
 
-  // ── Visual baseline ──────────────────────────────────────────
+  // ── Visual baseline (every bloom, even the quiet one) ────────
   setGroundLightsBloom(true)
   setFairyLightsBloom(true)
   startFireflies()
+
+  // ── Quiet solo bloom: lights, one soft petal rain, a ripple — no shockwaves ──
+  // GDD §3 pillar 3: "solo care earns a quiet bloom, group care the full spectacle".
+  if (fxLevel === 0) {
+    setIntensity(0)
+    stopLoops()
+    startLoops()
+    after( 5, () => triggerGroundRipple(BLOOM_CENTER))
+    after(20, () => startPetalRain())
+    after(150, () => { triggerGroundRipple(BLOOM_CENTER); startPetalRain() })
+    after(235, () => endBloomSparkles())
+    return
+  }
+
+  // ── Gentle bloom (2–3 gardeners): one opening burst, one petal wave, capped at 1 ──
+  if (fxLevel === 1) {
+    setIntensity(1)
+    triggerBloomShockwave()
+    triggerGroundLightBurst()
+    stopLoops()
+    startLoops()
+    after( 80, () => setIntensity(0))
+    after(150, () => { setIntensity(1); triggerBloomShockwave(); startPetalRain() })
+    after(230, () => { triggerBloomShockwave(); timers.setTimeout(triggerBloomShockwave, jitter(1200)) })
+    after(235, () => endBloomSparkles())
+    return
+  }
+
+  // ── Full spectacle ───────────────────────────────────────────
+  const moonlit = variantId === 'moonlit'
 
   // ── Opening burst ────────────────────────────────────────────
   setIntensity(2)
   triggerBloomShockwave()
   triggerGroundLightBurst()
+  if (moonlit) {
+    // Rare variant: a double-crack opening and petals from the first second
+    timers.setTimeout(triggerBloomShockwave, jitter(900))
+    startPetalRain()
+  }
 
   // Restart loops for bloom phase
   stopLoops()
@@ -283,8 +328,10 @@ after(220, () => {
   triggerGroundLightBurst()
 })
 after(230, () => {
-  const waves = [0, 800, 1600, 2400]
+  // Finale: the rare variant "erupts over the whole garden" — twice the waves
+  const waves = moonlit ? [0, 500, 1000, 1500, 2000, 2500, 3000, 3500] : [0, 800, 1600, 2400]
   waves.forEach(d => timers.setTimeout(triggerBloomShockwave, jitter(d)))
+  if (moonlit) { startPetalRain(); timers.setTimeout(startPetalRain, 700) }
 })
 
 after(235, () => endBloomSparkles())

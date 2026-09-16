@@ -250,6 +250,17 @@ function createPool(
 
 let bloomPool:   BloomSparkleState[] = []
 
+/** Phase 6b — retint the bloom sparkle pool for the active bloom variant.
+ *  Call before triggerBloomSparkles; the pooled materials are mutated in place. */
+export function setBloomSparklePalette(p: { albedo: { r: number; g: number; b: number }; emissive: { r: number; g: number; b: number } }): void {
+  for (const s of bloomPool) {
+    const m = Material.getMutableOrNull(s.entity)?.material
+    if (!m || m.$case !== 'pbr') continue
+    m.pbr.albedoColor   = { ...p.albedo, a: m.pbr.albedoColor?.a ?? 1 }
+    m.pbr.emissiveColor = { ...p.emissive }
+  }
+}
+
 // ── Tribute pool — per-watering travel-to-centre effect ──────────
 const TRIBUTE_POOL_SIZE   = 48    // 6 sparkles × 8 possible in-flight
 const TRIBUTE_COUNT       = 6     // sparkles per watering

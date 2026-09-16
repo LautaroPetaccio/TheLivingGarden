@@ -84,9 +84,9 @@ export const room = registerMessages({
    *  decay scales with gardeners present, so the client must not guess it. */
   plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number, tier: Schemas.Number }),
   /** Broadcast when the bloom threshold is reached.
-   *  scale: thresholdAtFire / BLOOM_THRESHOLD (0–1] — 1 = full-garden bloom,
-   *  below 1 = the smaller, quieter scaled bloom (v2). */
-  bloomTriggered:   Schemas.Map({ scale: Schemas.Number }),
+   *  scale: bloomScaleFor(gardeners) (0–1] — 1 = full-garden bloom, below 1 = the
+   *  smaller, quieter scaled bloom. variant: BLOOM_VARIANTS id rolled by the server (v2 Phase 6). */
+  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String }),
   /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
    *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),

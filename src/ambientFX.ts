@@ -179,6 +179,28 @@ function setupFireflies() {
 }
 
 // =============================================================
+// Phase 6b — bloom variant palette
+// Retints the pooled bloom FX (shockwaves, ripples, fireflies) in place;
+// ambient motes keep their warm look so the garden itself doesn't change.
+// =============================================================
+
+type RGB = { r: number; g: number; b: number }
+
+function tintEntity(entity: Entity, albedo: RGB, emissive: RGB, vary = 0): void {
+  const m = Material.getMutableOrNull(entity)?.material
+  if (!m || m.$case !== 'pbr') return
+  const k = 1 - vary + rnd(0, vary * 2)   // per-entity brightness variation (fireflies)
+  m.pbr.albedoColor   = { r: albedo.r * k, g: albedo.g * k, b: albedo.b * k, a: m.pbr.albedoColor?.a ?? 1 }
+  m.pbr.emissiveColor = { r: emissive.r * k, g: emissive.g * k, b: emissive.b * k }
+}
+
+export function setAmbientPalette(p: { albedo: RGB; emissive: RGB }): void {
+  for (const r of shockRings)  tintEntity(r.entity, p.albedo, p.emissive)
+  for (const r of rippleSlots) tintEntity(r.entity, p.albedo, p.emissive)
+  for (const f of fireflies)   tintEntity(f.entity, p.albedo, p.emissive, 0.12)
+}
+
+// =============================================================
 // SECTION 4 — Ground ripple on watering
 // Uses a fixed pool of 3 entities — avoids entity creation/destruction per trigger.
 // =============================================================

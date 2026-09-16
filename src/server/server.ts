@@ -32,6 +32,8 @@ import {
   TRIBUTE_MILESTONE,
   TRIBUTE_PLOTS,
   FOUNDING_TRIBUTES,
+  rollBloomVariant,
+  bloomVariantById,
   seedSpawnCount,
   seedRareChance,
   SEED_LIFETIME_MS,
@@ -58,7 +60,8 @@ const SYNC_RATE_MS    = 5_000                        // min ms between full sync
 let   bloomActive      = false
 let   bloomStartedAt:  number | null = null   // ms timestamp when current bloom began
 let   countdownPaused  = false
-let   bloomScale       = 1                    // thresholdAtFire / BLOOM_THRESHOLD of the active bloom
+let   bloomScale       = 1                    // bloomScaleFor(gardeners) of the active bloom
+let   bloomVariant     = 'classic'            // BLOOM_VARIANTS id of the active bloom (Phase 6)
 
 
 // ── Leaderboard ──────────────────────────────────────────────
@@ -437,8 +440,10 @@ function triggerBloom(): void {
   bloomActive    = true
   bloomStartedAt = Date.now()
   bloomScale     = bloomScaleFor(knownPlayers.size)
-  console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)})`)
-  room.send('bloomTriggered', { scale: bloomScale })
+  const variant  = rollBloomVariant(bloomScale)
+  bloomVariant   = variant.id
+  console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name})`)
+  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant })
   spawnBloomSeeds()
   setTimeout(() => executeTask(resetGarden), BLOOM_RESET_DELAY_MS)
 }
@@ -468,7 +473,7 @@ function sendSeed(seed: SeedRecord, to?: string[]): void {
 /** Roll and broadcast this bloom's seed drop — yield and rarity scale with bloom size. */
 function spawnBloomSeeds(): void {
   const count      = seedSpawnCount(bloomScale)
-  const rareChance = seedRareChance(bloomScale)
+  const rareChance = Math.min(1, seedRareChance(bloomScale) * bloomVariantById(bloomVariant).rareSeedMult)
   const now        = Date.now()
   const batch: SeedRecord[] = []
   for (let i = 0; i < count; i++) {
@@ -831,7 +836,7 @@ function playerJoinSystem(): void {
       await loadPouch(address)
       sendPouch(address)
       // Re-send bloom state to players who join while it is already active
-      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
+      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
@@ -1160,7 +1165,7 @@ export async function server(): Promise<void> {
     sendThreshold([address])
     await loadPouch(address)
     sendPouch(address)
-    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
+    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)

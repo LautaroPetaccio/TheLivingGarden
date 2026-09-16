@@ -120,6 +120,41 @@ export const FLOWERS = {
   rare:   ['Moonbloom', 'Sunflare'],
 } as const
 
+// ── v2 Phase 6: bloom variants + scaled-bloom FX (GDD §3 step 3, §5 "shareable moment") ──
+// The variant SYSTEM ships now; the catalog grows later and odds can be rotated
+// every few weeks without a new build of anything but this table (GDD §9).
+export interface RGB { r: number; g: number; b: number }
+export interface BloomPalette { albedo: RGB; emissive: RGB }   // sparkles, shockwaves, ripples, fireflies
+export interface BloomVariant {
+  id: string
+  name: string
+  weight: number        // relative odds among eligible variants
+  minScale: number      // bloom scale required (bloomScaleFor: 1 gardener 0.25 … 4+ = 1)
+  rareSeedMult: number  // multiplies the per-seed rare chance for this bloom
+  palette: BloomPalette
+}
+export const BLOOM_VARIANTS: ReadonlyArray<BloomVariant> = [
+  { id: 'classic', name: 'Bloom',         weight: 9, minScale: 0,    rareSeedMult: 1,
+    palette: { albedo: { r: 1.0, g: 0.95, b: 0.78 }, emissive: { r: 1.0, g: 0.88, b: 0.52 } } },   // warm gold (v1 look)
+  { id: 'moonlit', name: 'Moonlit Bloom', weight: 1, minScale: 0.75, rareSeedMult: 2,             // TUNING — rare; needs 3+ gardeners
+    palette: { albedo: { r: 0.85, g: 0.92, b: 1.0 }, emissive: { r: 0.55, g: 0.75, b: 1.0 } } },   // cool moonlight
+]
+export function bloomVariantById(id: string): BloomVariant {
+  return BLOOM_VARIANTS.find(v => v.id === id) ?? BLOOM_VARIANTS[0]
+}
+/** Weighted roll among variants eligible for this bloom's scale. */
+export function rollBloomVariant(bloomScale: number): BloomVariant {
+  const eligible = BLOOM_VARIANTS.filter(v => bloomScale >= v.minScale)
+  const total = eligible.reduce((s, v) => s + v.weight, 0)
+  let r = Math.random() * total
+  for (const v of eligible) { r -= v.weight; if (r <= 0) return v }
+  return eligible[eligible.length - 1] ?? BLOOM_VARIANTS[0]
+}
+/** FX budget for a bloom of `scale`: 0 = quiet solo bloom, 1 = gentle (2–3 gardeners), 2 = full spectacle. */
+export function bloomFxLevel(scale: number): 0 | 1 | 2 {
+  return scale >= 0.99 ? 2 : scale >= 0.5 ? 1 : 0
+}
+
 // ── v2 Phase 5: boards + milestone flair (GDD §4.3 hook 2, §5 recognition) ──
 /** Lifetime-water thresholds for the flair tiers: sprout → flower → golden flower. */
 export const FLAIR_TIERS = [100, 500, 1000] as const   // TUNING — GDD "~100 / 500 / 1,000"

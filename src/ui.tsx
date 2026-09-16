@@ -86,7 +86,8 @@ export function hidePersistent(): void { persistVisible = false }
 // ---------------------------------------------------------------
 
 export function showBannerIdle(): void  { bannerState = 'idle' }
-export function showBannerBloom(): void { bannerState = 'bloom'; bannerVisible = true; animateBannerIn() }
+let bannerBloomLabel = ''   // Phase 6: variant / scale-aware headline; '' = default
+export function showBannerBloom(label = ''): void { bannerBloomLabel = label; bannerState = 'bloom'; bannerVisible = true; animateBannerIn() }
 
 export function showBannerCountdown(countdown: string): void {
   const wasCountdown = bannerState === 'countdown'
@@ -228,7 +229,7 @@ function sideFillColor(): Color4 {
 }
 
 function bannerLine1(): string {
-  if (bannerState === 'bloom')     return 'The Garden is in Full Bloom!'
+  if (bannerState === 'bloom')     return bannerBloomLabel || 'The Garden is in Full Bloom!'
   if (bannerState === 'countdown') return `Keep garden health above 80% for ${bannerCountdown} to wake the big bloom`
   return 'Keep garden health above 80% to wake the big bloom'
 }

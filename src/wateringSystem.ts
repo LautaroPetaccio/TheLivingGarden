@@ -43,7 +43,9 @@ import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSyst
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { flairTag } from './shared/config'
+import { flairTag, bloomVariantById, bloomFxLevel } from './shared/config'
+import { setBloomSparklePalette } from './sparkleSystem'
+import { setAmbientPalette } from './ambientFX'
 import { setupLeaderboardBoards, updateLeaderboardDisplay, BoardEntry }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
 import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
@@ -81,6 +83,8 @@ let bloomThreshold = BLOOM_THRESHOLD
 // Stored here for the FX phase to consume.
 let currentBloomScale = 1
 export function getCurrentBloomScale(): number { return currentBloomScale }
+let currentBloomVariant = 'classic'   // BLOOM_VARIANTS id of the active bloom (Phase 6)
+export function getCurrentBloomVariant(): string { return currentBloomVariant }
 
 // ── Animation clip names (must match GLB exactly) ─────────────
 const ANIM_DROOPY_STATE  = 'CloseIdle'  // droopy idle loop
@@ -1070,8 +1074,9 @@ export function setupWateringSystem(): void {
       }
       triggerBloomSparkles(positions)
 
-      // All VFX, audio, petals, and lights driven by intensity system
-      startBloomPhases()
+      // All VFX, audio, petals, and lights driven by intensity system —
+      // budget from bloom scale (solo = quiet bloom), flavour from the variant.
+      startBloomPhases(bloomFxLevel(currentBloomScale), currentBloomVariant)
       bloomActive = true
     },
   })
@@ -1295,10 +1300,23 @@ export function setupWateringSystem(): void {
 
   room.onMessage('bloomTriggered', (data) => {
     currentBloomScale = typeof data?.scale === 'number' && data.scale > 0 ? Math.min(data.scale, 1) : 1
+    currentBloomVariant = data?.variant || 'classic'
+    const variant = bloomVariantById(currentBloomVariant)
+    if (!isBloomActive() && variant.id !== 'classic') {
+      showToast(`A ${variant.name}! Rare seeds fall thicker tonight`, 6_000, false)
+    }
+    // Phase 6b: the variant's palette on every pooled bloom FX, before any of it fires
+    setBloomSparklePalette(variant.palette)
+    setAmbientPalette(variant.palette)
+    const fxLevel = bloomFxLevel(currentBloomScale)
+    const bannerLabel = variant.id !== 'classic' ? `A ${variant.name}!`
+                      : fxLevel === 0 ? 'A quiet bloom has woken'
+                      : fxLevel === 1 ? 'The Garden is blooming'
+                      : 'The Garden is in Full Bloom!'
     stopWateringEmote()
     stopPreBloomTicker()   // stop immediately — prevents stale "1s" from being re-written
     resetClientSustain()   // sustain complete — bloom is firing
-    showBannerBloom()      // switch banner from countdown → bloom before visual effects ramp up
+    showBannerBloom(bannerLabel)   // switch banner from countdown → bloom before visual effects ramp up
     for (const e of bloomCountdownLabels) TextShape.getMutable(e).text = ''  // clear countdown before reset ticker starts
     startBloomResetTicker()  // begin counting down to garden reset (phase 3 label)
     if (!isBloomActive()) {
@@ -1326,6 +1344,8 @@ export function setupWateringSystem(): void {
     countdownUnlocked = false   // full cycle reset — labels and banner return to idle
     resetClientSustain()
     stopContributorCycle()
+    setBloomSparklePalette(bloomVariantById('classic').palette)   // back to the warm default for the next cycle
+    setAmbientPalette(bloomVariantById('classic').palette)
     startBloomFlower([...bloomContributors])  // attach hand flower to contributors — must run BEFORE clear()
     bloomContributors.clear()
     resetAllPlants()         // stops bloom, resets visuals + audio via endBloom()
