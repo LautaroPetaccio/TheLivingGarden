@@ -27,7 +27,7 @@ import {
   BLOOM_WINDOWS,
   scaledBloomThreshold,
   seedSpawnCount,
-  SEED_RARE_CHANCE,
+  seedRareChance,
   SEED_LIFETIME_MS,
   GARDEN_BOUNDS,
 } from '../shared/config'
@@ -300,46 +300,51 @@ function triggerBloom(): void {
 // ---------------------------------------------------------------
 
 interface SeedRecord {
-  id:        string
-  x:         number
-  z:         number
-  rare:      boolean
-  spawnedAt: number
+  id:         string
+  x:          number
+  z:          number
+  rare:       boolean
+  spawnedAt:  number
+  gatheredBy: Set<string>   // addresses that already collected this seed (per-player pickup)
 }
 
-const activeSeeds = new Map<string, SeedRecord>()   // seedId → record (ungathered only)
+const activeSeeds = new Map<string, SeedRecord>()   // seedId → record, until lifetime expiry
 let   seedCounter = 0
 
-function seedsJson(seeds: SeedRecord[]): string {
-  return JSON.stringify(seeds)
+/** Broadcast one seed (or send it to a specific joining player). */
+function sendSeed(seed: SeedRecord, to?: string[]): void {
+  const payload = { id: seed.id, x: seed.x, z: seed.z, rare: seed.rare, spawnedAt: seed.spawnedAt }
+  room.send('seedSpawned', payload, to ? { to } : undefined)
 }
 
-/** Roll and broadcast this bloom's seed drop — count scales with gardeners present. */
+/** Roll and broadcast this bloom's seed drop — yield and rarity scale with bloom size. */
 function spawnBloomSeeds(): void {
-  const count = seedSpawnCount(knownPlayers.size)
-  const now   = Date.now()
+  const count      = seedSpawnCount(bloomScale)
+  const rareChance = seedRareChance(bloomScale)
+  const now        = Date.now()
   const batch: SeedRecord[] = []
   for (let i = 0; i < count; i++) {
     const seed: SeedRecord = {
-      id:        `seed_${now}_${seedCounter++}`,
-      x:         GARDEN_BOUNDS.xMin + Math.random() * (GARDEN_BOUNDS.xMax - GARDEN_BOUNDS.xMin),
-      z:         GARDEN_BOUNDS.zMin + Math.random() * (GARDEN_BOUNDS.zMax - GARDEN_BOUNDS.zMin),
-      rare:      Math.random() < SEED_RARE_CHANCE,
-      spawnedAt: now,
+      id:         `seed_${now}_${seedCounter++}`,
+      x:          GARDEN_BOUNDS.xMin + Math.random() * (GARDEN_BOUNDS.xMax - GARDEN_BOUNDS.xMin),
+      z:          GARDEN_BOUNDS.zMin + Math.random() * (GARDEN_BOUNDS.zMax - GARDEN_BOUNDS.zMin),
+      rare:       Math.random() < rareChance,
+      spawnedAt:  now,
+      gatheredBy: new Set(),
     }
     batch.push(seed)
     activeSeeds.set(seed.id, seed)
     // Ungathered seeds evaporate — clients despawn on their own matching timer
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
+    sendSeed(seed)
   }
-  room.send('seedsSpawned', { seedsJson: seedsJson(batch) })
-  console.log(`[Server] Spawned ${count} bloom seeds (${batch.filter(s => s.rare).length} rare)`)
+  console.log(`[Server] Spawned ${count} bloom seeds (${batch.filter(s => s.rare).length} rare, scale ${bloomScale.toFixed(2)})`)
 }
 
-/** Still-gatherable seeds — for players who join or resync mid-bloom. */
-function remainingSeeds(): SeedRecord[] {
+/** Seeds this player can still collect — for joins/resyncs mid-bloom. */
+function remainingSeeds(address: string): SeedRecord[] {
   const cutoff = Date.now() - SEED_LIFETIME_MS
-  return [...activeSeeds.values()].filter(s => s.spawnedAt > cutoff)
+  return [...activeSeeds.values()].filter(s => s.spawnedAt > cutoff && !s.gatheredBy.has(address))
 }
 
 interface SeedPouch { normal: number; rare: number }
@@ -497,8 +502,7 @@ function playerJoinSystem(): void {
       sendThreshold([address])
       // Re-send bloom state to players who join while it is already active
       if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
-      const seeds = remainingSeeds()
-      if (seeds.length > 0) room.send('seedsSpawned', { seedsJson: seedsJson(seeds) }, { to: [address] })
+      for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
@@ -630,12 +634,14 @@ export async function server(): Promise<void> {
   // ── Message: gatherSeed (v2) ────────────────────────────────
   onRoomMessage<{ seedId: string }>('gatherSeed', async (data, playerAddress) => {
     const seed = activeSeeds.get(data.seedId)
-    if (!seed) return   // already gathered, expired, or never existed — client despawns via broadcast/lifetime
-    // First-come wins; delete synchronously before any await so a concurrent
-    // gather of the same seed cannot double-award (same pattern as waterPlant).
+    if (!seed) return   // expired or never existed — client despawns on its own lifetime timer
+    // Per-player pickup: each player may collect each seed once; the seed stays for
+    // everyone else. Mark synchronously before any await so a duplicate request
+    // from the same client cannot double-award (same pattern as waterPlant).
     // NOTE (anticheat, later round): no server-side distance check yet — the
     // server does not trust position here; acceptable while seeds are un-tradeable.
-    activeSeeds.delete(seed.id)
+    if (seed.gatheredBy.has(playerAddress)) return
+    seed.gatheredBy.add(playerAddress)
 
     const displayName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
     // Fail-open: pouch persistence failure must not block the broadcast
@@ -648,7 +654,17 @@ export async function server(): Promise<void> {
     } catch (err) {
       console.error('[Server] gatherSeed: failed to persist pouch:', err)
     }
-    room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rare: seed.rare })
+    // Targeted, not broadcast — only the gatherer's client despawns it
+    room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rare: seed.rare }, { to: [playerAddress] })
+  })
+
+  // ── Message: adminSpawnSeed (test panel) ────────────────────
+  onRoomMessage<{ x: number; z: number; rare: boolean }>('adminSpawnSeed', async (data, address) => {
+    const seed: SeedRecord = { id: `admin_${Date.now()}`, x: data.x, z: data.z, rare: data.rare, spawnedAt: Date.now(), gatheredBy: new Set() }
+    activeSeeds.set(seed.id, seed)
+    setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
+    sendSeed(seed)
+    console.log(`[Server] adminSpawnSeed from ${address.slice(0, 8)} → ${seed.id} at (${data.x.toFixed(1)}, ${data.z.toFixed(1)})`)
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
@@ -703,8 +719,7 @@ export async function server(): Promise<void> {
     broadcastLeaderboard([address])
     sendThreshold([address])
     if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
-    const seeds = remainingSeeds()
-    if (seeds.length > 0) room.send('seedsSpawned', { seedsJson: seedsJson(seeds) }, { to: [address] })
+    for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 

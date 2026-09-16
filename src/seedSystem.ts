@@ -10,8 +10,8 @@
 // rare, slightly larger + pulsing). Real seed art arrives in the
 // FX/variant phase.
 //
-// Server communication:
-//   receive ←  seedsSpawned  { seedsJson: [{id,x,z,rare,spawnedAt}] }
+// Server communication (one message per seed — see messages.ts registry note):
+//   receive ←  seedSpawned   { id, x, z, rare, spawnedAt }
 //   send    →  gatherSeed    { seedId }
 //   receive ←  seedGathered  { seedId, by, byAddress, rare }
 //
@@ -29,7 +29,6 @@ import {
 import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { clockSync } from './shared/clockSync'
 import {
   SEED_FALL_MS,
   SEED_LIFETIME_MS,
@@ -43,13 +42,19 @@ import { showToast } from './notifications'
 // Config (greybox visuals — replaced in the FX phase)
 // ---------------------------------------------------------------
 
-const SEED_SCALE_NORMAL = 0.22
-const SEED_SCALE_RARE   = 0.30
-const SEED_REST_Y       = 0.25        // resting height above the garden floor
+// `let` — live-tunable from the test panel admin controls (adminScaleSeeds / adminShiftSeedHeight)
+let SEED_SCALE_NORMAL = 0.45          // greybox: oversized for visibility, tune down with real art
+let SEED_SCALE_RARE   = 0.6
+let SEED_REST_Y       = 1.1           // rest at ~chest height so plants/decor don't hide seeds
 const SEED_BOB_AMPL     = 0.06        // idle bob amplitude (m)
 const SEED_BOB_SPEED    = 2.0         // idle bob speed (rad/s)
 const SEED_SWAY_AMPL    = 0.35        // horizontal sway while falling (m)
-const DRIFT_SPEED       = 2.2         // m/s toward a nearby player
+// Chase speed scales with proximity: gentle drift at the leash edge, then it
+// darts into you at close range — so walking THROUGH a seed collects it even
+// at a run, while the far behaviour still reads as "drifts gently toward you".
+const DRIFT_SPEED_MIN   = 2.5         // m/s at SEED_GATHER_RADIUS
+const DRIFT_SPEED_MAX   = 9.0         // m/s when nearly touching (outruns a running avatar)
+const CHEST_HEIGHT      = 0.9         // m above the avatar Transform origin (origin = feet)
 const GATHER_RETRY_MS   = 3_000       // re-allow a gather request if no reply
 const COLOR_NORMAL      = Color4.create(0.55, 0.95, 0.65, 1)
 const COLOR_RARE        = Color4.create(1.0, 0.82, 0.25, 1)
@@ -79,11 +84,15 @@ const seeds = new Map<string, Seed>()   // seedId → live seed
 // ---------------------------------------------------------------
 
 function spawnSeed(rec: { id: string; x: number; z: number; rare: boolean; spawnedAt: number }): void {
-  if (seeds.has(rec.id)) return   // duplicate seedsSpawned (e.g. fullSync resend)
+  if (seeds.has(rec.id)) return   // duplicate seedSpawned (e.g. fullSync resend)
 
-  const localSpawn = clockSync.toLocalTime(rec.spawnedAt)
+  // Fall timing runs off the CLIENT clock from the moment the message arrives —
+  // NOT clockSync. The synced server time is unreliable in this scene (Schemas.Number
+  // corrupts 13-digit timestamps → tens-of-seconds offset), which would otherwise
+  // launch the seed above the canopy or despawn it instantly. Seeds are transient,
+  // so a fresh local fall on arrival is correct and needs no cross-client sync.
+  const localSpawn = Date.now()
   const despawnAt  = localSpawn + SEED_LIFETIME_MS
-  if (despawnAt <= Date.now()) return   // already evaporated (late join)
 
   const entity = engine.addEntity()
   const scale  = rec.rare ? SEED_SCALE_RARE : SEED_SCALE_NORMAL
@@ -110,6 +119,7 @@ function spawnSeed(rec: { id: string; x: number; z: number; rare: boolean; spawn
     drifting:     false,
     gatherSentAt: 0,
   })
+  console.log(`[Seeds] spawned ${rec.id} rare=${rec.rare} at (${rec.x.toFixed(1)}, ${SEED_SPAWN_HEIGHT}, ${rec.z.toFixed(1)}) → rest y=${SEED_REST_Y}`)
 }
 
 function despawnSeed(id: string): void {
@@ -123,6 +133,53 @@ function despawnSeed(id: string): void {
 export function clearAllSeeds(): void {
   for (const id of [...seeds.keys()]) despawnSeed(id)
 }
+
+// ---------------------------------------------------------------
+// Admin / test-panel controls (dev only)
+// ---------------------------------------------------------------
+
+/** Spawn a seed 4 m in front of the player (far enough to watch it fall) with NO network round-trip —
+ *  isolates "can the client render a seed" from "does the message arrive". */
+export function adminSpawnLocalSeed(rare = false): void {
+  const p = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!p) { console.log('[Seeds][admin] no player transform yet'); return }
+  spawnSeed({ id: `local_${Date.now()}`, x: p.x + 4, z: p.z, rare, spawnedAt: Date.now() })
+}
+
+/** Ask the server to spawn one seed near the player through the REAL seedSpawned path. */
+export function adminRequestServerSeed(rare = false): void {
+  const p = Transform.getOrNull(engine.PlayerEntity)?.position ?? { x: 8, y: 0, z: 12 }
+  console.log('[Seeds][admin] requesting server seed')
+  room.send('adminSpawnSeed', { x: p.x + 4, z: p.z, rare })
+}
+
+/** Multiply seed scale (applies to live seeds immediately). */
+export function adminScaleSeeds(mult: number): void {
+  SEED_SCALE_NORMAL *= mult
+  SEED_SCALE_RARE   *= mult
+  for (const s of seeds.values()) {
+    const k = s.rare ? SEED_SCALE_RARE : SEED_SCALE_NORMAL
+    Transform.getMutable(s.entity).scale = { x: k, y: k, z: k }
+  }
+  console.log(`[Seeds][admin] scale normal=${SEED_SCALE_NORMAL.toFixed(2)} rare=${SEED_SCALE_RARE.toFixed(2)}`)
+}
+
+/** Raise/lower the resting height (live seeds follow on their next bob frame). */
+export function adminShiftSeedHeight(delta: number): void {
+  SEED_REST_Y = Math.max(0.1, SEED_REST_Y + delta)
+  console.log(`[Seeds][admin] rest y=${SEED_REST_Y.toFixed(2)}`)
+}
+
+/** Log every live seed with its current world position. */
+export function adminListSeeds(): void {
+  console.log(`[Seeds][admin] ${seeds.size} live · seedSpawned listeners=${room.listenerCount('seedSpawned')}`)
+  for (const s of seeds.values()) {
+    const p = Transform.getOrNull(s.entity)?.position
+    console.log(`  ${s.id} rare=${s.rare} at (${p?.x.toFixed(1)}, ${p?.y.toFixed(1)}, ${p?.z.toFixed(1)}) drifting=${s.drifting}`)
+  }
+}
+
+export function getSeedCount(): number { return seeds.size }
 
 // ---------------------------------------------------------------
 // Per-frame: fall, sway, bob, drift-to-player, collect
@@ -154,22 +211,30 @@ function seedDriftSystem(dt: number): void {
 
     const dx = playerPos.x - t.position.x
     const dz = playerPos.z - t.position.z
-    const dist = Math.sqrt(dx * dx + dz * dz)
+    const dist = Math.sqrt(dx * dx + dz * dz)                 // horizontal — starts the attraction
+    const dy = (playerPos.y + CHEST_HEIGHT) - t.position.y
+    const dist3 = Math.sqrt(dx * dx + dz * dz + dy * dy)      // 3D — a seed overhead is NOT reached yet
 
-    if (dist < SEED_COLLECT_RADIUS) {
-      // ── Close enough — request the gather (server decides) ──
+    if (dist3 < SEED_COLLECT_RADIUS) {
+      // ── Reached the player in 3D — request the gather (server decides) ──
+      // Local admin seeds don't exist server-side and can never be gathered.
+      if (seed.id.startsWith('local_')) continue
       if (seed.gatherSentAt === 0 || now - seed.gatherSentAt > GATHER_RETRY_MS) {
         seed.gatherSentAt = now
+        console.log(`[Seeds] Requesting gather: ${seed.id}`)
         room.send('gatherSeed', { seedId: seed.id })
       }
     } else if (dist < SEED_GATHER_RADIUS) {
-      // ── Walk-through magnetism: drift gently toward the player ──
+      // ── Walk-through magnetism: drift toward the player, faster as it closes ──
       seed.drifting = true
-      const step = Math.min(DRIFT_SPEED * dt, dist)
+      const closeness = 1 - dist / SEED_GATHER_RADIUS   // 0 at leash edge → 1 touching
+      const speed = DRIFT_SPEED_MIN + (DRIFT_SPEED_MAX - DRIFT_SPEED_MIN) * closeness
+      const step = Math.min(speed * dt, dist)
       t.position.x += (dx / dist) * step
       t.position.z += (dz / dist) * step
-      // Settle toward chest height while chasing — reads as "coming to you"
-      t.position.y += ((playerPos.y - 0.4) - t.position.y) * Math.min(dt * 4, 1)
+      // Float up toward chest height while chasing — avatar origin is at the FEET,
+      // so the target must be ABOVE playerPos.y or the seed burrows underground.
+      t.position.y += ((playerPos.y + CHEST_HEIGHT) - t.position.y) * Math.min(dt * 6, 1)
     } else if (seed.drifting && dist > SEED_GATHER_RADIUS * 1.5) {
       // Player walked away — seed settles where it is and resumes bobbing
       seed.drifting = false
@@ -184,25 +249,23 @@ function seedDriftSystem(dt: number): void {
 // ---------------------------------------------------------------
 
 export function setupSeedSystem(): void {
-  room.onMessage('seedsSpawned', (data) => {
-    if (!data?.seedsJson) return
-    try {
-      const records: Array<{ id: string; x: number; z: number; rare: boolean; spawnedAt: number }> = JSON.parse(data.seedsJson)
-      for (const rec of records) spawnSeed(rec)
-      console.log(`[Seeds] ${records.length} seeds falling (${seeds.size} live)`)
-    } catch (err) {
-      console.error('[Seeds] Bad seedsSpawned payload:', err)
-    }
+  room.onMessage('seedSpawned', (data) => {
+    spawnSeed(data)
   })
 
   room.onMessage('seedGathered', (data) => {
+    // The server may deliver this twice (broadcast + targeted diagnostic) —
+    // only the receipt that actually removes the seed shows the toast
+    const existed = seeds.has(data.seedId)
     despawnSeed(data.seedId)
+    if (!existed) return
     const localId = getPlayer()?.userId ?? ''
     if (localId && data.byAddress.toLowerCase() === localId.toLowerCase()) {
-      showToast(data.rare ? 'You caught a RARE seed! ✨' : 'Seed gathered! 🌱', TOAST_GATHER_MS, false)
+      // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)
+      showToast(data.rare ? 'You caught a RARE seed!' : 'Seed gathered', TOAST_GATHER_MS, false)
     }
   })
 
   engine.addSystem(seedDriftSystem)
-  console.log('[Seeds] Seed system ready')
+  console.log(`[Seeds] Seed system ready · seedSpawned listeners=${room.listenerCount('seedSpawned')}`)
 }

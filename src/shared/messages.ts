@@ -1,27 +1,37 @@
 // =============================================================
 // The Living Garden — Shared Message Definitions
 // Imported by both server and client.
+//
+// Registry ORDER does NOT matter for delivery (event types travel as strings —
+// see @dcl/sdk/src/network/events/protocol.ts). A 2026-09-16 "position cutoff"
+// theory was WRONG: the real cause of undelivered seed messages was
+// wateringSystem.ts calling room.clear() AFTER setupSeedSystem() had registered
+// its listeners. If a handler never fires, check WHEN it was registered relative
+// to room.clear() before suspecting the transport.
+//
+// ⚠️ Never put a 13-digit Date.now() in a Schemas.Number message field —
+// float32 rounds it by up to ~131 s (this broke clockSync, ±50 s offsets).
+// Use Schemas.Int64 for epoch-ms, matching PlantSync.wateredAt in schemas.ts.
 // =============================================================
 
 import { Schemas } from '@dcl/sdk/ecs'
 import { registerMessages } from '@dcl/sdk/network'
 
 export const room = registerMessages({
+  // ── v2: bloom seeds ──────────────────────────────────────
+  seedSpawned:      Schemas.Map({ id: Schemas.String, x: Schemas.Number, z: Schemas.Number, rare: Schemas.Boolean, spawnedAt: Schemas.Int64 }),
+  seedGathered:     Schemas.Map({ seedId: Schemas.String, by: Schemas.String, byAddress: Schemas.String, rare: Schemas.Boolean }),
+  gatherSeed:       Schemas.Map({ seedId: Schemas.String }),
+  /** Test-panel only: spawn one seed near x,z through the real seedSpawned path. */
+  adminSpawnSeed:   Schemas.Map({ x: Schemas.Number, z: Schemas.Number, rare: Schemas.Boolean }),
+
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */
   waterPlant:       Schemas.Map({ plantId: Schemas.String }),
   /** Sent on join so the server can map address → display name for the leaderboard. */
   registerPlayer:   Schemas.Map({ displayName: Schemas.String }),
-  /** Test-panel only — triggers bloom on the server so all clients sync correctly. */
-  forceBloom:       Schemas.Map({}),
-  /** Test-panel only — waters exactly enough plants to reach the 80% bloom threshold. */
-  forceWater80:     Schemas.Map({}),
-  /** Test-panel only — tells the server to bypass the daily limit for this player. */
-  setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
   /** Sent on room.onReady so the server re-sends full state even after a client reload. */
   requestFullSync:  Schemas.Map({}),
-  /** v2 — player walked into a falling/landed seed; server validates and awards it. */
-  gatherSeed:       Schemas.Map({ seedId: Schemas.String }),
 
   // ── Server → all clients ─────────────────────────────────
   /** Periodic heartbeat so clients can maintain a clock-offset via clockSync. */
@@ -49,11 +59,14 @@ export const room = registerMessages({
   bloomReset:       Schemas.Map({}),
   /** Top-10 all-time leaderboard — sent to all on water, to joining player on join. */
   leaderboardUpdate: Schemas.Map({ entriesJson: Schemas.String }),
+  // (v2 seed messages registered at the FRONT — see top of registry)
 
-  // ── v2: bloom seeds ──────────────────────────────────────
-  /** Seeds spawned by a bloom (broadcast), or the still-gatherable remainder
-   *  (targeted, on join/fullSync). seedsJson: [{id,x,z,rare,spawnedAt}] */
-  seedsSpawned:     Schemas.Map({ seedsJson: Schemas.String }),
-  /** A seed was claimed — all clients despawn it; the gatherer shows a toast. */
-  seedGathered:     Schemas.Map({ seedId: Schemas.String, by: Schemas.String, byAddress: Schemas.String, rare: Schemas.Boolean }),
+  // ── Test-panel only — parked at the tail (see header note) ──
+  // Expected casualties of the position cap; verify with the test panel.
+  /** Test-panel only — tells the server to bypass the daily limit for this player. */
+  setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
+  /** Test-panel only — triggers bloom on the server so all clients sync correctly. */
+  forceBloom:       Schemas.Map({}),
+  /** Test-panel only — waters exactly enough plants to reach the 80% bloom threshold. */
+  forceWater80:     Schemas.Map({}),
 })

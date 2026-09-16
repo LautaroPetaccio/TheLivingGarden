@@ -283,8 +283,8 @@ function uiComponent() {
   return (
     <UiEntity>
 
-      {/* ── Test Panel — uncomment locally, keep commented for production deploys ── */}
-      {/* <TestPanelUi /> */}
+      {/* ── Test Panel — MOUNTED for v2 dev; comment out before production deploys ── */}
+      <TestPanelUi />
 
       {/* ═══════════════════════════════════════════════════════════
           TOP BANNER — always dark, compact, player-dismissible

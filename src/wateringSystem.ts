@@ -1130,7 +1130,6 @@ export function setupWateringSystem(): void {
   setupPetalSystem()
   setupSparkleSystem()
   setupPlayerTrailSystem()
-  setupSeedSystem()
   setupAmbientFX()
   setupFairyLights()
   setupProgressBars()
@@ -1190,6 +1189,12 @@ export function setupWateringSystem(): void {
   // Without this, each reload stacks another copy of every handler, causing N sounds,
   // N animations, and N ripples per broadcast — a reliable crash path.
   room.clear()
+
+  // ⚠️ Any subsystem that registers room.onMessage handlers MUST be set up AFTER
+  // room.clear() above, or its listeners are silently wiped. (Seeds were registered
+  // in the subsystem block before the clear and never received a single message —
+  // cost a full day of playtests to find. Keep every room.onMessage below this line.)
+  setupSeedSystem()
 
   room.onMessage('notifyServerTime', (data) => {
     clockSync.updateOffset(data.sentAt)

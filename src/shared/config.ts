@@ -28,20 +28,30 @@ export function scaledBloomThreshold(gardeners: number): number {
 }
 
 // ── v2: bloom seeds (GDD §3 step 3, §6 walk-through gathering) ──
-export const SEED_RARE_CHANCE   = 0.10      // TUNING — "mostly normal, occasionally rare"
-export const SEEDS_PER_GARDENER = 3         // TUNING — spawn count scales with who showed up
-export const SEEDS_MIN          = 4         // solo bloom still yields "a few" to plant
-export const SEEDS_MAX          = 18        // cap so a 20-player bloom doesn't carpet the garden
+// Seeds are a SHARED spectacle with PER-PLAYER pickup: every player sees the same
+// rain and may collect each seed once — nobody takes a seed from anyone else.
+// Yield and rarity scale with BLOOM SIZE (GDD: "more gardeners means bigger,
+// rarer blooms"), not with head-count, since everyone gets the whole drop.
+export const SEEDS_AT_SOLO      = 4         // TUNING — quiet solo bloom (scale ≈0.32)
+export const SEEDS_AT_FULL      = 8         // TUNING — full-garden bloom (scale 1)
+export const SEED_RARE_AT_SOLO  = 0.10      // TUNING — "mostly normal, occasionally rare"
+export const SEED_RARE_AT_FULL  = 0.20      // TUNING — full blooms roll rarer
 export const SEED_FALL_MS       = 5_000     // drift-down duration from spawn height to ground
 export const SEED_LIFETIME_MS   = 120_000   // ungathered seeds fade before the 6-min bloom ends
 export const SEED_GATHER_RADIUS = 2.0       // m — walking this close starts the drift toward you
 export const SEED_COLLECT_RADIUS = 0.7      // m — seed this close is gathered (client sends request)
 export const SEED_SPAWN_HEIGHT  = 7         // m — seeds fall from the bloom canopy
 
-/** Seeds spawned by a bloom with `gardeners` present. */
-export function seedSpawnCount(gardeners: number): number {
-  const n = Math.max(1, gardeners)
-  return Math.max(SEEDS_MIN, Math.min(SEEDS_MAX, SEEDS_PER_GARDENER * n))
+/** Seeds dropped by a bloom of `bloomScale` (thresholdAtFire / full, 0–1]. */
+export function seedSpawnCount(bloomScale: number): number {
+  const s = Math.max(0, Math.min(1, bloomScale))
+  return Math.round(SEEDS_AT_SOLO + (SEEDS_AT_FULL - SEEDS_AT_SOLO) * s)
+}
+
+/** Per-seed rare probability for a bloom of `bloomScale`. */
+export function seedRareChance(bloomScale: number): number {
+  const s = Math.max(0, Math.min(1, bloomScale))
+  return SEED_RARE_AT_SOLO + (SEED_RARE_AT_FULL - SEED_RARE_AT_SOLO) * s
 }
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */

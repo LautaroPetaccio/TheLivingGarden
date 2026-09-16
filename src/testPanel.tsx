@@ -20,6 +20,15 @@ import {
   getWateringStatus,
 } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
+import {
+  adminSpawnLocalSeed,
+  adminRequestServerSeed,
+  adminScaleSeeds,
+  adminShiftSeedHeight,
+  adminListSeeds,
+  clearAllSeeds,
+  getSeedCount,
+} from './seedSystem'
 
 // ── Colors ──────────────────────────────────────────────────────
 const PANEL_BG   = Color4.create(0.08, 0.08, 0.10, 0.95)
@@ -42,7 +51,7 @@ const PANEL_W      = 390
 const PANEL_LEFT   = 1920 - PANEL_W - 20   // 1510
 const PANEL_TOP    = 20
 const HEADER_H     = 46
-const PANEL_H_OPEN = 547
+const PANEL_H_OPEN = 760
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
@@ -85,6 +94,19 @@ function ToggleButton({
       >
         <Label value={labelTrue} fontSize={10} color={value ? WHITE : MUTED} textAlign="middle-center" />
       </UiEntity>
+    </UiEntity>
+  )
+}
+
+/** Compact equal-width action button for the Seeds rows. */
+function SeedBtn({ label, color, onClick, last = false }: { label: string; color: Color4; onClick: () => void; last?: boolean }) {
+  return (
+    <UiEntity
+      uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: last ? 0 : 4 } }}
+      uiBackground={{ color }}
+      onMouseDown={onClick}
+    >
+      <Label value={label} fontSize={10} color={WHITE} textAlign="middle-center" />
     </UiEntity>
   )
 }
@@ -207,6 +229,28 @@ export function TestPanelUi() {
           onMouseDown={forceTriggerBloom}
         >
           <Label value="Force Bloom Now" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Divider */}
+        <UiEntity uiTransform={{ width: '100%', height: 1, margin: { bottom: 8 } }} uiBackground={{ color: DIVIDER }} />
+
+        {/* ── Seeds (v2 dev) ────────────────────────────────────── */}
+        <Label value={`SEEDS  ·  live: ${getSeedCount()}`} fontSize={10} color={MUTED} uiTransform={{ margin: { bottom: 6 } }} />
+
+        <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
+          <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(false)} />
+          <SeedBtn label="LOCAL rare"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(true)} />
+          <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(false)} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
+          <SeedBtn label="Size ×2"  color={BTN_OFF} onClick={() => adminScaleSeeds(2)} />
+          <SeedBtn label="Size ÷2"  color={BTN_OFF} onClick={() => adminScaleSeeds(0.5)} />
+          <SeedBtn label="Up +0.5"  color={BTN_OFF} onClick={() => adminShiftSeedHeight(0.5)} />
+          <SeedBtn label="Down −0.5" color={BTN_OFF} onClick={() => adminShiftSeedHeight(-0.5)} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 8 } }}>
+          <SeedBtn label="List seeds → log" color={BTN_OFF} onClick={adminListSeeds} />
+          <SeedBtn label="Clear seeds" color={BTN_DANGER} onClick={clearAllSeeds} last />
         </UiEntity>
 
         {/* Divider */}
