@@ -33,6 +33,10 @@ import {
   BOX_POSITIONS,
   BOX_GROW_MS,
   FLOWERS,
+  BOX_CAP_DEFAULT,
+  FLOWER_COLLECTION_CAP,
+  BOX_WATER_SHAVE_MS,
+  BOX_WATER_MAX,
 } from '../shared/config'
 
 // ---------------------------------------------------------------
@@ -398,26 +402,91 @@ function sendPouch(address: string): void {
 // ---------------------------------------------------------------
 
 interface BoxRecord {
-  boxId:     string
-  owner:     string   // address; '' = empty
-  ownerName: string
-  rare:      boolean
-  plantedAt: number
-  opensAt:   number
-  opened:    boolean
-  flower:    string   // '' until opened
+  boxId:       string
+  owner:       string   // address; '' = empty
+  ownerName:   string
+  rare:        boolean
+  plantedAt:   number
+  opensAt:     number
+  opened:      boolean
+  flower:      string   // '' until opened
+  waters:      number   // Phase 4: how many visitors have watered this growing seed
+  waterers:    string[] // their addresses (one water each) — server-only, not on the wire
+  lastWaterer: string   // display name shown on the label
 }
 
 const boxes     = new Map<string, BoxRecord>()                       // boxId → record
 const boxTimers = new Map<string, ReturnType<typeof setTimeout>>()  // boxId → open timer
 
 function emptyBox(boxId: string): BoxRecord {
-  return { boxId, owner: '', ownerName: '', rare: false, plantedAt: 0, opensAt: 0, opened: false, flower: '' }
+  return { boxId, owner: '', ownerName: '', rare: false, plantedAt: 0, opensAt: 0, opened: false, flower: '', waters: 0, waterers: [], lastWaterer: '' }
 }
 
 function sendBox(b: BoxRecord, to?: string[]): void {
-  const payload = { ...b, serverNow: Date.now() }
+  const payload = {
+    boxId: b.boxId, owner: b.owner, ownerName: b.ownerName, rare: b.rare,
+    plantedAt: b.plantedAt, opensAt: b.opensAt, serverNow: Date.now(),
+    opened: b.opened, flower: b.flower, waters: b.waters, lastWaterer: b.lastWaterer,
+  }
   room.send('boxState', payload, to ? { to } : undefined)
+}
+
+function boxesOwnedBy(address: string): number {
+  let n = 0
+  for (const b of boxes.values()) if (b.owner === address) n++
+  return n
+}
+
+// ── Per-player JSON records (collection, box cap) — same cache + serialized
+// write-through pattern as the pouch, so concurrent handlers can't lose updates.
+interface FlowerKeepsake { flower: string; rare: boolean; at: number; from?: string }
+const playerJson       = new Map<string, unknown>()          // `${address}:${key}` → live object
+const playerJsonWrites = new Map<string, Promise<void>>()
+
+async function loadPlayerJson<T>(address: string, key: string, def: () => T): Promise<T> {
+  const k = `${address}:${key}`
+  const live = playerJson.get(k)
+  if (live !== undefined) return live as T
+  let value = def()
+  try {
+    const raw = await Storage.player.get<string>(address, key)
+    if (raw) value = JSON.parse(raw)
+  } catch { /* fall through to default */ }
+  const raced = playerJson.get(k)
+  if (raced !== undefined) return raced as T
+  playerJson.set(k, value)
+  return value
+}
+
+function savePlayerJson(address: string, key: string): Promise<void> {
+  const k = `${address}:${key}`
+  const value = playerJson.get(k)
+  if (value === undefined) return Promise.resolve()
+  const snapshot = JSON.stringify(value)
+  const prev = playerJsonWrites.get(k) ?? Promise.resolve()
+  const next: Promise<void> = prev
+    .then(async () => { await Storage.player.set(address, key, snapshot) })
+    .catch(err => { console.error(`[Server] save ${key} failed:`, err) })
+  playerJsonWrites.set(k, next)
+  return next
+}
+
+const loadFlowers = (a: string) => loadPlayerJson<FlowerKeepsake[]>(a, 'flowers', () => [])
+const loadBoxCap  = (a: string) => loadPlayerJson<{ cap: number }>(a, 'boxCap', () => ({ cap: BOX_CAP_DEFAULT }))
+
+async function sendCollection(address: string): Promise<void> {
+  const flowers = await loadFlowers(address)
+  const cap     = await loadBoxCap(address)
+  room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap.cap }, { to: [address] })
+}
+
+function sendNotice(address: string, text: string): void {
+  room.send('notice', { text }, { to: [address] })
+}
+
+function isConnected(address: string): boolean {
+  for (const a of playerAddresses.values()) if (a === address) return true
+  return false
 }
 
 async function saveBoxes(): Promise<void> {
@@ -458,8 +527,13 @@ async function loadBoxes(): Promise<void> {
   for (const p of BOX_POSITIONS) boxes.set(p.id, emptyBox(p.id))
   const raw = await Storage.get<string>('boxes')
   if (raw) {
-    const records: BoxRecord[] = JSON.parse(raw)
-    for (const r of records) if (boxes.has(r.boxId)) boxes.set(r.boxId, r)
+    const records: Array<Partial<BoxRecord> & { boxId: string }> = JSON.parse(raw)
+    // Records saved before Phase 4 lack the watering fields; an undefined string
+    // makes every boxState send throw in the event bus, so backfill on load.
+    for (const r of records) {
+      if (!boxes.has(r.boxId)) continue
+      boxes.set(r.boxId, { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '' })
+    }
   }
   let growing = 0
   for (const b of boxes.values()) if (b.owner && !b.opened) { scheduleOpen(b); growing++ }
@@ -615,6 +689,7 @@ function playerJoinSystem(): void {
       if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       for (const b of boxes.values()) sendBox(b, [address])
+      await sendCollection(address)
       console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
@@ -787,8 +862,13 @@ export async function server(): Promise<void> {
     if (!b) return
     if (b.owner) { sendBox(b, [playerAddress]); return }          // taken — resync the tapper
     const pouch = await loadPouch(playerAddress)
-    if (b.owner) { sendBox(b, [playerAddress]); return }          // re-check after the await
-    if (data.rare ? pouch.rare <= 0 : pouch.normal <= 0) { sendPouch(playerAddress); return }
+    const cap   = (await loadBoxCap(playerAddress)).cap
+    if (b.owner) { sendBox(b, [playerAddress]); return }          // re-check after the awaits
+    if (boxesOwnedBy(playerAddress) >= cap) {
+      sendNotice(playerAddress, cap === 1 ? 'You already have a box — harvest it when it opens' : `You already have ${cap} boxes`)
+      return
+    }
+    if (data.rare ? pouch.rare <= 0 : pouch.normal <= 0) { sendPouch(playerAddress); sendNotice(playerAddress, 'No seeds — catch some from a bloom'); return }
     // Consume the seed and claim the box synchronously — no await between check and claim
     if (data.rare) pouch.rare -= 1
     else pouch.normal -= 1
@@ -800,12 +880,80 @@ export async function server(): Promise<void> {
     b.opensAt   = now + BOX_GROW_MS
     b.opened    = false
     b.flower    = ''
+    b.waters    = 0
+    b.waterers  = []
+    b.lastWaterer = ''
     scheduleOpen(b)
     console.log(`[Server] ${b.ownerName} planted a ${data.rare ? 'RARE ' : ''}seed in ${b.boxId} (opens in ${Math.round(BOX_GROW_MS / 60_000)} min)`)
     sendBox(b)
     sendPouch(playerAddress)
     void savePouch(playerAddress)
     void saveBoxes()
+  })
+
+  // ── Message: harvestBox (Phase 4) ───────────────────────────
+  onRoomMessage<{ boxId: string }>('harvestBox', async (data, playerAddress) => {
+    const b = boxes.get(data.boxId)
+    if (!b || b.owner !== playerAddress) return
+    if (!b.opened) { sendNotice(playerAddress, 'Still growing — come back when it opens'); return }
+    const flowers = await loadFlowers(playerAddress)
+    if (!b.opened || b.owner !== playerAddress) return           // re-check after the await
+    if (flowers.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, 'Your collection is full — gift a flower first'); return }
+    const keepsake: FlowerKeepsake = { flower: b.flower, rare: b.rare, at: Date.now() }
+    flowers.push(keepsake)
+    const name = b.ownerName
+    boxes.set(b.boxId, emptyBox(b.boxId))                        // frees the box
+    console.log(`[Server] ${name} harvested ${keepsake.flower}${keepsake.rare ? ' (RARE)' : ''} from ${b.boxId} (collection ${flowers.length})`)
+    sendBox(boxes.get(b.boxId)!)
+    void saveBoxes()
+    void savePlayerJson(playerAddress, 'flowers')
+    void sendCollection(playerAddress)
+    sendNotice(playerAddress, `Harvested your ${keepsake.flower} — box is free again`)
+  })
+
+  // ── Message: waterBox (Phase 4 — the quiet social loop) ─────
+  onRoomMessage<{ boxId: string }>('waterBox', async (data, playerAddress) => {
+    const b = boxes.get(data.boxId)
+    console.log(`[Server] waterBox ${data.boxId} from ${playerAddress.slice(0, 8)}… → ${!b ? 'unknown box' : !b.owner ? 'empty' : b.opened ? 'opened' : `growing, waters ${b.waters}/${BOX_WATER_MAX}`}`)
+    if (!b || !b.owner) return
+    if (b.owner === playerAddress) { sendNotice(playerAddress, 'Only visitors can water your seed'); return }
+    if (b.opened) { sendNotice(playerAddress, `${b.ownerName}'s ${b.flower} has already opened`); return }
+    if (b.waterers.includes(playerAddress)) { sendNotice(playerAddress, `You already watered ${b.ownerName}'s seed`); return }
+    if (b.waters >= BOX_WATER_MAX) { sendNotice(playerAddress, `${b.ownerName}'s seed has had all the water it can take`); return }
+    const name = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
+    b.waters += 1
+    b.waterers.push(playerAddress)
+    b.lastWaterer = name
+    b.opensAt = Math.max(Date.now(), b.opensAt - BOX_WATER_SHAVE_MS)
+    scheduleOpen(b)
+    console.log(`[Server] ${name} watered ${b.ownerName}'s ${b.boxId} (${b.waters}/${BOX_WATER_MAX}, −${Math.round(BOX_WATER_SHAVE_MS / 1000)}s)`)
+    sendBox(b)
+    void saveBoxes()
+    sendNotice(playerAddress, `You watered ${b.ownerName}'s seed — it opens sooner`)
+    if (isConnected(b.owner)) sendNotice(b.owner, `${name} watered your seed`)
+  })
+
+  // ── Message: giftFlower (Phase 4 — keepsakes) ───────────────
+  onRoomMessage<{ toAddress: string; flowerIndex: number }>('giftFlower', async (data, playerAddress) => {
+    const to = (data.toAddress || '').toLowerCase()
+    if (!to || to === playerAddress) return
+    if (!isConnected(to)) { sendNotice(playerAddress, 'That player is not here'); return }
+    const mine   = await loadFlowers(playerAddress)
+    const theirs = await loadFlowers(to)
+    const idx = Math.floor(data.flowerIndex)
+    if (idx < 0 || idx >= mine.length) { sendNotice(playerAddress, 'You have no flower to give'); return }
+    if (theirs.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, 'Their collection is full'); return }
+    const fromName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
+    const toName   = leaderboard.get(to)?.displayName ?? to.slice(0, 8) + '…'
+    const [gift] = mine.splice(idx, 1)
+    theirs.push({ ...gift, from: fromName, at: Date.now() })
+    console.log(`[Server] ${fromName} gifted ${gift.flower}${gift.rare ? ' (RARE)' : ''} to ${toName}`)
+    void savePlayerJson(playerAddress, 'flowers')
+    void savePlayerJson(to, 'flowers')
+    void sendCollection(playerAddress)
+    void sendCollection(to)
+    room.send('giftReceived', { from: fromName, flower: gift.flower, rare: gift.rare }, { to: [to] })
+    sendNotice(playerAddress, `You gave your ${gift.flower} to ${toName}`)
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
@@ -864,6 +1012,7 @@ export async function server(): Promise<void> {
     if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     for (const b of boxes.values()) sendBox(b, [address])
+    await sendCollection(address)
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 

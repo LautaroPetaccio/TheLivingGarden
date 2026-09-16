@@ -11,9 +11,12 @@
 // growing; a coloured sphere as the flower. Real models come in the FX phase.
 //
 // Server communication (server is authoritative; the client only requests):
-//   send    →  plantSeed  { boxId, rare }
-//   receive ←  boxState   { boxId, owner, ownerName, rare, plantedAt, opensAt, serverNow, opened, flower }
+//   send    →  plantSeed   { boxId, rare }        empty box
+//   send    →  harvestBox  { boxId }              my opened box  (Phase 4)
+//   send    →  waterBox    { boxId }              someone else's growing box (Phase 4)
+//   receive ←  boxState    { boxId, owner, ownerName, rare, plantedAt, opensAt, serverNow, opened, flower, waters, lastWaterer }
 //   receive ←  pouchUpdate { normal, rare }   (my own seed counts)
+// One world tap per box; what it does depends on whose box it is and its state.
 // =============================================================
 
 import {
@@ -26,14 +29,16 @@ import {
   TextShape,
   Billboard,
   BillboardMode,
+  PointerEvents,
   pointerEventsSystem,
   InputAction,
 } from '@dcl/sdk/ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX } from './shared/config'
 import { showToast } from './notifications'
+import { setupGiftSystem, getBoxCap } from './giftSystem'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals)
@@ -51,6 +56,7 @@ const COLOR_NORMAL  = Color4.create(0.95, 0.55, 0.75, 1)   // opened, normal flo
 const COLOR_RARE    = Color4.create(1.0, 0.82, 0.25, 1)    // opened, rare flower
 const TOAST_MS      = 5_000
 const LABEL_TICK_MS = 1_000
+const TAP_DISTANCE  = 8     // m — mobile is third-person only, camera sits well behind the avatar
 
 // ---------------------------------------------------------------
 // State
@@ -67,6 +73,8 @@ interface BoxView {
   opened:       boolean
   flower:       string
   opensLocalAt: number          // local-clock ms; derived from opensAt − serverNow
+  waters:       number
+  lastWaterer:  string
 }
 
 const views  = new Map<string, BoxView>()
@@ -77,6 +85,7 @@ export function getPouch(): { normal: number; rare: number } { return { ...pouch
 
 function localId(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 function isMine(v: BoxView): boolean { return !!v.owner && v.owner.toLowerCase() === localId() }
+function myBoxCount(): number { let n = 0; for (const v of views.values()) if (isMine(v)) n++; return n }
 
 // ---------------------------------------------------------------
 // Visuals
@@ -92,7 +101,16 @@ function labelFor(v: BoxView, now: number): string {
   const left = Math.max(0, v.opensLocalAt - now)
   const h = Math.floor(left / 3_600_000), m = Math.floor((left % 3_600_000) / 60_000), s = Math.floor((left % 60_000) / 1_000)
   const t = h > 0 ? `${h}h ${m}m` : `${m}m ${String(s).padStart(2, '0')}s`
-  return `${who} ${v.rare ? 'rare ' : ''}seed\nopens in ${t}`
+  const watered = v.waters > 0 ? `\nwatered x${v.waters} by ${v.lastWaterer}` : ''
+  return `${who} ${v.rare ? 'rare ' : ''}seed\nopens in ${t}${watered}`
+}
+
+/** Hover prompt for the one tap the box currently offers. */
+function hoverFor(v: BoxView): string {
+  if (!v.owner) return 'Plant seed'
+  if (isMine(v)) return v.opened ? 'Harvest' : 'Growing…'
+  if (v.opened) return `${v.ownerName}'s flower`
+  return v.waters >= BOX_WATER_MAX ? 'Fully watered' : 'Water'
 }
 
 function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
@@ -112,6 +130,8 @@ function refresh(v: BoxView): void {
   Material.setPbrMaterial(v.base, { albedoColor: isMine(v) ? COLOR_BOX_MINE : COLOR_BOX })
   setPlantVisual(v, pos)
   TextShape.getMutable(v.label).text = labelFor(v, Date.now())
+  const pe = PointerEvents.getMutableOrNull(v.base)?.pointerEvents[0]?.eventInfo
+  if (pe) pe.hoverText = hoverFor(v)
 }
 
 // ---------------------------------------------------------------
@@ -120,6 +140,10 @@ function refresh(v: BoxView): void {
 
 function tryPlant(v: BoxView): void {
   if (v.owner) return
+  if (myBoxCount() >= getBoxCap()) {
+    showToast(getBoxCap() === 1 ? 'You already have a box — harvest it when it opens' : `You already have ${getBoxCap()} boxes`, TOAST_MS, false)
+    return
+  }
   if (pouch.normal <= 0 && pouch.rare <= 0) {
     showToast('No seeds yet — catch some from a bloom', TOAST_MS, false)
     return
@@ -129,6 +153,21 @@ function tryPlant(v: BoxView): void {
   const rare = pouch.normal <= 0
   console.log(`[Boxes] planting ${rare ? 'RARE' : 'normal'} seed in ${v.boxId}`)
   room.send('plantSeed', { boxId: v.boxId, rare })
+}
+
+// Phase 4 — one tap, dispatched by whose box it is and its state.
+// Server re-validates everything; these local checks only save a round trip.
+function onTap(v: BoxView): void {
+  if (!v.owner) { tryPlant(v); return }
+  if (isMine(v)) {
+    if (v.opened) { console.log(`[Boxes] harvesting ${v.boxId}`); room.send('harvestBox', { boxId: v.boxId }); return }
+    showToast(`Still growing — ${labelFor(v, Date.now()).split('\n')[1]}`, TOAST_MS, false)
+    return
+  }
+  if (v.opened) { showToast(`${v.ownerName}'s ${v.flower} — they'll harvest it`, TOAST_MS, false); return }
+  if (v.waters >= BOX_WATER_MAX) { showToast(`${v.ownerName}'s seed has had all the water it can take`, TOAST_MS, false); return }
+  console.log(`[Boxes] watering ${v.ownerName}'s ${v.boxId}`)
+  room.send('waterBox', { boxId: v.boxId })
 }
 
 // ---------------------------------------------------------------
@@ -147,10 +186,10 @@ function createBox(p: { id: string; x: number; z: number }): BoxView {
   TextShape.create(label, { text: '', fontSize: 1.6, textColor: Color4.White(), outlineWidth: 0.1, outlineColor: Color4.Black() })
   Billboard.create(label, { billboardMode: BillboardMode.BM_Y })
 
-  const v: BoxView = { boxId: p.id, base, label, plant: null, owner: '', ownerName: '', rare: false, opened: false, flower: '', opensLocalAt: 0 }
+  const v: BoxView = { boxId: p.id, base, label, plant: null, owner: '', ownerName: '', rare: false, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
-    { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: 4 } },
-    () => tryPlant(v),
+    { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
+    () => onTap(v),
   )
   return v
 }
@@ -177,15 +216,19 @@ export function setupBoxSystem(): void {
     v.rare      = data.rare
     v.opened    = data.opened
     v.flower    = data.flower
+    v.waters      = data.waters
+    v.lastWaterer = data.lastWaterer
     // Countdown from the server's own clock delta — clockSync is unreliable here
     v.opensLocalAt = Date.now() + (Number(data.opensAt) - Number(data.serverNow))
     refresh(v)
     if (!wasOpened && v.opened && isMine(v)) {
-      showToast(`Your ${v.flower} opened!${v.rare ? ' A rare one.' : ''}`, TOAST_MS, false)
+      showToast(`Your ${v.flower} opened! Tap the box to harvest it${v.rare ? ' — a rare one.' : '.'}`, TOAST_MS, false)
     } else if (!wasMine && isMine(v) && !v.opened) {
       showToast('Seed planted — come back when it opens', TOAST_MS, false)
     }
   })
+
+  setupGiftSystem()   // same post-room.clear() window as this system
 
   room.onMessage('pouchUpdate', (data) => {
     pouch = { normal: data.normal, rare: data.rare }

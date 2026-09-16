@@ -107,3 +107,14 @@ export const FLOWERS = {
   normal: ['Daisy', 'Tulip', 'Poppy'],
   rare:   ['Moonbloom', 'Sunflare'],
 } as const
+
+// ── v2 Phase 4: harvest, gift, box-watering (GDD §3 step 5, §5 social loop) ──
+/** Boxes a player may hold at once. KJ decision 2026-09-16: 1 — stored per player
+ *  (`boxCap` in player storage) so purchasable extra boxes can raise it later. */
+export const BOX_CAP_DEFAULT       = 1
+/** Keepsake collection size backstop (harvested + gifted flowers a player holds). */
+export const FLOWER_COLLECTION_CAP = 20
+/** Another player watering your growing box shaves this off its timer… */
+export const BOX_WATER_SHAVE_MS    = Math.round(BOX_GROW_MS * 0.10)   // TUNING — 10% per water
+/** …at most this many times per box, one water per visitor. */
+export const BOX_WATER_MAX         = 3

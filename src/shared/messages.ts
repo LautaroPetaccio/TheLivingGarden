@@ -37,7 +37,22 @@ export const room = registerMessages({
     boxId: Schemas.String, owner: Schemas.String, ownerName: Schemas.String, rare: Schemas.Boolean,
     plantedAt: Schemas.Int64, opensAt: Schemas.Int64, serverNow: Schemas.Int64,
     opened: Schemas.Boolean, flower: Schemas.String,
+    waters: Schemas.Number, lastWaterer: Schemas.String,
   }),
+
+  // ── v2 Phase 4: harvest / water / gift ───────────────────
+  /** Owner taps their OPENED box: flower → their collection, box freed. */
+  harvestBox:       Schemas.Map({ boxId: Schemas.String }),
+  /** Visitor taps someone else's GROWING box: shaves BOX_WATER_SHAVE_MS (capped, once per visitor). */
+  waterBox:         Schemas.Map({ boxId: Schemas.String }),
+  /** Tap a nearby player: give them one flower from your collection (by index). */
+  giftFlower:       Schemas.Map({ toAddress: Schemas.String, flowerIndex: Schemas.Number }),
+  /** Server → player: their keepsake collection + box cap (after harvest/gift, and on join). */
+  collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
+  /** Server → receiver of a gift. */
+  giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rare: Schemas.Boolean }),
+  /** Server → player: short feedback toast (rejections and confirmations). */
+  notice:           Schemas.Map({ text: Schemas.String }),
 
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */
