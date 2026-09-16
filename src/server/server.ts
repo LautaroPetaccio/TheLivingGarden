@@ -2,7 +2,6 @@
 // The Living Garden — Authoritative Server
 // Runs headlessly alongside the scene. Owns all game state:
 //   • Plant watered/expired state  (PlantSync component + Storage)
-//   • Per-player daily water count (Storage.player)
 //   • Bloom trigger + reset        (threshold check + timer)
 // =============================================================
 
@@ -18,7 +17,6 @@ import { room }               from '../shared/messages'
 import {
   PLANT_NAMES,
   BLOOM_THRESHOLD,
-  DAILY_WATER_LIMIT,
   WATERED_EXPIRY_MS,
   FAST_PLANT_EXPIRY_MS,
   FAST_PLANT_NAMES,
@@ -46,12 +44,9 @@ import {
 const plantEntities   = new Map<string, Entity>()   // plantId → entity
 const knownPlayers    = new Set<Entity>()            // entities seen this session
 const playerAddresses = new Map<Entity, string>()    // entity → address (for disconnect cleanup)
-const testOverrides   = new Set<string>()            // addresses with daily-limit bypass (test panel)
 const syncRateLimits  = new Map<string, number>()    // address → last requestFullSync ms
 const SYNC_RATE_MS    = 5_000                        // min ms between full syncs per player
 let   bloomActive      = false
-let   bloomStartedAt:  number | null = null   // ms timestamp when current bloom began
-let   countdownPaused  = false
 let   bloomScale       = 1                    // thresholdAtFire / BLOOM_THRESHOLD of the active bloom
 
 
@@ -161,29 +156,6 @@ function broadcastLeaderboard(to?: string[]): void {
   }
 }
 
-function dailyKey(date: string): string { return `daily:${date}` }
-
-async function getPlayerDailyCount(address: string): Promise<number> {
-  try {
-    const today = new Date().toISOString().slice(0, 10)
-    const raw   = await Storage.player.get<string>(address, dailyKey(today))
-    return raw ? parseInt(raw) : DAILY_WATER_LIMIT
-    //return raw ? parseInt(raw) : 0
-  } catch {
-return DAILY_WATER_LIMIT
-  }
-}
-
-/*
-async function incrementPlayerDailyCount(address: string): Promise<number> {
-  const today    = new Date().toISOString().slice(0, 10)
-  const newCount = (await getPlayerDailyCount(address)) + 1
-  await Storage.player.set(address, dailyKey(today), String(newCount))
-  return newCount
-}
-*/
-
-
 // ---------------------------------------------------------------
 // Bloom
 // ---------------------------------------------------------------
@@ -250,7 +222,6 @@ function cancelBloomSustain(): void {
   }
   bloomSustainStartedAt = null
   bloomSustainElapsedMs = 0
-  countdownPaused       = false
 }
 
 /** Call after any change to watered count.
@@ -261,7 +232,6 @@ function checkBloomThreshold(): void {
   const count     = getWateredCount()
   const threshold = currentBloomThreshold()
   if (count >= threshold) {
-    countdownPaused = false
     if (bloomSustainTimer === null) {
       const remaining = BLOOM_SUSTAIN_MS - bloomSustainElapsedMs
       bloomSustainStartedAt = Date.now()
@@ -284,7 +254,6 @@ function checkBloomThreshold(): void {
       }, remaining)
     }
   } else {
-    countdownPaused = true
     pauseBloomSustain()
   }
 }
@@ -294,7 +263,6 @@ function triggerBloom(): void {
   const threshold = currentBloomThreshold()
   cancelBloomSustain()
   bloomActive    = true
-  bloomStartedAt = Date.now()
   bloomScale     = threshold / BLOOM_THRESHOLD
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)})`)
   room.send('bloomTriggered', { scale: bloomScale })
@@ -546,7 +514,6 @@ async function resetGarden(): Promise<void> {
   console.log('[Server] Resetting garden...')
   cancelBloomSustain()
   bloomActive    = false
-  bloomStartedAt = null
 
   for (const [plantId, entity] of plantEntities) {
     const ps     = PlantSync.getMutable(entity)
@@ -659,7 +626,6 @@ function playerJoinSystem(): void {
       playerAddresses.delete(entity)
       if (address) {
         syncRateLimits.delete(address)
-        testOverrides.delete(address)
         console.log(`[Server] Player disconnected: ${address}`)
       }
     }
@@ -671,7 +637,6 @@ function playerJoinSystem(): void {
     const address = identity.address
     playerAddresses.set(entity, address)
     executeTask(async () => {
-      const wateredToday = await getPlayerDailyCount(address)
       room.send('playerDailyState', dailyStatePayload(), { to: [address] })
 
       // Send current state of all plants so the client can restore visuals
@@ -690,7 +655,7 @@ function playerJoinSystem(): void {
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
-      console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
+      console.log(`[Server] Player joined: ${address} (${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
 
@@ -998,7 +963,6 @@ export async function server(): Promise<void> {
       return
     }
     syncRateLimits.set(address, now)
-    const wateredToday = await getPlayerDailyCount(address)
     room.send('playerDailyState', dailyStatePayload(), { to: [address] })
     for (const [plantId, plantEntity] of plantEntities) {
       const ps = PlantSync.getOrNull(plantEntity)
@@ -1013,18 +977,7 @@ export async function server(): Promise<void> {
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)
-    console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
-  })
-
-  // ── Message: setTestOverride ─────────────────────────────────
-  onRoomMessage<{ enabled: boolean }>('setTestOverride', async (data, address) => {
-    if (data.enabled) {
-      testOverrides.add(address)
-      console.log(`[Server] Test override ENABLED for ${address}`)
-    } else {
-      testOverrides.delete(address)
-      console.log(`[Server] Test override DISABLED for ${address}`)
-    }
+    console.log(`[Server] Full sync sent to ${address} (${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 
   // ── Message: registerPlayer ──────────────────────────────────
