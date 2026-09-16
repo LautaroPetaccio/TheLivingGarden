@@ -21,10 +21,13 @@ export type LoadResult<T> =
 // Host-call budget
 // ---------------------------------------------------------------
 
-/** The runtime caps in-flight host calls, shared across storage and every other
- *  runtime API, and rejects rather than queues past the limit. A rejected read
- *  comes back as a bare null that is indistinguishable from an empty key, so
- *  pacing our own calls well below the cap is what keeps a join burst from
+/** The authoritative-server runtime allows 32 concurrent fetches per scene and
+ *  rejects the rest with "fetch: too many concurrent requests" (bevy-explorer
+ *  SERVER_MAX_CONCURRENT_FETCHES, enforced in server mode only; hammurabi-headless
+ *  mirrors it as maxConcurrentFetches). The cap counts every fetch the scene makes,
+ *  and a slow one holds its slot for up to the 15 s fetch timeout. The SDK turns
+ *  that rejection into a plain null, which is indistinguishable from an empty key,
+ *  so pacing our own calls well below the cap is what keeps a join burst from
  *  reading a player's pouch as empty. Costs nothing when nothing is queued. */
 const MAX_IN_FLIGHT = 8
 let   inFlight      = 0
