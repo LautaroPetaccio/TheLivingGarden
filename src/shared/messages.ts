@@ -80,7 +80,7 @@ export const room = registerMessages({
   /** Broadcast when a plant's watered state changes (water or expiry).
    *  expiresInMs: server-computed time until this plant dries (0 when not watered) —
    *  decay scales with gardeners present, so the client must not guess it. */
-  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number }),
+  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number, tier: Schemas.Number }),
   /** Broadcast when the bloom threshold is reached.
    *  scale: thresholdAtFire / BLOOM_THRESHOLD (0–1] — 1 = full-garden bloom,
    *  below 1 = the smaller, quieter scaled bloom (v2). */
@@ -90,8 +90,10 @@ export const room = registerMessages({
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),
-  /** Top-10 all-time leaderboard — sent to all on water, to joining player on join. */
-  leaderboardUpdate: Schemas.Map({ entriesJson: Schemas.String }),
+  /** Top-10 boards — sent to all on water, to joining player on join.
+   *  entriesJson = this week's board (resets at weeklyResetAt, epoch ms);
+   *  allTimeJson = lifetime board, never resets. Entries: {displayName, count, tier}. */
+  leaderboardUpdate: Schemas.Map({ entriesJson: Schemas.String, allTimeJson: Schemas.String, weeklyResetAt: Schemas.Int64 }),
   // (v2 seed messages registered at the FRONT — see top of registry)
 
   // ── Test-panel only — parked at the tail (see header note) ──

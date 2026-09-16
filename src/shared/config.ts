@@ -120,6 +120,22 @@ export const FLOWERS = {
   rare:   ['Moonbloom', 'Sunflare'],
 } as const
 
+// ── v2 Phase 5: boards + milestone flair (GDD §4.3 hook 2, §5 recognition) ──
+/** Lifetime-water thresholds for the flair tiers: sprout → flower → golden flower. */
+export const FLAIR_TIERS = [100, 500, 1000] as const   // TUNING — GDD "~100 / 500 / 1,000"
+/** 0 = none, 1 = sprout, 2 = flower, 3 = golden. */
+export function flairTier(lifetimeWaters: number): number {
+  let tier = 0
+  for (const t of FLAIR_TIERS) if (lifetimeWaters >= t) tier++
+  return tier
+}
+/** Greybox text tag shown before a name. Art pass: replace with a PNG glyph (no emoji — Unity client). */
+export function flairTag(tier: number): string {
+  return ['', '[sprout] ', '[flower] ', '[golden] '][Math.max(0, Math.min(3, tier))]
+}
+/** Weekly board cadence — the reset moment is shown in-world (GDD §4.3). */
+export const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000
+
 // ── v2 Phase 4: harvest, gift, box-watering (GDD §3 step 5, §5 social loop) ──
 /** Boxes a player may hold at once. KJ decision 2026-09-16: 1 — stored per player
  *  (`boxCap` in player storage) so purchasable extra boxes can raise it later. */

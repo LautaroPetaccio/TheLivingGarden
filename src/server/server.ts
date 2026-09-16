@@ -27,6 +27,8 @@ import {
   BLOOM_WINDOWS,
   plantDecayMs,
   bloomScaleFor,
+  flairTier,
+  WEEKLY_RESET_MS,
   seedSpawnCount,
   seedRareChance,
   SEED_LIFETIME_MS,
@@ -70,10 +72,12 @@ interface PlantRecord {
   wateredAt: number   // ms timestamp stored as number (not BigInt)
   wateredBy: string   // display name of the player who watered it
   expiresAt?: number  // ms timestamp; decay is gardener-scaled so it must be stored, not recomputed
+  tier?: number       // waterer's flair tier at water time (Phase 5)
 }
 
 // In-memory map of plantId → display name (kept in sync with PlantRecord)
 const wateredByMap = new Map<string, string>()
+const wateredTierMap = new Map<string, number>()   // plantId → waterer's flair tier
 // plantId → when its current watering dries out (gardener-scaled at water time)
 const plantExpiresAt = new Map<string, number>()
 
@@ -110,6 +114,7 @@ async function loadPlantStates(): Promise<void> {
     ps.isWatered = true
     ps.wateredAt = rec.wateredAt
     if (rec.wateredBy) wateredByMap.set(rec.plantId, rec.wateredBy)
+    if (rec.tier) wateredTierMap.set(rec.plantId, rec.tier)
     plantExpiresAt.set(rec.plantId, expiresAt)
     scheduleExpiry(rec.plantId, entity, rec.wateredAt, expiresAt - now)
     restored++
@@ -122,14 +127,18 @@ async function savePlantStates(): Promise<void> {
   for (const [plantId, entity] of plantEntities) {
     const ps = PlantSync.getOrNull(entity)
     if (!ps) continue
-    records.push({ plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresAt: plantExpiresAt.get(plantId) })
+    records.push({ plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresAt: plantExpiresAt.get(plantId), tier: wateredTierMap.get(plantId) })
   }
   await Storage.set('plants', JSON.stringify(records))
 }
 
 // ── Leaderboard helpers ──────────────────────────────────────
 
-const LEADERBOARD_RESET_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000  // 7 days
+// `leaderboard` is THIS WEEK's board (resets); `lifetime` never resets and is the
+// source of milestone flair (GDD §4.3 hook 2, §5 recognition — the v1 complaint
+// was 1,000+ waters vanishing on reset).
+const lifetime = new Map<string, LeaderboardEntry>()   // address → entry, never reset
+let weeklyResetAt = 0                                   // epoch ms when the weekly board next clears
 
 async function loadLeaderboard(): Promise<void> {
   const raw = await Storage.get<string>('leaderboard')
@@ -138,18 +147,42 @@ async function loadLeaderboard(): Promise<void> {
     for (const r of records) leaderboard.set(r.address, { displayName: r.displayName, total: r.total })
     console.log(`[Server] Loaded leaderboard: ${leaderboard.size} players`)
   }
+  const rawLifetime = await Storage.get<string>('lifetime')
+  if (rawLifetime) {
+    const records: Array<{ address: string; displayName: string; total: number }> = JSON.parse(rawLifetime)
+    for (const r of records) lifetime.set(r.address, { displayName: r.displayName, total: r.total })
+    console.log(`[Server] Loaded lifetime board: ${lifetime.size} players`)
+  } else {
+    // First run after the Phase 5 upgrade: the current weekly totals are the best
+    // floor we have for lifetime — never start veterans from zero.
+    for (const [address, e] of leaderboard) lifetime.set(address, { ...e })
+    await saveLifetime()
+    console.log(`[Server] Lifetime board seeded from weekly (${lifetime.size} players)`)
+  }
 
-  // Weekly reset — check stored timestamp; if missing, start the clock now (preserves existing data)
+  // Weekly reset clock — persisted so restarts don't move the reset moment
   const rawResetAt = await Storage.get<string>('leaderboardResetAt')
   if (!rawResetAt) {
     await Storage.set('leaderboardResetAt', String(Date.now()))
     console.log('[Server] Leaderboard weekly reset clock started')
-  } else if (Date.now() - parseInt(rawResetAt) >= LEADERBOARD_RESET_INTERVAL_MS) {
-    leaderboard.clear()
-    await saveLeaderboard()
-    await Storage.set('leaderboardResetAt', String(Date.now()))
-    console.log('[Server] Weekly leaderboard reset complete')
+    weeklyResetAt = Date.now() + WEEKLY_RESET_MS
+  } else {
+    weeklyResetAt = parseInt(rawResetAt) + WEEKLY_RESET_MS
   }
+  await ensureWeeklyReset()
+}
+
+/** Clears the weekly board once its reset moment has passed — runs at startup and
+ *  on every broadcast, so a long-lived server resets on time (GDD: stated, visible time). */
+async function ensureWeeklyReset(): Promise<void> {
+  const now = Date.now()
+  if (now < weeklyResetAt) return
+  // Advance by whole periods so the moment stays on the same weekday/hour
+  while (weeklyResetAt <= now) weeklyResetAt += WEEKLY_RESET_MS
+  leaderboard.clear()
+  await saveLeaderboard()
+  await Storage.set('leaderboardResetAt', String(weeklyResetAt - WEEKLY_RESET_MS))
+  console.log(`[Server] Weekly leaderboard reset complete — next at ${new Date(weeklyResetAt).toISOString()}`)
 }
 
 async function saveLeaderboard(): Promise<void> {
@@ -157,24 +190,43 @@ async function saveLeaderboard(): Promise<void> {
   await Storage.set('leaderboard', JSON.stringify(records))
 }
 
-/** Top-10 sorted entries as JSON, ready to send over the wire. */
-function leaderboardJson(): string {
+async function saveLifetime(): Promise<void> {
+  const records = [...lifetime.entries()].map(([address, e]) => ({ address, ...e }))
+  await Storage.set('lifetime', JSON.stringify(records))
+}
+
+function tierOf(address: string): number {
+  return flairTier(lifetime.get(address)?.total ?? 0)
+}
+
+/** Count one water on both boards (creating entries with a placeholder name). */
+function bumpWaterTotals(address: string): void {
+  for (const board of [leaderboard, lifetime]) {
+    const entry = board.get(address)
+    if (entry) entry.total += 1
+    else board.set(address, { displayName: leaderboard.get(address)?.displayName ?? address.slice(0, 8) + '…', total: 1 })
+  }
+}
+
+/** Top-10 sorted entries of a board as JSON, ready to send over the wire. */
+function boardJson(board: Map<string, LeaderboardEntry>): string {
   return JSON.stringify(
-    [...leaderboard.values()]
-      .sort((a, b) => b.total - a.total)
+    [...board.entries()]
+      .sort((a, b) => b[1].total - a[1].total)
       .slice(0, 10)
-      .map(e => ({ displayName: e.displayName, count: e.total }))
+      .map(([address, e]) => ({ displayName: e.displayName, count: e.total, tier: tierOf(address) }))
   )
 }
 
 function broadcastLeaderboard(to?: string[]): void {
-  const entriesJson = leaderboardJson()
+  void ensureWeeklyReset().catch(err => console.error('[Server] weekly reset failed:', err))
+  const payload = { entriesJson: boardJson(leaderboard), allTimeJson: boardJson(lifetime), weeklyResetAt }
   if (to) {
     // Targeted send — used on player join to push current state to one client
-    room.send('leaderboardUpdate', { entriesJson }, { to })
+    room.send('leaderboardUpdate', payload, { to })
   } else {
     // Broadcast — reaches all connected clients including the triggering player
-    room.send('leaderboardUpdate', { entriesJson })
+    room.send('leaderboardUpdate', payload)
   }
 }
 
@@ -568,8 +620,9 @@ async function resetGarden(): Promise<void> {
     ps.isWatered = false
     ps.wateredAt = 0
     wateredByMap.delete(plantId)
+    wateredTierMap.delete(plantId)
     plantExpiresAt.delete(plantId)
-    room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0 })
+    room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0, tier: 0 })
   }
 
   // Send bloomReset BEFORE persisting — a Storage failure must never prevent clients
@@ -603,6 +656,7 @@ function scheduleExpiry(
       expired.isWatered = false
       expired.wateredAt = 0
       wateredByMap.delete(plantId)
+      wateredTierMap.delete(plantId)
       plantExpiresAt.delete(plantId)
       // Fail-open: persistence failure must not block the expiry broadcast
       try {
@@ -610,7 +664,7 @@ function scheduleExpiry(
       } catch (err) {
         console.error('[Server] scheduleExpiry: failed to persist state:', err)
       }
-      room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0 })
+      room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0, tier: 0 })
       console.log(`[Server] Plant expired: ${plantId}`)
       // Pause (not cancel) — preserves elapsed progress; timer resumes when health recovers.
       // Expiry must never start the sustain timer, only pause it.
@@ -695,7 +749,7 @@ function playerJoinSystem(): void {
       for (const [plantId, plantEntity] of plantEntities) {
         const ps = PlantSync.getOrNull(plantEntity)
         if (!ps) continue
-        room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId) }, { to: [address] })
+        room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId), tier: wateredTierMap.get(plantId) ?? 0 }, { to: [address] })
       }
 
       broadcastLeaderboard([address])
@@ -814,27 +868,31 @@ export async function server(): Promise<void> {
       watered.isWatered = true
       watered.wateredAt = now
 
-      // Update all-time leaderboard total for this player
-      const entry = leaderboard.get(playerAddress)
-      if (entry) {
-        entry.total += 1
-      } else {
-        leaderboard.set(playerAddress, { displayName: playerAddress.slice(0, 8) + '…', total: 1 })
-      }
+      // Count on both boards: this week's (resets) and lifetime (flair source)
+      const tierBefore = tierOf(playerAddress)
+      bumpWaterTotals(playerAddress)
+      const tier = tierOf(playerAddress)
 
       const displayName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
       wateredByMap.set(plantId, displayName)
+      wateredTierMap.set(plantId, tier)
 
       // Fail-open: persistence failure must not block the state broadcast below
       try {
         await savePlantStates()
         await saveLeaderboard()
+        await saveLifetime()
       } catch (err) {
         console.error('[Server] waterPlant: failed to persist state:', err)
       }
       const expiresAt = armExpiry(plantId, entity, now)
 
-      room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now })
+      room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now, tier })
+      if (tier > tierBefore) {
+        const names = ['', 'a sprout', 'a flower', 'a golden flower']
+        sendNotice(playerAddress, `${lifetime.get(playerAddress)?.total} lifetime waters — your name now carries ${names[tier]}`)
+        console.log(`[Server] ${displayName} reached flair tier ${tier}`)
+      }
       broadcastLeaderboard()
       console.log(`[Server] ${plantId} watered by ${playerAddress} (${getWateredCount()}/${currentBloomThreshold()} garden)`)
       checkBloomThreshold()
@@ -997,7 +1055,7 @@ export async function server(): Promise<void> {
         mutable.wateredAt = now
         wateredByMap.set(plantId, '[Test Mode]')
         const expiresAt = armExpiry(plantId, entity, now)
-        room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: '[Test Mode]', expiresInMs: expiresAt - now })
+        room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: '[Test Mode]', expiresInMs: expiresAt - now, tier: 0 })
         watered++
       }
     }
@@ -1020,7 +1078,7 @@ export async function server(): Promise<void> {
     for (const [plantId, plantEntity] of plantEntities) {
       const ps = PlantSync.getOrNull(plantEntity)
       if (!ps) continue
-      room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId) }, { to: [address] })
+      room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId), tier: wateredTierMap.get(plantId) ?? 0 }, { to: [address] })
     }
     broadcastLeaderboard([address])
     sendThreshold([address])
@@ -1046,15 +1104,15 @@ export async function server(): Promise<void> {
 
   // ── Message: registerPlayer ──────────────────────────────────
   onRoomMessage<{ displayName: string }>('registerPlayer', async (data, address) => {
-    const entry = leaderboard.get(address)
-    if (entry) {
-      entry.displayName = data.displayName
-    } else {
-      leaderboard.set(address, { displayName: data.displayName, total: 0 })
+    for (const board of [leaderboard, lifetime]) {
+      const entry = board.get(address)
+      if (entry) entry.displayName = data.displayName
+      else board.set(address, { displayName: data.displayName, total: 0 })
     }
     // Fail-open: persistence failure must not block the leaderboard broadcast
     try {
       await saveLeaderboard()
+      await saveLifetime()
     } catch (err) {
       console.error('[Server] registerPlayer: failed to persist leaderboard:', err)
     }

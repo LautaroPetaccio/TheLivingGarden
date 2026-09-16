@@ -1,9 +1,10 @@
 // =============================================================
 // The Living Garden — Leaderboard System
 //
-// Two boards (south + north wall) display the top-10 all-time
-// waterers.  All layout, style, and position config lives in the
-// block below — no Creator Hub entities required.
+// Two boards: south wall = THIS WEEK (top-10, resets at a visible time),
+// north wall = ALL TIME (top-10 lifetime, never resets) — GDD §4.3 hook 2.
+// Names carry milestone flair (GDD §5). All layout, style, and position
+// config lives in the block below — no Creator Hub entities required.
 // =============================================================
 
 import {
@@ -14,6 +15,7 @@ import {
   TextAlignMode,
 } from '@dcl/sdk/ecs'
 import { Quaternion } from '@dcl/sdk/math'
+import { flairTag } from './shared/config'
 
 // ===============================================================
 // ██████╗  ██████╗  █████╗ ██████╗ ██████╗     ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -32,11 +34,18 @@ import { Quaternion } from '@dcl/sdk/math'
 const LB_WORLD_Y = 2.41    // raise / lower all boards together
 
 const LB_BOARDS = [
-  // Board 1 — south face (faces into the scene)
-  { position: { x: 12.73, y: LB_WORLD_Y, z:  0.4 }, rotation: { x: 0, y: 180, z: 0 } },
-  // Board 2 — north face
-  { position: { x: 12.73, y: LB_WORLD_Y, z: 47.6 }, rotation: { x: 0, y: 0,   z: 0 } },
+  // Board 1 — south face (faces into the scene): this week's board
+  { position: { x: 12.73, y: LB_WORLD_Y, z:  0.4 }, rotation: { x: 0, y: 180, z: 0 }, kind: 'weekly' as const },
+  // Board 2 — north face: all-time board
+  { position: { x: 12.73, y: LB_WORLD_Y, z: 47.6 }, rotation: { x: 0, y: 0,   z: 0 }, kind: 'allTime' as const },
 ]
+
+// ── Titles ───────────────────────────────────────────────────
+const LB_TITLE_GAP      = 0.30   // extra gap above the header row for the title line
+const LB_FONT_TITLE     = 1.0
+const LB_TITLE_WEEKLY   = 'THIS WEEK'
+const LB_TITLE_ALL_TIME = 'ALL TIME'
+const LB_COUNTDOWN_TICK_MS = 30_000
 
 // ── Rows ─────────────────────────────────────────────────────
 const LB_ENTRIES    = 10     // number of player rows per board
@@ -65,7 +74,10 @@ const LB_COLOR_SCORE  = { r: 0.6, g: 1,    b: 0.6, a: 1 }  // soft green
 // ── Mock data ─────────────────────────────────────────────────
 // Shown immediately on load until the server sends real data.
 // Replace or reorder freely — only LB_ENTRIES rows are displayed.
-const LB_MOCK_DATA: Array<{ displayName: string; count: number }> = [
+export interface BoardEntry { displayName: string; count: number; tier?: number }
+export interface BoardData  { weekly: BoardEntry[]; allTime: BoardEntry[]; weeklyResetAt: number }
+
+const LB_MOCK_DATA: BoardEntry[] = [
   { displayName: 'GreenThumb99',  count: 42 },
   { displayName: 'FloraFairy',    count: 38 },
   { displayName: 'PlantDaddy',    count: 35 },
@@ -85,11 +97,40 @@ const LB_MOCK_DATA: Array<{ displayName: string; count: number }> = [
 // Each entry = two label entities [nameLabel, scoreLabel],
 // interleaved per board: [name0, score0, name1, score1, …] × boards
 const leaderboardLabels: Entity[] = []
+const titleLabels: Entity[] = []          // one per board, same order as LB_BOARDS
+let   weeklyResetAt = 0                   // epoch ms; 0 = unknown (mock)
+let   countdownAccum = 0
 
 /** Returns the name and score label entities for a given board and row. */
 function getLabels(boardIdx: number, entryIdx: number): { name: Entity; score: Entity } {
   const base = boardIdx * (LB_ENTRIES * 2) + entryIdx * 2
   return { name: leaderboardLabels[base], score: leaderboardLabels[base + 1] }
+}
+
+function formatCountdown(ms: number): string {
+  const d = Math.floor(ms / 86_400_000), h = Math.floor((ms % 86_400_000) / 3_600_000), m = Math.floor((ms % 3_600_000) / 60_000)
+  return d > 0 ? `${d}d ${h}h` : h > 0 ? `${h}h ${m}m` : `${Math.max(1, m)}m`
+}
+
+function titleFor(kind: 'weekly' | 'allTime'): string {
+  if (kind === 'allTime') return LB_TITLE_ALL_TIME
+  if (!weeklyResetAt) return LB_TITLE_WEEKLY
+  const left = weeklyResetAt - Date.now()
+  return left > 0 ? `${LB_TITLE_WEEKLY}  -  resets in ${formatCountdown(left)}` : `${LB_TITLE_WEEKLY}  -  resetting`
+}
+
+function refreshTitles(): void {
+  for (let b = 0; b < LB_BOARDS.length; b++) {
+    const t = titleLabels[b]
+    if (t) TextShape.getMutable(t).text = titleFor(LB_BOARDS[b].kind)
+  }
+}
+
+function countdownSystem(dt: number): void {
+  countdownAccum += dt * 1_000
+  if (countdownAccum < LB_COUNTDOWN_TICK_MS) return
+  countdownAccum = 0
+  refreshTitles()
 }
 
 export function setupLeaderboardBoards(): void {
@@ -104,6 +145,12 @@ export function setupLeaderboardBoards(): void {
     Transform.create(board, { position: boardDef.position, rotation: quat })
 
     const headerY = LB_START_Y + LB_HEADER_GAP
+
+    // Title line (board kind + weekly reset countdown)
+    const title = engine.addEntity()
+    Transform.create(title, { position: { x: LB_NAME_X, y: headerY + LB_TITLE_GAP, z: LB_DEPTH }, parent: board })
+    TextShape.create(title, { text: titleFor(boardDef.kind), fontSize: LB_FONT_TITLE, textColor: LB_COLOR_HEADER, textAlign: TextAlignMode.TAM_MIDDLE_LEFT })
+    titleLabels.push(title)
 
     // Header row
     const hName = engine.addEntity()
@@ -132,17 +179,21 @@ export function setupLeaderboardBoards(): void {
 
   // Show mock data immediately so the board looks populated before
   // the server sends its first leaderboardUpdate message
-  updateLeaderboardDisplay(LB_MOCK_DATA)
+  updateLeaderboardDisplay({ weekly: LB_MOCK_DATA, allTime: LB_MOCK_DATA, weeklyResetAt: 0 })
+  engine.addSystem(countdownSystem)
 }
 
-export function updateLeaderboardDisplay(entries: Array<{ displayName: string; count: number }>): void {
+export function updateLeaderboardDisplay(data: BoardData): void {
+  weeklyResetAt = data.weeklyResetAt
   for (let b = 0; b < LB_BOARDS.length; b++) {
+    const entries = LB_BOARDS[b].kind === 'weekly' ? data.weekly : data.allTime
     for (let i = 0; i < LB_ENTRIES; i++) {
       const entry          = entries[i]
       const { name, score } = getLabels(b, i)
       if (!name || !score) continue
-      TextShape.getMutable(name).text  = entry ? `${i + 1}.  ${entry.displayName}` : ''
+      TextShape.getMutable(name).text  = entry ? `${i + 1}.  ${flairTag(entry.tier ?? 0)}${entry.displayName}` : ''
       TextShape.getMutable(score).text = entry ? `${entry.count}` : ''
     }
   }
+  refreshTitles()
 }

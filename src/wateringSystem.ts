@@ -43,7 +43,8 @@ import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSyst
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { setupLeaderboardBoards, updateLeaderboardDisplay }   from './leaderboardSystem'
+import { flairTag } from './shared/config'
+import { setupLeaderboardBoards, updateLeaderboardDisplay, BoardEntry }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
 import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
 import { clockSync } from './shared/clockSync'
@@ -1337,8 +1338,8 @@ export function setupWateringSystem(): void {
   })
 
   room.onMessage('leaderboardUpdate', (data) => {
-    const entries: Array<{ displayName: string; count: number }> = JSON.parse(data.entriesJson)
-    updateLeaderboardDisplay(entries)
+    const parse = (s: string): BoardEntry[] => { try { return JSON.parse(s) } catch { return [] } }
+    updateLeaderboardDisplay({ weekly: parse(data.entriesJson), allTime: parse(data.allTimeJson), weeklyResetAt: Number(data.weeklyResetAt) })
   })
 
   room.onMessage('plantStateUpdate', (data) => {
@@ -1365,7 +1366,7 @@ export function setupWateringSystem(): void {
     // Update "Watered by" label + accumulate bloom contributors
     const wateredByLabel = wateredByLabelMap.get(entity)
     if (data.isWatered && data.wateredBy) {
-      wateredByNames.set(entity, data.wateredBy)
+      wateredByNames.set(entity, `${flairTag(data.tier)}${data.wateredBy}`)   // flair shows on the label (GDD §5)
       bloomContributors.add(data.wateredBy)   // tracks everyone who contributed this cycle
     } else {
       wateredByNames.delete(entity)
@@ -1376,7 +1377,7 @@ export function setupWateringSystem(): void {
         const pid      = entityPlantId.get(entity)
         const expiryMs = plantExpiryMs(pid ?? '')
         const alpha    = Math.max(0, 1 - (Date.now() - wateredAt) / expiryMs)
-        ts.text      = `Last watered by ${data.wateredBy}\n${formatTimeAgo(wateredAt)}`
+        ts.text      = `Last watered by ${flairTag(data.tier)}${data.wateredBy}\n${formatTimeAgo(wateredAt)}`
         ts.textColor = { ...WATERED_BY_COLOR, a: alpha }
       } else {
         ts.text = ''
