@@ -55,6 +55,7 @@ import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './pla
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
+import { setupTributeSystem } from './tributeSystem'
 
 // ===============================================================
 // ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -1212,6 +1213,7 @@ export function setupWateringSystem(): void {
   // cost a full day of playtests to find. Keep every room.onMessage below this line.)
   setupSeedSystem()
   setupBoxSystem()
+  setupTributeSystem()
 
   room.onMessage('notifyServerTime', (data) => {
     clockSync.updateOffset(data.sentAt)

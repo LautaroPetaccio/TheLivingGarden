@@ -51,8 +51,10 @@ export const room = registerMessages({
   collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
   /** Server → receiver of a gift. */
   giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rare: Schemas.Boolean }),
-  /** Server → player: short feedback toast (rejections and confirmations). */
+  /** Server → player: short feedback toast (rejections and confirmations). Broadcast when untargeted. */
   notice:           Schemas.Map({ text: Schemas.String }),
+  /** Server → all / joining player: every tribute plant (Phase 5b). json = TributeRecord[]. */
+  tributesUpdate:   Schemas.Map({ json: Schemas.String }),
 
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */

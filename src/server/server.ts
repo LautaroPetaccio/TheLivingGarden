@@ -29,6 +29,9 @@ import {
   bloomScaleFor,
   flairTier,
   WEEKLY_RESET_MS,
+  TRIBUTE_MILESTONE,
+  TRIBUTE_PLOTS,
+  FOUNDING_TRIBUTES,
   seedSpawnCount,
   seedRareChance,
   SEED_LIFETIME_MS,
@@ -170,6 +173,77 @@ async function loadLeaderboard(): Promise<void> {
     weeklyResetAt = parseInt(rawResetAt) + WEEKLY_RESET_MS
   }
   await ensureWeeklyReset()
+  await loadTributes()
+}
+
+// ── Tribute plants (Phase 5b, GDD §4.2) ──────────────────────
+// Earned automatically at TRIBUTE_MILESTONE lifetime waters; founding entries
+// come from config. Permanent: never touched by the weekly reset.
+interface TributeRecord {
+  address:     string   // '' for a founding honoree whose wallet isn't known yet
+  displayName: string
+  earnedAt:    number
+  plot:        number   // index into TRIBUTE_PLOTS
+  founding:    boolean
+  note:        string
+}
+let tributes: TributeRecord[] = []
+
+function nextFreePlot(): number {
+  const used = new Set(tributes.map(t => t.plot))
+  for (let i = 0; i < TRIBUTE_PLOTS.length; i++) if (!used.has(i)) return i
+  return -1
+}
+
+async function saveTributes(): Promise<void> {
+  await Storage.set('tributes', JSON.stringify(tributes))
+}
+
+function sendTributes(to?: string[]): void {
+  room.send('tributesUpdate', { json: JSON.stringify(tributes) }, to ? { to } : undefined)
+}
+
+async function loadTributes(): Promise<void> {
+  const raw = await Storage.get<string>('tributes')
+  if (raw) { try { tributes = JSON.parse(raw) } catch { tributes = [] } }
+  let changed = false
+  for (const f of FOUNDING_TRIBUTES) {
+    const address  = f.address.toLowerCase()
+    const existing = tributes.find(t => t.founding && t.displayName === f.displayName)
+    if (existing) {
+      // Config is the source of truth for the honoree's wallet and note
+      if (existing.address !== address || existing.note !== f.note) { existing.address = address; existing.note = f.note; changed = true }
+    } else {
+      const plot = nextFreePlot()
+      if (plot < 0) { console.error(`[Server] No free tribute plot for founding honoree ${f.displayName}`); continue }
+      tributes.push({ address, displayName: f.displayName, earnedAt: Date.now(), plot, founding: true, note: f.note })
+      changed = true
+    }
+    // Once the wallet is known, their lifetime total must match the honour (golden flair)
+    if (address) {
+      const e = lifetime.get(address)
+      if (!e || e.total < TRIBUTE_MILESTONE) {
+        lifetime.set(address, { displayName: f.displayName, total: Math.max(e?.total ?? 0, TRIBUTE_MILESTONE) })
+        await saveLifetime()
+      }
+    }
+  }
+  if (changed) await saveTributes()
+  console.log(`[Server] Tributes: ${tributes.length} (${tributes.filter(t => t.founding).length} founding, ${TRIBUTE_PLOTS.length - tributes.length} plots free)`)
+}
+
+/** Call after a lifetime total changes. Grows the plant the moment the milestone is crossed. */
+async function grantTributeIfEarned(address: string): Promise<void> {
+  const entry = lifetime.get(address)
+  if (!entry || entry.total < TRIBUTE_MILESTONE) return
+  if (tributes.some(t => t.address === address)) return
+  const plot = nextFreePlot()
+  if (plot < 0) { console.error(`[Server] ${entry.displayName} earned a tribute but the bed is full — add TRIBUTE_PLOTS`); return }
+  tributes.push({ address, displayName: entry.displayName, earnedAt: Date.now(), plot, founding: false, note: '' })
+  await saveTributes()
+  sendTributes()
+  room.send('notice', { text: `${entry.displayName}'s tribute plant has grown - ${TRIBUTE_MILESTONE} lifetime waters` })
+  console.log(`[Server] Tribute granted: ${entry.displayName} → plot ${plot}`)
 }
 
 /** Clears the weekly board once its reset moment has passed — runs at startup and
@@ -761,6 +835,7 @@ function playerJoinSystem(): void {
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
+      sendTributes([address])
       console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
@@ -893,6 +968,7 @@ export async function server(): Promise<void> {
         sendNotice(playerAddress, `${lifetime.get(playerAddress)?.total} lifetime waters — your name now carries ${names[tier]}`)
         console.log(`[Server] ${displayName} reached flair tier ${tier}`)
       }
+      await grantTributeIfEarned(playerAddress)
       broadcastLeaderboard()
       console.log(`[Server] ${plantId} watered by ${playerAddress} (${getWateredCount()}/${currentBloomThreshold()} garden)`)
       checkBloomThreshold()
@@ -1088,6 +1164,7 @@ export async function server(): Promise<void> {
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)
+    sendTributes([address])
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 

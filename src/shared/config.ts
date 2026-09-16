@@ -136,6 +136,27 @@ export function flairTag(tier: number): string {
 /** Weekly board cadence — the reset moment is shown in-world (GDD §4.3). */
 export const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000
 
+// ── v2 Phase 5b: tribute plants (GDD §4.2 "week 3+": a permanent, personal mark) ──
+/** Lifetime waters that grow a permanent tribute plant with the player's name. */
+export const TRIBUTE_MILESTONE = 1000   // TUNING — GDD "TBD: threshold, ~1,000"
+/** Fixed memorial-bed plots, filled in the order tributes are earned (never placed
+ *  dynamically — clutter would cheapen the founding rose). Add plots when the bed fills. */
+export const TRIBUTE_PLOTS: ReadonlyArray<{ x: number; z: number }> = [
+  { x: 4.5, z: 21.5 }, { x: 5.7, z: 21.5 }, { x: 6.9,  z: 21.5 }, { x: 8.1,  z: 21.5 },
+  { x: 9.3, z: 21.5 }, { x: 10.5, z: 21.5 }, { x: 11.7, z: 21.5 }, { x: 12.9, z: 21.5 },
+]
+export interface FoundingTribute { displayName: string; address: string; note: string }
+/** Seeded on first run — v2 ships with the first tribute already grown (GDD §4.2).
+ *  address: fill in the honoree's wallet when known → the server also seeds their
+ *  lifetime total to TRIBUTE_MILESTONE so they carry golden flair on the boards. */
+export const FOUNDING_TRIBUTES: ReadonlyArray<FoundingTribute> = [
+  { displayName: 'PeterParker', address: '', note: 'v1 gardener - reached 1,000 waters twice' },
+]
+/** GLB paths; empty = greybox stand-in. Founding gets a unique model (KJ's custom rose),
+ *  every later tribute reuses ONE standard plant tinted per player + a plaque. */
+export const TRIBUTE_MODEL_FOUNDING = ''   // e.g. 'assets/scene/Models/tribute/peterparker_rose.glb'
+export const TRIBUTE_MODEL_STANDARD = ''
+
 // ── v2 Phase 4: harvest, gift, box-watering (GDD §3 step 5, §5 social loop) ──
 /** Boxes a player may hold at once. KJ decision 2026-09-16: 1 — stored per player
  *  (`boxCap` in player storage) so purchasable extra boxes can raise it later. */
