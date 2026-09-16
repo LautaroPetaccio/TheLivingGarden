@@ -14,7 +14,7 @@ import {
   PlayerIdentityData,
   executeTask,
 } from '@dcl/sdk/ecs'
-import { readValue, readWithRetry, createKeyWriter, scenePath, playerPath, KeyWriter } from './persistence'
+import { loadScene, loadPlayer, createSceneWriter, createPlayerWriter, KeyWriter } from './persistence'
 import { PlantSync }          from '../shared/schemas'
 import { room }               from '../shared/messages'
 import {
@@ -65,10 +65,10 @@ const leaderboard = new Map<string, LeaderboardEntry>()  // address → entry
 // touched this session and stored state fills the rest.
 // ---------------------------------------------------------------
 
-const plantsWriter      = createKeyWriter('plants',             scenePath('plants'))
-const leaderboardWriter = createKeyWriter('leaderboard',        scenePath('leaderboard'))
-const resetAtWriter     = createKeyWriter('leaderboardResetAt', scenePath('leaderboardResetAt'))
-const boxesWriter       = createKeyWriter('boxes',              scenePath('boxes'))
+const plantsWriter      = createSceneWriter('plants')
+const leaderboardWriter = createSceneWriter('leaderboard')
+const resetAtWriter     = createSceneWriter('leaderboardResetAt')
+const boxesWriter       = createSceneWriter('boxes')
 
 const STORAGE_UNAVAILABLE_NOTICE = 'Your garden data is unavailable right now — try again in a moment'
 const RELOAD_INTERVAL_MS         = 30_000
@@ -97,8 +97,8 @@ const wateredByMap = new Map<string, string>()
 
 /** Load (or late-load) plant states. Returns false if storage was unreachable. */
 async function loadPlantStates(): Promise<boolean> {
-  const res = await readWithRetry<PlantRecord[]>(scenePath('plants'))
-  if (!res.ok) { console.error(`[Server] plants: load failed (${res.error}) — saves held until a reload succeeds`); return false }
+  const res = await loadScene<PlantRecord[]>('plants')
+  if (!res.ok) { console.error('[Server] plants: storage unreachable — saves held until a reload succeeds'); return false }
 
   // Parse defensively — a legacy or hand-edited value may not have this shape.
   const records = Array.isArray(res.value) ? res.value : []
@@ -123,7 +123,6 @@ async function loadPlantStates(): Promise<boolean> {
   }
   console.log(res.value === null ? '[Server] No persisted plant states — starting fresh' : `[Server] Restored ${restored} watered plants from storage`)
   plantsWriter.enable()
-  savePlantStates()   // write back in the current format (drains legacy string-encoded blobs)
   return true
 }
 
@@ -147,12 +146,11 @@ interface LeaderboardRecord extends LeaderboardEntry { address: string }
  *  if storage was unreachable. Stored totals are added to this session's totals. */
 async function loadLeaderboard(): Promise<boolean> {
   const [board, resetAt] = await Promise.all([
-    readWithRetry<LeaderboardRecord[]>(scenePath('leaderboard')),
-    readWithRetry<number>(scenePath('leaderboardResetAt')),
+    loadScene<LeaderboardRecord[]>('leaderboard'),
+    loadScene<number>('leaderboardResetAt'),
   ])
   if (!board.ok || !resetAt.ok) {
-    const error = !board.ok ? board.error : !resetAt.ok ? resetAt.error : ''
-    console.error(`[Server] leaderboard: load failed (${error}) — saves held until a reload succeeds`)
+    console.error('[Server] leaderboard: storage unreachable — saves held until a reload succeeds')
     return false
   }
 
@@ -398,12 +396,12 @@ async function loadPlayerRecord<T>(address: string, key: string, def: () => T): 
   if (inFlight) return inFlight as Promise<T | null>
 
   const load = (async (): Promise<T | null> => {
-    const res = await readValue<T>(playerPath(address, key))
-    if (!res.ok) { console.error(`[Server] ${key} for ${address.slice(0, 8)}…: load failed (${res.error})`); return null }
+    const res = await loadPlayer<T>(address, key)
+    if (!res.ok) { console.error(`[Server] ${key} for ${address.slice(0, 8)}…: storage unreachable`); return null }
     // Parse defensively — fall back to the default when the stored shape is wrong.
     const stored = res.value
     const value  = stored !== null && typeof stored === 'object' ? stored : def()
-    const writer = createKeyWriter(`${key}@${address.slice(0, 8)}`, playerPath(address, key))
+    const writer = createPlayerWriter(address, key)
     writer.enable()
     playerRecords.set(k, { value, writer })
     return value
@@ -538,8 +536,8 @@ function scheduleOpen(b: BoxRecord): void {
 /** Load (or late-load) the boxes. Returns false if storage was unreachable.
  *  A box claimed this session wins over its stored record. */
 async function loadBoxes(): Promise<boolean> {
-  const res = await readWithRetry<Array<Partial<BoxRecord> & { boxId: string }>>(scenePath('boxes'))
-  if (!res.ok) { console.error(`[Server] boxes: load failed (${res.error}) — saves held until a reload succeeds`); return false }
+  const res = await loadScene<Array<Partial<BoxRecord> & { boxId: string }>>('boxes')
+  if (!res.ok) { console.error('[Server] boxes: storage unreachable — saves held until a reload succeeds'); return false }
 
   // Records saved before Phase 4 lack the watering fields; an undefined string
   // makes every boxState send throw in the event bus, so backfill on load.

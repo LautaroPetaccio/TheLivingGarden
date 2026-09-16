@@ -1,63 +1,37 @@
 // =============================================================
 // The Living Garden — Server persistence
 //
-// A thin client for the Server Side Storage service plus a per-key writer
-// that gives the in-memory game state durable, ordered, retried writes.
+// A thin layer over @dcl/sdk/server's Storage. All I/O goes through the SDK;
+// this module never talks to the storage service itself.
 //
-// Why not @dcl/sdk/server's Storage directly? In 7.21.1-22918726402 its
-// get() returns null for BOTH "key not set" and "request failed", and its
-// set() swallows failures into a bare `false` that nothing checked. A failed
-// read at startup therefore looked like an empty world, and the first save
-// then overwrote the real data. This module talks to the same endpoints
-// (mirrors node_modules/@dcl/sdk/server/storage/*.js and storage-url.js) but
-// keeps the two cases apart and never lets a failed write go unnoticed.
+// The SDK already serializes and coalesces writes per key, shares concurrent
+// reads of the same key, caches confirmed values and absences, and skips a
+// write whose value is provably already stored. What it leaves to the caller
+// is the part the garden depends on:
+//
+//   • get() returns null BOTH for a key that is not set and for a request that
+//     failed, and it rejects outright if the realm lookup fails. Taking a null
+//     at face value is what made a storage outage at startup look like an empty
+//     world, so that the first save afterwards overwrote the real data. set()
+//     reports failure unambiguously, so a probe write settles which one it was.
+//   • set() does not retry. A false result is a lost save unless someone acts
+//     on it, and nothing did.
 // =============================================================
 
-import { signedFetch } from '~system/SignedFetch'
-import { getRealm } from '~system/Runtime'
+import { Storage } from '@dcl/sdk/server'
 
-export type ReadResult<T> =
-  | { ok: true; value: T | null }     // null = key not set
-  | { ok: false; error: string }
-
-// ---------------------------------------------------------------
-// Endpoints
-// ---------------------------------------------------------------
-
-const STORAGE_ORG  = 'https://storage.decentraland.org'
-const STORAGE_ZONE = 'https://storage.decentraland.zone'
-
-let baseUrlPromise: Promise<string> | null = null
-
-/** Preview → the local preview server; `.zone` realms → staging; else production. */
-function storageBaseUrl(): Promise<string> {
-  if (!baseUrlPromise) {
-    baseUrlPromise = getRealm({}).then(({ realmInfo }) => {
-      if (!realmInfo) throw new Error('Unable to retrieve realm information')
-      if (realmInfo.isPreview) return realmInfo.baseUrl
-      if (realmInfo.baseUrl.includes('.zone')) return STORAGE_ZONE
-      return STORAGE_ORG
-    })
-    baseUrlPromise.catch(() => { baseUrlPromise = null })   // let the next call retry
-  }
-  return baseUrlPromise
-}
-
-export function scenePath(key: string): string {
-  return `/values/${encodeURIComponent(key)}`
-}
-
-export function playerPath(address: string, key: string): string {
-  return `/players/${encodeURIComponent(address)}/values/${encodeURIComponent(key)}`
-}
+export type LoadResult<T> =
+  | { ok: true; value: T | null }     // null = the key is genuinely not set
+  | { ok: false }                     // storage could not be reached
 
 // ---------------------------------------------------------------
-// Transport
+// Host-call budget
 // ---------------------------------------------------------------
 
-/** The runtime rejects host calls beyond 40 in flight (storage, signedFetch, …)
- *  instead of queuing them. Queue here so a join burst costs latency, not
- *  failed reads. Kept well under the cap to leave room for other host calls. */
+/** The runtime caps in-flight host calls (shared across storage, signedFetch and
+ *  every other runtime API) and rejects rather than queues past the limit. Pace
+ *  our own calls well below it so a join burst costs latency instead of errors,
+ *  and so other parts of the scene keep their share. */
 const MAX_IN_FLIGHT = 8
 let   inFlight      = 0
 const waiting: Array<() => void> = []
@@ -73,123 +47,121 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-type HttpResult =
-  | { ok: true;  status: number; body: string }
-  | { ok: false; status?: number; error: string }
+// ---------------------------------------------------------------
+// Reachability
+// ---------------------------------------------------------------
 
-async function request(path: string, init?: { method: string; body: string }): Promise<HttpResult> {
-  return withSlot(async () => {
-    try {
-      const url = (await storageBaseUrl()) + path
-      const res = await signedFetch(
-        init ? { url, init: { method: init.method, body: init.body, headers: { 'content-type': 'application/json' } } }
-             : { url },
-      )
-      if (res.ok) return { ok: true, status: res.status, body: res.body }
-      return { ok: false, status: res.status, error: `${res.status} ${res.statusText}` }
-    } catch (err) {
-      return { ok: false, error: err instanceof Error ? err.message : String(err) }
-    }
-  })
+/** Scene key holding the last time the server confirmed storage was writable.
+ *  Written only to settle an ambiguous read; also handy when inspecting state. */
+const HEARTBEAT_KEY  = 'serverStorageHeartbeat'
+const CONFIRMED_TTL_MS = 10_000   // a recent success vouches for a null read
+const FAILED_TTL_MS    =  3_000   // a recent failure suppresses a probe storm
+
+let lastConfirmedAt = 0
+let lastFailedAt    = 0
+let probe: Promise<boolean> | null = null
+
+/** Any completed operation is evidence about the service, so record both outcomes. */
+function markReachable(): void { lastConfirmedAt = Date.now() }
+function markUnreachable(): void { lastFailedAt = Date.now() }
+
+/** Is the service reachable? Answers from recent evidence when it can, and
+ *  otherwise probes with a write, whose boolean result is unambiguous.
+ *  Callers must not hold a host-call slot while awaiting this. */
+async function isReachable(): Promise<boolean> {
+  const now = Date.now()
+  if (now - lastConfirmedAt < CONFIRMED_TTL_MS) return true
+  if (now - lastFailedAt    < FAILED_TTL_MS)    return false
+  if (!probe) {
+    probe = withSlot(() => Storage.set(HEARTBEAT_KEY, Date.now(), { skipIfUnchanged: false }))
+      .then(ok => { ok ? markReachable() : markUnreachable(); return ok })
+      .catch(() => { markUnreachable(); return false })
+    void probe.finally(() => { probe = null })
+  }
+  return probe
 }
 
 // ---------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------
 
-/** Earlier server versions pre-stringified every value, so the service holds a
- *  JSON string inside JSON for those keys. Unwrap them; pass new values through. */
-function decodeStored<T>(raw: unknown): T | null {
-  if (raw === null || raw === undefined) return null
-  if (typeof raw === 'string') {
-    try { return JSON.parse(raw) as T } catch { return raw as unknown as T }
-  }
-  return raw as T
-}
-
-/** One read. A 404 or an explicit null value is "not set"; anything else that
- *  is not a 2xx is a failure the caller must not mistake for an empty key. */
-export async function readValue<T>(path: string): Promise<ReadResult<T>> {
-  const res = await request(path)
-  if (!res.ok) {
-    if (res.status === 404) return { ok: true, value: null }
-    return { ok: false, error: res.error }
-  }
+async function load<T>(read: () => Promise<T | null>): Promise<LoadResult<T>> {
+  let value: T | null
   try {
-    const body = JSON.parse(res.body || '{}') as { value?: unknown }
-    return { ok: true, value: decodeStored<T>(body.value) }
+    value = await withSlot(read)
   } catch {
-    return { ok: false, error: 'malformed response body' }
+    markUnreachable()       // get() rejects when the realm lookup fails
+    return { ok: false }
   }
+  if (value !== null && value !== undefined) {
+    markReachable()
+    return { ok: true, value }
+  }
+  // The slot is released by now, so probing here cannot deadlock against it.
+  return (await isReachable()) ? { ok: true, value: null } : { ok: false }
 }
 
-function sleep(ms: number): Promise<void> {
-  return new Promise(resolve => setTimeout(resolve, ms))
+export function loadScene<T>(key: string): Promise<LoadResult<T>> {
+  return load<T>(() => Storage.get<T>(key))
 }
 
-/** Startup reads: retry a failure once after a short pause, so a single blip does
- *  not hold saves. Deliberately shallow — server() awaits these before it registers
- *  message handlers, and a longer chain of timeouts would keep the game inert. A
- *  real outage is recovered by the caller's background reload, not by retrying here.
- *  A "not set" result returns immediately; only failures retry. */
-export async function readWithRetry<T>(path: string, attempts = 2, baseDelayMs = 1_000): Promise<ReadResult<T>> {
-  let result = await readValue<T>(path)
-  for (let attempt = 1; attempt < attempts && !result.ok; attempt++) {
-    await sleep(baseDelayMs * 2 ** (attempt - 1))
-    result = await readValue<T>(path)
-  }
-  return result
+export function loadPlayer<T>(address: string, key: string): Promise<LoadResult<T>> {
+  return load<T>(() => Storage.player.get<T>(address, key))
 }
 
 // ---------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------
 
-async function putValue(path: string, body: string): Promise<boolean> {
-  const res = await request(path, { method: 'PUT', body })
-  if (!res.ok) console.error(`[Persistence] PUT ${path} failed: ${res.error}`)
-  return res.ok
-}
-
 const RETRY_BASE_MS = 1_000
 const RETRY_MAX_MS  = 30_000
 
 export interface KeyWriter {
-  /** Queue the current state. Coalesces: only the newest unsent snapshot is written,
-   *  writes never overlap, and a failed write retries with backoff until it lands
-   *  or a newer snapshot supersedes it. */
+  /** Queue the current state. The SDK coalesces and orders the writes; this adds
+   *  retry with backoff so a failed save is not silently lost. */
   save(snapshot: unknown): void
-  /** Allow writes. Until the key's load has settled, saves are held so a
+  /** Allow writes. Until the key's load has settled, saves are held, so a
    *  not-yet-loaded blob can never be overwritten by an emptier one. */
   enable(): void
   /** Resolves once nothing is queued, in flight, or awaiting retry. */
   idle(): Promise<void>
 }
 
-export function createKeyWriter(label: string, path: string): KeyWriter {
-  let enabled  = false
-  let writing  = false
-  let pending: string | null = null                       // serialized body of the newest unsent snapshot
-  let failures = 0
+function createWriter(label: string, write: (value: unknown) => Promise<boolean>): KeyWriter {
+  let enabled    = false
+  let writing    = false
+  let hasPending = false
+  let pending: unknown = null
+  let failures   = 0
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let idleWaiters: Array<() => void> = []
 
   function settleIdle(): void {
-    if (pending !== null || writing || retryTimer !== null) return
+    if (hasPending || writing || retryTimer !== null) return
     const waiters = idleWaiters
     idleWaiters = []
     for (const resolve of waiters) resolve()
   }
 
+  async function attempt(value: unknown): Promise<boolean> {
+    try {
+      return await withSlot(() => write(value))
+    } catch {
+      return false
+    }
+  }
+
   async function flush(): Promise<void> {
-    if (writing || !enabled) return
+    if (writing || !enabled || !hasPending) return
     writing = true
-    while (pending !== null) {
-      const body = pending
-      pending = null
-      if (await putValue(path, body)) { failures = 0; continue }
-      if (pending !== null) continue                      // a newer snapshot superseded the failed one
-      pending = body                                      // keep it for the retry
+    while (hasPending) {
+      const snapshot = pending
+      hasPending = false
+      if (await attempt(snapshot)) { failures = 0; markReachable(); continue }
+      markUnreachable()
+      if (hasPending) continue        // a newer snapshot arrived; write that instead
+      hasPending = true               // keep this one for the retry
+      pending    = snapshot
       failures++
       const delay = Math.min(RETRY_MAX_MS, RETRY_BASE_MS * 2 ** Math.min(failures - 1, 5))
       console.error(`[Persistence] ${label}: save failed (attempt ${failures}) — retrying in ${delay / 1_000}s`)
@@ -202,7 +174,8 @@ export function createKeyWriter(label: string, path: string): KeyWriter {
 
   return {
     save(snapshot) {
-      pending = JSON.stringify({ value: snapshot })
+      pending    = snapshot
+      hasPending = true
       if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null }
       void flush()
     },
@@ -214,4 +187,12 @@ export function createKeyWriter(label: string, path: string): KeyWriter {
       return new Promise<void>(resolve => { idleWaiters.push(resolve); settleIdle() })
     },
   }
+}
+
+export function createSceneWriter(key: string): KeyWriter {
+  return createWriter(key, value => Storage.set(key, value))
+}
+
+export function createPlayerWriter(address: string, key: string): KeyWriter {
+  return createWriter(`${key}@${address.slice(0, 8)}`, value => Storage.player.set(address, key, value))
 }
