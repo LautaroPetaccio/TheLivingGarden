@@ -104,7 +104,9 @@ function spawnSeed(rec: { id: string; x: number; z: number; rare: boolean; spawn
   Material.setPbrMaterial(entity, {
     albedoColor:       rec.rare ? COLOR_RARE : COLOR_NORMAL,
     emissiveColor:     rec.rare ? COLOR_RARE : COLOR_NORMAL,
-    emissiveIntensity: rec.rare ? 3 : 1.5,
+    // Low emissive so the hue (mint vs gold) actually reads — high values washed both to white.
+    // Placeholder until the real seed model with rare/normal as a material colour overlay.
+    emissiveIntensity: rec.rare ? 1.0 : 0.5,
   })
 
   seeds.set(rec.id, {
@@ -217,8 +219,13 @@ function seedDriftSystem(dt: number): void {
 
     if (dist3 < SEED_COLLECT_RADIUS) {
       // ── Reached the player in 3D — request the gather (server decides) ──
-      // Local admin seeds don't exist server-side and can never be gathered.
-      if (seed.id.startsWith('local_')) continue
+      // Local admin seeds don't exist server-side, so they self-collect on contact
+      // instead of following the player forever (no toast, no pouch).
+      if (seed.id.startsWith('local_')) {
+        console.log(`[Seeds] local test seed collected: ${seed.id}`)
+        despawnSeed(seed.id)
+        continue
+      }
       if (seed.gatherSentAt === 0 || now - seed.gatherSentAt > GATHER_RETRY_MS) {
         seed.gatherSentAt = now
         console.log(`[Seeds] Requesting gather: ${seed.id}`)
@@ -254,11 +261,12 @@ export function setupSeedSystem(): void {
   })
 
   room.onMessage('seedGathered', (data) => {
-    // The server may deliver this twice (broadcast + targeted diagnostic) —
-    // only the receipt that actually removes the seed shows the toast
+    // Sent to the gatherer only (per-player pickup); guard keeps a stray duplicate
+    // from toasting twice.
     const existed = seeds.has(data.seedId)
     despawnSeed(data.seedId)
     if (!existed) return
+    console.log(`[Seeds] gathered ${data.seedId}${data.rare ? ' (RARE)' : ''}`)
     const localId = getPlayer()?.userId ?? ''
     if (localId && data.byAddress.toLowerCase() === localId.toLowerCase()) {
       // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)

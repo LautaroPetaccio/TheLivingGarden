@@ -24,6 +24,20 @@ export const room = registerMessages({
   gatherSeed:       Schemas.Map({ seedId: Schemas.String }),
   /** Test-panel only: spawn one seed near x,z through the real seedSpawned path. */
   adminSpawnSeed:   Schemas.Map({ x: Schemas.Number, z: Schemas.Number, rare: Schemas.Boolean }),
+  /** Server → gatherer: the player's live seed pouch (after each gather, and on join). */
+  pouchUpdate:      Schemas.Map({ normal: Schemas.Number, rare: Schemas.Number }),
+
+  // ── v2: seed boxes ───────────────────────────────────────
+  /** Player taps an empty box to plant a seed from their pouch (rare = which kind). */
+  plantSeed:        Schemas.Map({ boxId: Schemas.String, rare: Schemas.Boolean }),
+  /** One box's state — broadcast on change, sent per box to a joining/resyncing player.
+   *  serverNow lets the client derive the countdown without trusting clockSync.
+   *  owner '' = empty box. flower '' = not opened yet. Timestamps are epoch ms (Int64). */
+  boxState:         Schemas.Map({
+    boxId: Schemas.String, owner: Schemas.String, ownerName: Schemas.String, rare: Schemas.Boolean,
+    plantedAt: Schemas.Int64, opensAt: Schemas.Int64, serverNow: Schemas.Int64,
+    opened: Schemas.Boolean, flower: Schemas.String,
+  }),
 
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */
@@ -35,13 +49,15 @@ export const room = registerMessages({
 
   // ── Server → all clients ─────────────────────────────────
   /** Periodic heartbeat so clients can maintain a clock-offset via clockSync. */
-  notifyServerTime: Schemas.Map({ sentAt: Schemas.Number }),
+  // Int64, not Number: a 13-digit epoch-ms in float32 rounds by up to ~131 s and
+  // made clockSync reject every heartbeat as an "outlier" (±60 s offsets).
+  notifyServerTime: Schemas.Map({ sentAt: Schemas.Int64 }),
 
   // ── Server → specific client ──────────────────────────────
   /** Sent on player join and after each successful watering.
    *  sentAt: server timestamp when message was created (for clockSync).
    *  bloomTime: absolute server timestamp of the next bloom window. */
-  playerDailyState: Schemas.Map({ sentAt: Schemas.Number, bloomTime: Schemas.Number }),
+  playerDailyState: Schemas.Map({ sentAt: Schemas.Int64, bloomTime: Schemas.Int64 }),
   /** Sent when server rejects a water attempt. */
   waterRejected:    Schemas.Map({ plantId: Schemas.String, reason: Schemas.String }),
 

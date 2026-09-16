@@ -30,6 +30,9 @@ import {
   seedRareChance,
   SEED_LIFETIME_MS,
   GARDEN_BOUNDS,
+  BOX_POSITIONS,
+  BOX_GROW_MS,
+  FLOWERS,
 } from '../shared/config'
 
 // ---------------------------------------------------------------
@@ -349,12 +352,118 @@ function remainingSeeds(address: string): SeedRecord[] {
 
 interface SeedPouch { normal: number; rare: number }
 
-async function getSeedPouch(address: string): Promise<SeedPouch> {
+// In-memory pouch per player is the source of truth for the session; Storage is
+// write-through. Without this, concurrent gathers each read→modified→wrote the
+// stored value and overwrote each other (11 gathers persisted as 6).
+const pouches     = new Map<string, SeedPouch>()          // address → live pouch
+const pouchWrites = new Map<string, Promise<void>>()      // address → last queued write
+
+async function loadPouch(address: string): Promise<SeedPouch> {
+  const live = pouches.get(address)
+  if (live) return live
+  let pouch: SeedPouch = { normal: 0, rare: 0 }
   try {
     const raw = await Storage.player.get<string>(address, 'seeds')
-    if (raw) return JSON.parse(raw)
+    if (raw) pouch = JSON.parse(raw)
   } catch { /* fall through to empty pouch */ }
-  return { normal: 0, rare: 0 }
+  // Another handler may have loaded it while we awaited — keep the first object
+  const raced = pouches.get(address)
+  if (raced) return raced
+  pouches.set(address, pouch)
+  return pouch
+}
+
+/** Persist a player's pouch; writes for the same player are serialized so an
+ *  earlier (lower) snapshot can never land after a later one. Fail-open. */
+function savePouch(address: string): Promise<void> {
+  const pouch = pouches.get(address)
+  if (!pouch) return Promise.resolve()
+  const snapshot = JSON.stringify(pouch)
+  const prev = pouchWrites.get(address) ?? Promise.resolve()
+  const next: Promise<void> = prev
+    .then(async () => { await Storage.player.set(address, 'seeds', snapshot) })
+    .catch(err => { console.error('[Server] savePouch failed:', err) })
+  pouchWrites.set(address, next)
+  return next
+}
+
+function sendPouch(address: string): void {
+  const p = pouches.get(address)
+  if (p) room.send('pouchUpdate', { normal: p.normal, rare: p.rare }, { to: [address] })
+}
+
+// ---------------------------------------------------------------
+// v2 — Seed boxes (GDD §3 step 4: plant → overnight timer → reveal)
+// Shared world state → scene Storage ('boxes'), per the storage decision.
+// ---------------------------------------------------------------
+
+interface BoxRecord {
+  boxId:     string
+  owner:     string   // address; '' = empty
+  ownerName: string
+  rare:      boolean
+  plantedAt: number
+  opensAt:   number
+  opened:    boolean
+  flower:    string   // '' until opened
+}
+
+const boxes     = new Map<string, BoxRecord>()                       // boxId → record
+const boxTimers = new Map<string, ReturnType<typeof setTimeout>>()  // boxId → open timer
+
+function emptyBox(boxId: string): BoxRecord {
+  return { boxId, owner: '', ownerName: '', rare: false, plantedAt: 0, opensAt: 0, opened: false, flower: '' }
+}
+
+function sendBox(b: BoxRecord, to?: string[]): void {
+  const payload = { ...b, serverNow: Date.now() }
+  room.send('boxState', payload, to ? { to } : undefined)
+}
+
+async function saveBoxes(): Promise<void> {
+  try {
+    await Storage.set('boxes', JSON.stringify([...boxes.values()]))
+  } catch (err) {
+    console.error('[Server] saveBoxes failed:', err)   // fail-open: in-memory state stays authoritative
+  }
+}
+
+function rollFlower(rare: boolean): string {
+  const pool = rare ? FLOWERS.rare : FLOWERS.normal
+  return pool[Math.floor(Math.random() * pool.length)]
+}
+
+/** The box's timer elapsed: reveal the flower, persist, tell everyone. */
+function openBox(boxId: string): void {
+  const b = boxes.get(boxId)
+  if (!b || !b.owner || b.opened) return
+  boxTimers.delete(boxId)
+  b.opened = true
+  b.flower = rollFlower(b.rare)
+  console.log(`[Server] ${b.boxId} opened for ${b.ownerName}: ${b.flower}${b.rare ? ' (RARE)' : ''}`)
+  sendBox(b)
+  void saveBoxes()
+}
+
+/** Schedule (or immediately fire) the open for a planted box. Safe to call on restart. */
+function scheduleOpen(b: BoxRecord): void {
+  if (!b.owner || b.opened) return
+  const existing = boxTimers.get(b.boxId)
+  if (existing) clearTimeout(existing)
+  const delay = Math.max(0, b.opensAt - Date.now())
+  boxTimers.set(b.boxId, setTimeout(() => executeTask(async () => openBox(b.boxId)), delay))
+}
+
+async function loadBoxes(): Promise<void> {
+  for (const p of BOX_POSITIONS) boxes.set(p.id, emptyBox(p.id))
+  const raw = await Storage.get<string>('boxes')
+  if (raw) {
+    const records: BoxRecord[] = JSON.parse(raw)
+    for (const r of records) if (boxes.has(r.boxId)) boxes.set(r.boxId, r)
+  }
+  let growing = 0
+  for (const b of boxes.values()) if (b.owner && !b.opened) { scheduleOpen(b); growing++ }
+  console.log(`[Server] Boxes: ${boxes.size} total, ${[...boxes.values()].filter(b => b.owner).length} planted, ${growing} growing (timers rescheduled)`)
 }
 
 async function resetGarden(): Promise<void> {
@@ -500,9 +609,12 @@ function playerJoinSystem(): void {
 
       broadcastLeaderboard([address])
       sendThreshold([address])
+      await loadPouch(address)
+      sendPouch(address)
       // Re-send bloom state to players who join while it is already active
       if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
+      for (const b of boxes.values()) sendBox(b, [address])
       console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
@@ -557,6 +669,12 @@ export async function server(): Promise<void> {
     await loadLeaderboard()
   } catch (err) {
     console.error('[Server] loadLeaderboard failed — starting with empty leaderboard:', err)
+  }
+  try {
+    await loadBoxes()
+  } catch (err) {
+    console.error('[Server] loadBoxes failed — starting with empty boxes:', err)
+    for (const p of BOX_POSITIONS) if (!boxes.has(p.id)) boxes.set(p.id, emptyBox(p.id))
   }
   const restoredCount = getWateredCount()
   console.log(`[Server] ${restoredCount} plants currently watered`)
@@ -644,16 +762,12 @@ export async function server(): Promise<void> {
     seed.gatheredBy.add(playerAddress)
 
     const displayName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
-    // Fail-open: pouch persistence failure must not block the broadcast
-    try {
-      const pouch = await getSeedPouch(playerAddress)
-      if (seed.rare) pouch.rare += 1
-      else pouch.normal += 1
-      await Storage.player.set(playerAddress, 'seeds', JSON.stringify(pouch))
-      console.log(`[Server] ${displayName} gathered ${seed.rare ? 'RARE ' : ''}seed ${seed.id} (pouch ${pouch.normal}+${pouch.rare}r)`)
-    } catch (err) {
-      console.error('[Server] gatherSeed: failed to persist pouch:', err)
-    }
+    const pouch = await loadPouch(playerAddress)
+    if (seed.rare) pouch.rare += 1     // synchronous on the shared live object
+    else pouch.normal += 1
+    void savePouch(playerAddress)      // serialized write-through, fail-open
+    console.log(`[Server] ${displayName} gathered ${seed.rare ? 'RARE ' : ''}seed ${seed.id} (pouch ${pouch.normal}+${pouch.rare}r)`)
+    sendPouch(playerAddress)
     // Targeted, not broadcast — only the gatherer's client despawns it
     room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rare: seed.rare }, { to: [playerAddress] })
   })
@@ -665,6 +779,33 @@ export async function server(): Promise<void> {
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
     sendSeed(seed)
     console.log(`[Server] adminSpawnSeed from ${address.slice(0, 8)} → ${seed.id} at (${data.x.toFixed(1)}, ${data.z.toFixed(1)})`)
+  })
+
+  // ── Message: plantSeed (v2) ─────────────────────────────────
+  onRoomMessage<{ boxId: string; rare: boolean }>('plantSeed', async (data, playerAddress) => {
+    const b = boxes.get(data.boxId)
+    if (!b) return
+    if (b.owner) { sendBox(b, [playerAddress]); return }          // taken — resync the tapper
+    const pouch = await loadPouch(playerAddress)
+    if (b.owner) { sendBox(b, [playerAddress]); return }          // re-check after the await
+    if (data.rare ? pouch.rare <= 0 : pouch.normal <= 0) { sendPouch(playerAddress); return }
+    // Consume the seed and claim the box synchronously — no await between check and claim
+    if (data.rare) pouch.rare -= 1
+    else pouch.normal -= 1
+    const now = Date.now()
+    b.owner     = playerAddress
+    b.ownerName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
+    b.rare      = data.rare
+    b.plantedAt = now
+    b.opensAt   = now + BOX_GROW_MS
+    b.opened    = false
+    b.flower    = ''
+    scheduleOpen(b)
+    console.log(`[Server] ${b.ownerName} planted a ${data.rare ? 'RARE ' : ''}seed in ${b.boxId} (opens in ${Math.round(BOX_GROW_MS / 60_000)} min)`)
+    sendBox(b)
+    sendPouch(playerAddress)
+    void savePouch(playerAddress)
+    void saveBoxes()
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
@@ -718,8 +859,11 @@ export async function server(): Promise<void> {
     }
     broadcastLeaderboard([address])
     sendThreshold([address])
+    await loadPouch(address)
+    sendPouch(address)
     if (bloomActive) room.send('bloomTriggered', { scale: bloomScale }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
+    for (const b of boxes.values()) sendBox(b, [address])
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 

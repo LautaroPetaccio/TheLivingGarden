@@ -53,6 +53,7 @@ import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_SUSTAIN_MS, BLOOM_CENTER, DAILY_WA
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
+import { setupBoxSystem } from './boxSystem'
 
 // ===============================================================
 // ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -1195,6 +1196,7 @@ export function setupWateringSystem(): void {
   // in the subsystem block before the clear and never received a single message —
   // cost a full day of playtests to find. Keep every room.onMessage below this line.)
   setupSeedSystem()
+  setupBoxSystem()
 
   room.onMessage('notifyServerTime', (data) => {
     clockSync.updateOffset(data.sentAt)

@@ -88,3 +88,22 @@ export const FAST_PLANT_NAMES = new Set([
   'FastPlant_1', 'FastPlant_2', 'FastPlant_3',
   'FastPlant_4', 'FastPlant_5', 'FastPlant_6',
 ])
+
+// ── v2: seed boxes (GDD §3 step 4, §4.1 D1 hook, §4.3 seed appointment) ──
+// A caught seed is planted in a named box in the SHARED garden; it grows on a
+// real-world timer and opens as an unidentified flower (rarity known, identity not).
+// Greybox row along the garden's front edge (z just inside zMin); move freely.
+export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number }> = [
+  { id: 'box_1', x: 4.5,  z: 3.6 }, { id: 'box_2', x: 5.7,  z: 3.6 },
+  { id: 'box_3', x: 6.9,  z: 3.6 }, { id: 'box_4', x: 8.1,  z: 3.6 },
+  { id: 'box_5', x: 9.3,  z: 3.6 }, { id: 'box_6', x: 10.5, z: 3.6 },
+  { id: 'box_7', x: 11.7, z: 3.6 }, { id: 'box_8', x: 12.9, z: 3.6 },
+]
+/** TUNING — GDD: overnight scale, "an evening plant opens by next morning" (~10 h).
+ *  Set to 2 minutes for the greybox playtest so the whole loop fits one session. */
+export const BOX_GROW_MS = 2 * 60_000
+/** Mystery-seed catalog: identity is rolled when the box opens. */
+export const FLOWERS = {
+  normal: ['Daisy', 'Tulip', 'Poppy'],
+  rare:   ['Moonbloom', 'Sunflare'],
+} as const
