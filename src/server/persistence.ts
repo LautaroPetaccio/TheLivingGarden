@@ -4,34 +4,28 @@
 // A thin layer over @dcl/sdk/server's Storage. All I/O goes through the SDK;
 // this module never talks to the storage service itself.
 //
-// The SDK already serializes and coalesces writes per key, shares concurrent
-// reads of the same key, caches confirmed values and absences, and skips a
-// write whose value is provably already stored. What it leaves to the caller
-// is the part the garden depends on:
-//
-//   • get() returns null BOTH for a key that is not set and for a request that
-//     failed, and it rejects outright if the realm lookup fails. Taking a null
-//     at face value is what made a storage outage at startup look like an empty
-//     world, so that the first save afterwards overwrote the real data. set()
-//     reports failure unambiguously, so a probe write settles which one it was.
-//   • set() does not retry. A false result is a lost save unless someone acts
-//     on it, and nothing did.
+// The SDK serializes and coalesces writes per key, shares concurrent reads of
+// the same key, caches confirmed values and absences, memoizes the realm lookup
+// and skips a write whose value is provably already stored. What it leaves to
+// the caller is retrying a write it reports as failed: set() does not retry, and
+// a false result is a lost save unless someone acts on it.
 // =============================================================
 
 import { Storage } from '@dcl/sdk/server'
 
 export type LoadResult<T> =
-  | { ok: true; value: T | null }     // null = the key is genuinely not set
-  | { ok: false }                     // storage could not be reached
+  | { ok: true; value: T | null }     // null = the key holds nothing
+  | { ok: false }                     // the read threw and returned no answer
 
 // ---------------------------------------------------------------
 // Host-call budget
 // ---------------------------------------------------------------
 
-/** The runtime caps in-flight host calls (shared across storage, signedFetch and
- *  every other runtime API) and rejects rather than queues past the limit. Pace
- *  our own calls well below it so a join burst costs latency instead of errors,
- *  and so other parts of the scene keep their share. */
+/** The runtime caps in-flight host calls, shared across storage and every other
+ *  runtime API, and rejects rather than queues past the limit. A rejected read
+ *  comes back as a bare null that is indistinguishable from an empty key, so
+ *  pacing our own calls well below the cap is what keeps a join burst from
+ *  reading a player's pouch as empty. Costs nothing when nothing is queued. */
 const MAX_IN_FLIGHT = 8
 let   inFlight      = 0
 const waiting: Array<() => void> = []
@@ -48,57 +42,15 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 }
 
 // ---------------------------------------------------------------
-// Reachability
-// ---------------------------------------------------------------
-
-/** Scene key holding the last time the server confirmed storage was writable.
- *  Written only to settle an ambiguous read; also handy when inspecting state. */
-const HEARTBEAT_KEY  = 'serverStorageHeartbeat'
-const CONFIRMED_TTL_MS = 10_000   // a recent success vouches for a null read
-const FAILED_TTL_MS    =  3_000   // a recent failure suppresses a probe storm
-
-let lastConfirmedAt = 0
-let lastFailedAt    = 0
-let probe: Promise<boolean> | null = null
-
-/** Any completed operation is evidence about the service, so record both outcomes. */
-function markReachable(): void { lastConfirmedAt = Date.now() }
-function markUnreachable(): void { lastFailedAt = Date.now() }
-
-/** Is the service reachable? Answers from recent evidence when it can, and
- *  otherwise probes with a write, whose boolean result is unambiguous.
- *  Callers must not hold a host-call slot while awaiting this. */
-async function isReachable(): Promise<boolean> {
-  const now = Date.now()
-  if (now - lastConfirmedAt < CONFIRMED_TTL_MS) return true
-  if (now - lastFailedAt    < FAILED_TTL_MS)    return false
-  if (!probe) {
-    probe = withSlot(() => Storage.set(HEARTBEAT_KEY, Date.now(), { skipIfUnchanged: false }))
-      .then(ok => { ok ? markReachable() : markUnreachable(); return ok })
-      .catch(() => { markUnreachable(); return false })
-    void probe.finally(() => { probe = null })
-  }
-  return probe
-}
-
-// ---------------------------------------------------------------
 // Reads
 // ---------------------------------------------------------------
 
 async function load<T>(read: () => Promise<T | null>): Promise<LoadResult<T>> {
-  let value: T | null
   try {
-    value = await withSlot(read)
+    return { ok: true, value: await withSlot(read) }
   } catch {
-    markUnreachable()       // get() rejects when the realm lookup fails
-    return { ok: false }
+    return { ok: false }   // get() rejects when the realm lookup fails
   }
-  if (value !== null && value !== undefined) {
-    markReachable()
-    return { ok: true, value }
-  }
-  // The slot is released by now, so probing here cannot deadlock against it.
-  return (await isReachable()) ? { ok: true, value: null } : { ok: false }
 }
 
 export function loadScene<T>(key: string): Promise<LoadResult<T>> {
@@ -120,8 +72,8 @@ export interface KeyWriter {
   /** Queue the current state. The SDK coalesces and orders the writes; this adds
    *  retry with backoff so a failed save is not silently lost. */
   save(snapshot: unknown): void
-  /** Allow writes. Until the key's load has settled, saves are held, so a
-   *  not-yet-loaded blob can never be overwritten by an emptier one. */
+  /** Allow writes. Saves before this are held, so a blob is never written back
+   *  before it has been read. */
   enable(): void
   /** Resolves once nothing is queued, in flight, or awaiting retry. */
   idle(): Promise<void>
@@ -157,8 +109,7 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
     while (hasPending) {
       const snapshot = pending
       hasPending = false
-      if (await attempt(snapshot)) { failures = 0; markReachable(); continue }
-      markUnreachable()
+      if (await attempt(snapshot)) { failures = 0; continue }
       if (hasPending) continue        // a newer snapshot arrived; write that instead
       hasPending = true               // keep this one for the retry
       pending    = snapshot

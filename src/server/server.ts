@@ -98,7 +98,7 @@ const wateredByMap = new Map<string, string>()
 /** Load (or late-load) plant states. Returns false if storage was unreachable. */
 async function loadPlantStates(): Promise<boolean> {
   const res = await loadScene<PlantRecord[]>('plants')
-  if (!res.ok) { console.error('[Server] plants: storage unreachable — saves held until a reload succeeds'); return false }
+  if (!res.ok) { console.error('[Server] plants: load failed — saves held until a reload succeeds'); return false }
 
   // Parse defensively — a legacy or hand-edited value may not have this shape.
   const records = Array.isArray(res.value) ? res.value : []
@@ -150,7 +150,7 @@ async function loadLeaderboard(): Promise<boolean> {
     loadScene<number>('leaderboardResetAt'),
   ])
   if (!board.ok || !resetAt.ok) {
-    console.error('[Server] leaderboard: storage unreachable — saves held until a reload succeeds')
+    console.error('[Server] leaderboard: load failed — saves held until a reload succeeds')
     return false
   }
 
@@ -397,7 +397,7 @@ async function loadPlayerRecord<T>(address: string, key: string, def: () => T): 
 
   const load = (async (): Promise<T | null> => {
     const res = await loadPlayer<T>(address, key)
-    if (!res.ok) { console.error(`[Server] ${key} for ${address.slice(0, 8)}…: storage unreachable`); return null }
+    if (!res.ok) { console.error(`[Server] ${key} for ${address.slice(0, 8)}…: load failed`); return null }
     // Parse defensively — fall back to the default when the stored shape is wrong.
     const stored = res.value
     const value  = stored !== null && typeof stored === 'object' ? stored : def()
@@ -537,7 +537,7 @@ function scheduleOpen(b: BoxRecord): void {
  *  A box claimed this session wins over its stored record. */
 async function loadBoxes(): Promise<boolean> {
   const res = await loadScene<Array<Partial<BoxRecord> & { boxId: string }>>('boxes')
-  if (!res.ok) { console.error('[Server] boxes: storage unreachable — saves held until a reload succeeds'); return false }
+  if (!res.ok) { console.error('[Server] boxes: load failed — saves held until a reload succeeds'); return false }
 
   // Records saved before Phase 4 lack the watering fields; an undefined string
   // makes every boxState send throw in the event bus, so backfill on load.
