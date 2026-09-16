@@ -676,14 +676,28 @@ function triggerWateringEmote(_plantEntity: Entity) {
 // Plant lifecycle
 // ---------------------------------------------------------------
 
-/** Returns the correct expiry duration for a plant — fast or standard. */
+// Decay is gardener-scaled on the server, so the authoritative duration arrives
+// with every plantStateUpdate. The constants below are only the optimistic guess
+// for the ~200 ms between our tap and the server's confirmation.
+const serverExpiryMs = new Map<string, number>()   // plantId → last expiresInMs from the server
+
+/** Expiry duration for a plant — the server's figure once known, else the local guess. */
 function plantExpiryMs(plantId: string): number {
+  const fromServer = serverExpiryMs.get(plantId)
+  if (fromServer !== undefined && fromServer > 0) return fromServer
   if (FAST_PLANT_NAMES.has(plantId)) return FAST_PLANT_EXPIRY_MS
   return runtimeTestMode ? EXPIRY_TEST_MS : EXPIRY_PROD_MS
 }
 
+// One live expiry timer per plant: a reschedule (server confirming a longer
+// decay than our guess) must supersede the earlier timer, not race it.
+const expiryGen = new Map<Entity, number>()
+
 function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: number) {
+  const gen = (expiryGen.get(entity) ?? 0) + 1
+  expiryGen.set(entity, gen)
   timers.setTimeout(() => {
+    if (expiryGen.get(entity) !== gen) return
     const pd = PlantData.getMutable(entity)
     if (!pd.isWatered || pd.wateredAt !== sessionTimestamp) return
 
@@ -1335,6 +1349,9 @@ export function setupWateringSystem(): void {
 
     const wasWatered = local.isWatered
     const plantPos   = Transform.getOrNull(entity)?.position
+    const wateredAt  = Number(data.wateredAt)   // Int64 on the wire
+    if (data.isWatered && data.expiresInMs > 0) serverExpiryMs.set(data.plantId, data.expiresInMs)
+    else serverExpiryMs.delete(data.plantId)
 
     // Consume any pending optimistic water — server has spoken.
     // Four cases:
@@ -1358,8 +1375,8 @@ export function setupWateringSystem(): void {
       if (data.isWatered && data.wateredBy) {
         const pid      = entityPlantId.get(entity)
         const expiryMs = plantExpiryMs(pid ?? '')
-        const alpha    = Math.max(0, 1 - (Date.now() - data.wateredAt) / expiryMs)
-        ts.text      = `Last watered by ${data.wateredBy}\n${formatTimeAgo(data.wateredAt)}`
+        const alpha    = Math.max(0, 1 - (Date.now() - wateredAt) / expiryMs)
+        ts.text      = `Last watered by ${data.wateredBy}\n${formatTimeAgo(wateredAt)}`
         ts.textColor = { ...WATERED_BY_COLOR, a: alpha }
       } else {
         ts.text = ''
@@ -1374,26 +1391,27 @@ export function setupWateringSystem(): void {
       // All other cases use the server-authoritative timestamp for accurate decay.
       const isCaseA = pending !== undefined && !pending.wasTopUp
       if (!isCaseA) {
-        PlantData.getMutable(entity).wateredAt = data.wateredAt
+        PlantData.getMutable(entity).wateredAt = wateredAt
       }
 
       if (pending !== undefined && !pending.wasTopUp) {
         // ── Case A: our fresh water confirmed ────────────────────
-        // Optimistic animations already running in waterPlant — just re-enable click.
+        // Optimistic animations already running in waterPlant — just re-enable click,
+        // and replace the guessed expiry with the server's gardener-scaled one.
         enablePlantClick(entity)
+        if (data.expiresInMs > 0) scheduleExpiry(entity, local.wateredAt, data.expiresInMs)
 
       } else if (pending !== undefined && pending.wasTopUp) {
         // ── Case B: our top-up confirmed ─────────────────────────
         // Plant already healthy; re-enable click. Drop stays hidden (plant watered).
         // The optimistic expiry (keyed on local `now`) will self-cancel because
-        // pd.wateredAt is now data.wateredAt — schedule a fresh expiry from there.
+        // pd.wateredAt is now the server's — schedule a fresh expiry from there.
         enablePlantClick(entity)
-        const remaining = plantExpiryMs(data.plantId) - (Date.now() - data.wateredAt)
-        if (remaining > 0) scheduleExpiry(entity, data.wateredAt, remaining)
+        if (data.expiresInMs > 0) scheduleExpiry(entity, wateredAt, data.expiresInMs)
 
       } else if (!wasWatered) {
         // ── Case C: remote player freshly watered this plant ─────
-        const isLive = (Date.now() - data.wateredAt) < LIVE_WATER_THRESHOLD_MS
+        const isLive = (Date.now() - wateredAt) < LIVE_WATER_THRESHOLD_MS
         if (isLive) {
           hideRose(entity)
           showPlant(entity)

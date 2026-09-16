@@ -25,7 +25,8 @@ import {
   BLOOM_RESET_DELAY_MS,
   BLOOM_SUSTAIN_MS,
   BLOOM_WINDOWS,
-  scaledBloomThreshold,
+  plantDecayMs,
+  bloomScaleFor,
   seedSpawnCount,
   seedRareChance,
   SEED_LIFETIME_MS,
@@ -68,10 +69,25 @@ interface PlantRecord {
   isWatered: boolean
   wateredAt: number   // ms timestamp stored as number (not BigInt)
   wateredBy: string   // display name of the player who watered it
+  expiresAt?: number  // ms timestamp; decay is gardener-scaled so it must be stored, not recomputed
 }
 
 // In-memory map of plantId → display name (kept in sync with PlantRecord)
 const wateredByMap = new Map<string, string>()
+// plantId → when its current watering dries out (gardener-scaled at water time)
+const plantExpiresAt = new Map<string, number>()
+
+function expiresInMs(plantId: string, now = Date.now()): number {
+  return Math.max(0, (plantExpiresAt.get(plantId) ?? 0) - now)
+}
+
+/** Mark `plantId` watered at `now` with decay for the gardeners present; returns expiresAt. */
+function armExpiry(plantId: string, entity: Entity, now: number): number {
+  const expiresAt = now + plantDecayMs(plantId, knownPlayers.size)
+  plantExpiresAt.set(plantId, expiresAt)
+  scheduleExpiry(plantId, entity, now, expiresAt - now)
+  return expiresAt
+}
 
 async function loadPlantStates(): Promise<void> {
   const raw = await Storage.get<string>('plants')
@@ -86,15 +102,16 @@ async function loadPlantStates(): Promise<void> {
     if (!entity) continue
     if (!rec.isWatered) continue
 
-    const expiryMs = FAST_PLANT_NAMES.has(rec.plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS
-    const elapsed  = now - rec.wateredAt
-    if (elapsed >= expiryMs) continue  // expired while server was down
+    // Pre-rework records have no expiresAt: fall back to the base (v1) decay
+    const expiresAt = rec.expiresAt ?? rec.wateredAt + (FAST_PLANT_NAMES.has(rec.plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS)
+    if (now >= expiresAt) continue  // expired while server was down
 
     const ps = PlantSync.getMutable(entity)
     ps.isWatered = true
     ps.wateredAt = rec.wateredAt
     if (rec.wateredBy) wateredByMap.set(rec.plantId, rec.wateredBy)
-    scheduleExpiry(rec.plantId, entity, rec.wateredAt, expiryMs - elapsed)
+    plantExpiresAt.set(rec.plantId, expiresAt)
+    scheduleExpiry(rec.plantId, entity, rec.wateredAt, expiresAt - now)
     restored++
   }
   console.log(`[Server] Restored ${restored} watered plants from Storage`)
@@ -105,7 +122,7 @@ async function savePlantStates(): Promise<void> {
   for (const [plantId, entity] of plantEntities) {
     const ps = PlantSync.getOrNull(entity)
     if (!ps) continue
-    records.push({ plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '' })
+    records.push({ plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresAt: plantExpiresAt.get(plantId) })
   }
   await Storage.set('plants', JSON.stringify(records))
 }
@@ -196,18 +213,17 @@ function getWateredCount(): number {
   return count
 }
 
-// ── v2: scaled bloom threshold ───────────────────────────────
+// ── v2: bloom threshold + gardener count ─────────────────────
+// Since the decay-rate rework the threshold is flat; what scales with gardeners
+// is plant decay (see plantDecayMs) and bloom size (bloomScaleFor).
 
-/** Bloom threshold scaled to gardeners currently present (solo → small quiet bloom). */
 function currentBloomThreshold(): number {
-  return scaledBloomThreshold(knownPlayers.size)
+  return BLOOM_THRESHOLD
 }
 
-let lastBroadcastThreshold = -1
+let lastBroadcastGardeners = -1
 
-/** Send the scaled threshold — targeted to one player, or broadcast when it changed.
- *  A broadcast-side change also re-evaluates the sustain timer: a join can raise the
- *  threshold above current health (pause), a leave can drop it below (resume). */
+/** Send threshold + gardener count — targeted to one player, or broadcast when the count changed. */
 function sendThreshold(to?: string[]): void {
   const threshold = currentBloomThreshold()
   const gardeners = Math.max(1, knownPlayers.size)
@@ -215,11 +231,10 @@ function sendThreshold(to?: string[]): void {
     room.send('thresholdUpdate', { threshold, gardeners }, { to })
     return
   }
-  if (threshold === lastBroadcastThreshold) return
-  lastBroadcastThreshold = threshold
+  if (gardeners === lastBroadcastGardeners) return
+  lastBroadcastGardeners = gardeners
   room.send('thresholdUpdate', { threshold, gardeners })
-  console.log(`[Server] Bloom threshold now ${threshold} (${gardeners} gardeners present)`)
-  checkBloomThreshold()
+  console.log(`[Server] ${gardeners} gardener(s) present — new waterings last ${Math.round(plantDecayMs('Plant_1', gardeners) / 1000)}s`)
 }
 
 // ── Sustained-health bloom trigger ───────────────────────────
@@ -295,7 +310,7 @@ function triggerBloom(): void {
   cancelBloomSustain()
   bloomActive    = true
   bloomStartedAt = Date.now()
-  bloomScale     = threshold / BLOOM_THRESHOLD
+  bloomScale     = bloomScaleFor(knownPlayers.size)
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)})`)
   room.send('bloomTriggered', { scale: bloomScale })
   spawnBloomSeeds()
@@ -553,7 +568,8 @@ async function resetGarden(): Promise<void> {
     ps.isWatered = false
     ps.wateredAt = 0
     wateredByMap.delete(plantId)
-    room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '' })
+    plantExpiresAt.delete(plantId)
+    room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0 })
   }
 
   // Send bloomReset BEFORE persisting — a Storage failure must never prevent clients
@@ -587,13 +603,14 @@ function scheduleExpiry(
       expired.isWatered = false
       expired.wateredAt = 0
       wateredByMap.delete(plantId)
+      plantExpiresAt.delete(plantId)
       // Fail-open: persistence failure must not block the expiry broadcast
       try {
         await savePlantStates()
       } catch (err) {
         console.error('[Server] scheduleExpiry: failed to persist state:', err)
       }
-      room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '' })
+      room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0 })
       console.log(`[Server] Plant expired: ${plantId}`)
       // Pause (not cancel) — preserves elapsed progress; timer resumes when health recovers.
       // Expiry must never start the sustain timer, only pause it.
@@ -678,7 +695,7 @@ function playerJoinSystem(): void {
       for (const [plantId, plantEntity] of plantEntities) {
         const ps = PlantSync.getOrNull(plantEntity)
         if (!ps) continue
-        room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '' }, { to: [address] })
+        room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId) }, { to: [address] })
       }
 
       broadcastLeaderboard([address])
@@ -815,9 +832,9 @@ export async function server(): Promise<void> {
       } catch (err) {
         console.error('[Server] waterPlant: failed to persist state:', err)
       }
-      scheduleExpiry(plantId, entity, now, FAST_PLANT_NAMES.has(plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS)
+      const expiresAt = armExpiry(plantId, entity, now)
 
-      room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName })
+      room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now })
       broadcastLeaderboard()
       console.log(`[Server] ${plantId} watered by ${playerAddress} (${getWateredCount()}/${currentBloomThreshold()} garden)`)
       checkBloomThreshold()
@@ -979,8 +996,8 @@ export async function server(): Promise<void> {
         mutable.isWatered = true
         mutable.wateredAt = now
         wateredByMap.set(plantId, '[Test Mode]')
-        scheduleExpiry(plantId, entity, now, FAST_PLANT_NAMES.has(plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS)
-        room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: '[Test Mode]' })
+        const expiresAt = armExpiry(plantId, entity, now)
+        room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: '[Test Mode]', expiresInMs: expiresAt - now })
         watered++
       }
     }
@@ -1003,7 +1020,7 @@ export async function server(): Promise<void> {
     for (const [plantId, plantEntity] of plantEntities) {
       const ps = PlantSync.getOrNull(plantEntity)
       if (!ps) continue
-      room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '' }, { to: [address] })
+      room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId) }, { to: [address] })
     }
     broadcastLeaderboard([address])
     sendThreshold([address])

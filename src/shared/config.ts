@@ -12,19 +12,25 @@ export const BLOOM_WINDOWS: ReadonlyArray<{ hour: number; minute: number }> = [
 export const TOTAL_PLANTS       = 38   // 32 regular + 6 fast
 export const BLOOM_THRESHOLD    = Math.ceil(TOTAL_PLANTS * 0.8)
 
-// ── v2: scaled bloom threshold ───────────────────────────────
-// The threshold scales with gardeners present so a solo player can earn a
-// smaller, quieter bloom (GDD §3 step 2). TUNING: solo sits below the ~12–14
-// plants one player can sustain against 3-minute decay; the step is chosen so
-// the full-garden bloom lands at exactly 4 gardeners (GDD §5 "comfortable at four").
-export const SOLO_BLOOM_THRESHOLD         = 10
-export const BLOOM_THRESHOLD_PER_GARDENER = 7
+// ── v2: gardener-scaled DECAY (KJ decision 2026-09-16, replaces threshold scaling) ──
+// The bloom threshold stays a flat 80% of the garden for everyone, so a solo
+// player still "completes" the watering; what scales with gardeners present is
+// how fast plants dry out. Solo pace is ~1 plant per 4–5 s (31 plants ≈ 2.5 min),
+// so solo decay must comfortably exceed that; the garden gets thirstier with
+// each extra gardener until the v1 rate at DECAY_FULL_GARDENERS (GDD §5 "four").
+export const DECAY_FACTOR_AT_SOLO  = 3.0   // TUNING — solo: 3 min × 3 = 9 min per plant
+export const DECAY_FULL_GARDENERS  = 4     // at this many, decay is the base (v1) rate
 
-/** Watered-plant count required to arm the bloom for `gardeners` players present.
- *  1 → 10, 2 → 17, 3 → 24, 4+ → BLOOM_THRESHOLD (31). */
-export function scaledBloomThreshold(gardeners: number): number {
-  const n = Math.max(1, gardeners)
-  return Math.min(BLOOM_THRESHOLD, SOLO_BLOOM_THRESHOLD + BLOOM_THRESHOLD_PER_GARDENER * (n - 1))
+/** Multiplier on the base expiry for `gardeners` present: 1 → 3.0, 2 → 2.33, 3 → 1.67, 4+ → 1. */
+export function decayFactor(gardeners: number): number {
+  const n = Math.max(1, Math.min(DECAY_FULL_GARDENERS, gardeners))
+  return DECAY_FACTOR_AT_SOLO + (1 - DECAY_FACTOR_AT_SOLO) * (n - 1) / (DECAY_FULL_GARDENERS - 1)
+}
+
+/** Bloom size for the FX/seed phases: solo blooms stay small and quiet (GDD §3),
+ *  a full-garden bloom needs DECAY_FULL_GARDENERS present. */
+export function bloomScaleFor(gardeners: number): number {
+  return Math.max(1, Math.min(DECAY_FULL_GARDENERS, gardeners)) / DECAY_FULL_GARDENERS
 }
 
 // ── v2: bloom seeds (GDD §3 step 3, §6 walk-through gathering) ──
@@ -88,6 +94,12 @@ export const FAST_PLANT_NAMES = new Set([
   'FastPlant_1', 'FastPlant_2', 'FastPlant_3',
   'FastPlant_4', 'FastPlant_5', 'FastPlant_6',
 ])
+
+/** How long a plant stays watered when watered with `gardeners` present. */
+export function plantDecayMs(plantId: string, gardeners: number): number {
+  const base = FAST_PLANT_NAMES.has(plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS
+  return Math.round(base * decayFactor(gardeners))
+}
 
 // ── v2: seed boxes (GDD §3 step 4, §4.1 D1 hook, §4.3 seed appointment) ──
 // A caught seed is planted in a named box in the SHARED garden; it grows on a

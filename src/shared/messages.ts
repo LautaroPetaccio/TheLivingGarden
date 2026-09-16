@@ -77,14 +77,16 @@ export const room = registerMessages({
   waterRejected:    Schemas.Map({ plantId: Schemas.String, reason: Schemas.String }),
 
   // ── Server → all clients ──────────────────────────────────
-  /** Broadcast when a plant's watered state changes (water or expiry). */
-  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Number, wateredBy: Schemas.String }),
+  /** Broadcast when a plant's watered state changes (water or expiry).
+   *  expiresInMs: server-computed time until this plant dries (0 when not watered) —
+   *  decay scales with gardeners present, so the client must not guess it. */
+  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number }),
   /** Broadcast when the bloom threshold is reached.
    *  scale: thresholdAtFire / BLOOM_THRESHOLD (0–1] — 1 = full-garden bloom,
    *  below 1 = the smaller, quieter scaled bloom (v2). */
   bloomTriggered:   Schemas.Map({ scale: Schemas.Number }),
-  /** v2 — current scaled bloom threshold. Sent to a joining player, on full sync,
-   *  and broadcast whenever the gardener count (and so the threshold) changes. */
+  /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
+   *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),
