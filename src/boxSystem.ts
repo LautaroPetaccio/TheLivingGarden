@@ -232,6 +232,25 @@ function createBox(p: { id: string; x: number; z: number }): BoxView {
   return v
 }
 
+/** Test-panel only: force two boxes into the growing state so the rarity-tinted
+ *  seedling colors can be compared side by side without waiting on real timers.
+ *  Client-only, cosmetic — the next boxState broadcast (or a rejoin) overwrites it. */
+export function demoSeedlings(): void {
+  const demo = (boxId: string, rare: boolean) => {
+    const v = views.get(boxId)
+    if (!v) return
+    v.owner        = '0xdemo'
+    v.ownerName    = 'Demo'
+    v.rare         = rare
+    v.opened       = false
+    v.opensLocalAt = Date.now() + 3_600_000
+    refresh(v)
+  }
+  demo('box_1', false)
+  demo('box_2', true)
+  console.log('[Boxes] demo seedlings: box_1 = normal, box_2 = rare — the next real box update clears it')
+}
+
 function boxTickSystem(dt: number): void {
   tickAccum += dt * 1_000
   if (tickAccum < LABEL_TICK_MS) return

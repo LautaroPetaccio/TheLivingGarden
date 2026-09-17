@@ -23,6 +23,7 @@ import {
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
+import { demoSeedlings } from './boxSystem'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -264,6 +265,15 @@ export function TestPanelUi() {
           onMouseDown={() => (getTestPotCount() > 0 ? removeTestPots() : spawnTestPots())}
         >
           <Label value={getTestPotCount() > 0 ? `Remove ${getTestPotCount()} test planters  (${getFps()} fps)` : `Spawn 100 test planters  (${getFps()} fps)`} fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Seedling rarity tint demo — box_1 = normal, box_2 = rare, clears on the next real update */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_OFF }}
+          onMouseDown={demoSeedlings}
+        >
+          <Label value="Demo seedling tints (box_1 normal / box_2 rare)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Divider */}

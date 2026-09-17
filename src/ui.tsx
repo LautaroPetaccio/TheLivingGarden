@@ -166,14 +166,23 @@ const EDGE       = 16          // gap from the safe-area edge
 function barColor(): { r: number; g: number; b: number } {
   return bannerHealth >= 0.8 ? BAR_GREEN : bannerHealth >= 0.5 ? BAR_ORANGE : BAR_RED
 }
-// Ring sprites: 41 health frames (2.5% ≈ one watering) + 21 bloom frames (time left).
-// Every frame is mounted once at the ring's position (see ringIndex) — nothing is ever swapped.
-const RING_STEPS  = 40
-const BLOOM_STEPS = 20
+// Ring sprites: art exists at 41 health steps + 21 bloom steps, but mounting one
+// UiEntity per frame (needed so nothing gets texture-swapped mid-game — see below)
+// means that many SIMULTANEOUS distinct UI textures. KJ 2026-09-17: the ring renders
+// as a plain white square on desktop even after the frames were made power-of-two —
+// so pixel size wasn't the whole story. DIAGNOSTIC: sample every 4th frame instead of
+// every one (62 → 17 simultaneous textures) to test whether sheer texture COUNT is the
+// actual limit. If this doesn't fix it either, the cause is something else entirely —
+// this file only picks a subset of the existing PNGs, no new art needed either way.
+const RING_STEPS   = 40
+const BLOOM_STEPS  = 20
+const FRAME_STRIDE = 4
+const RING_FRAME_COUNT  = Math.floor(RING_STEPS  / FRAME_STRIDE) + 1   // 11 frames: 0,4,…40
+const BLOOM_FRAME_COUNT = Math.floor(BLOOM_STEPS / FRAME_STRIDE) + 1   // 6 frames: 0,4,…20
 const two = (n: number): string => String(n).padStart(2, '0')
 const RING_FILES: string[] = [
-  ...Array.from({ length: RING_STEPS + 1 },  (_, i) => `${UI_DIR}ring_${two(i)}.png`),
-  ...Array.from({ length: BLOOM_STEPS + 1 }, (_, i) => `${UI_DIR}ringbloom_${two(i)}.png`),
+  ...Array.from({ length: RING_FRAME_COUNT },  (_, i) => `${UI_DIR}ring_${two(i * FRAME_STRIDE)}.png`),
+  ...Array.from({ length: BLOOM_FRAME_COUNT }, (_, i) => `${UI_DIR}ringbloom_${two(i * FRAME_STRIDE)}.png`),
 ]
 /** Index into RING_FILES of the one frame to show. Frames are STACKED and toggled by alpha —
  *  changing an element's texture makes the client rebuild its background (a blank frame),
@@ -181,8 +190,8 @@ const RING_FILES: string[] = [
 function ringIndex(): number {
   const clamp = (v: number) => Math.max(0, Math.min(1, v))
   return bannerState === 'bloom'
-    ? RING_STEPS + 1 + Math.round(clamp(bloomRemainingFrac) * BLOOM_STEPS)
-    : Math.round(clamp(shownHealth) * RING_STEPS)
+    ? RING_FRAME_COUNT + Math.round(clamp(bloomRemainingFrac) * (BLOOM_FRAME_COUNT - 1))
+    : Math.round(clamp(shownHealth) * (RING_FRAME_COUNT - 1))
 }
 function toastGlyph(text: string): { src: string; tint: { r: number; g: number; b: number } } {
   const t = text.toLowerCase()

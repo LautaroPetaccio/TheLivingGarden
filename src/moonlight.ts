@@ -7,15 +7,17 @@
 //                      removing it at bloom reset lets dawn break again
 //   2. moon wisps    — slow glowing lights rise from the whole garden, only
 //                      readable because the sky is dark
-//   3. the moon glow — a breathing blue-white glow that hangs over BLOOM_CENTER for
-//                      the whole event; the garden has no single "Bloom" mesh, so
+//   3. the moon glow — a breathing blue-white glow sprite that hangs over BLOOM_CENTER
+//                      for the whole event; the garden has no single "Bloom" mesh, so
 //                      this is the one persistent mark on the moment itself
+//   4. a real light   — a point LightSource at the same spot, so the moon-blue tint
+//                      actually falls on nearby geometry, not just the glow sprite
 // Everything is created on the first Moonlit Bloom — zero cost on a normal day.
 // =============================================================
 
 import {
   engine, Entity, Transform, MeshRenderer, Material, MaterialTransparencyMode,
-  Billboard, BillboardMode, SkyboxTime, TransitionMode,
+  Billboard, BillboardMode, SkyboxTime, TransitionMode, LightSource,
 } from '@dcl/sdk/ecs'
 import { GARDEN_BOUNDS, BLOOM_CENTER, SPARKLE_SRC } from './shared/config'
 
@@ -37,6 +39,14 @@ const GLOW_SIZE_MIN  = 3.2
 const GLOW_SIZE_MAX  = 3.9
 const GLOW_BREATHE_S = 4.5
 
+// A real dynamic light alongside the glow sprite — the sprite is self-illuminating and
+// doesn't tint anything around it; this actually casts moon-blue light onto the garden.
+// KJ 2026-09-17: "would be awesome to add a blue tinted light over the bloom".
+const LIGHT_Y         = BLOOM_CENTER.y + 3.5
+const LIGHT_COLOR     = { r: 0.55, g: 0.72, b: 1.0 }
+const LIGHT_INTENSITY = 30_000
+const LIGHT_RANGE     = 22   // metres — reaches across the whole garden from the center
+
 interface Wisp {
   entity: Entity
   x: number; z: number; y: number
@@ -48,6 +58,7 @@ const wisps: Wisp[] = []
 let active = false
 let ramp   = 0   // 0→1 master scale, eases the whole field in
 let glowEntity: Entity | null = null
+let lightEntity: Entity | null = null
 let glowT = 0   // seconds, drives the breathing sine
 
 function rnd(min: number, max: number): number { return min + Math.random() * (max - min) }
@@ -67,6 +78,16 @@ function createGlow(): void {
   })
   Billboard.create(entity, { billboardMode: BillboardMode.BM_ALL })
   glowEntity = entity
+}
+
+function createLight(): void {
+  const entity = engine.addEntity()
+  Transform.create(entity, { position: { x: BLOOM_CENTER.x, y: LIGHT_Y, z: BLOOM_CENTER.z } })
+  LightSource.create(entity, {
+    active: false, color: LIGHT_COLOR, intensity: LIGHT_INTENSITY, range: LIGHT_RANGE,
+    shadow: false, type: { $case: 'point', point: {} },
+  })
+  lightEntity = entity
 }
 
 function respawn(w: Wisp, y: number): void {
@@ -130,6 +151,8 @@ export function startMoonlight(): void {
   glowT  = 0
   if (wisps.length === 0) createWisps()
   if (glowEntity === null) createGlow()
+  if (lightEntity === null) createLight()
+  if (lightEntity !== null) LightSource.getMutable(lightEntity).active = true
   engine.addSystem(wispSystem, undefined, SYSTEM_NAME)
   console.log('[Moonlight] night falls')
 }
@@ -146,5 +169,6 @@ export function stopMoonlight(): void {
     t.scale    = { x: 0, y: 0, z: 0 }
   }
   if (glowEntity !== null) Transform.getMutable(glowEntity).scale = { x: 0, y: 0, z: 0 }
+  if (lightEntity !== null) LightSource.getMutable(lightEntity).active = false
   console.log('[Moonlight] dawn')
 }

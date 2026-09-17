@@ -1419,14 +1419,20 @@ export function setupWateringSystem(): void {
 
     // Snap every currently-unwatered plant to healthy appearance for the bloom event.
     // Purely aesthetic — PlantData state is unchanged; resetAllPlants() restores visuals on bloomReset.
+    // DIAGNOSTIC 2026-09-17: a late-joining mobile player saw water drops on every plant
+    // during an active bloom — this loop should have hidden all of them. Logging counts to
+    // catch it live next time (registry not yet populated / drops not yet snapped / etc).
+    let snappedCount = 0
     for (const [entity] of plantRegistry) {
       if (!PlantData.getOrNull(entity)?.isWatered) {
         hideRose(entity)
         showPlant(entity)
         setDropFade(entity, 'out')
         Animator.playSingleAnimation(entity, ANIM_HEALTHY_STATE)
+        snappedCount++
       }
     }
+    console.log(`[Client] bloomTriggered: registry=${plantRegistry.size} snappedToHealthy=${snappedCount} elapsedMs=${data?.elapsedMs ?? 0}`)
   })
 
   room.onMessage('bloomReset', () => {
