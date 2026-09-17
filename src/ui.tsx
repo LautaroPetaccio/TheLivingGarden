@@ -1,12 +1,17 @@
 // =============================================================
-// The Living Garden — Screen UI
+// The Living Garden — Screen UI  (HUD pass 2026-09-17, KJ-approved design)
 //
-// Layers
-//   Persistent   — bottom-centre, stays until cleared
-//   Daily Limit  — bottom-centre, player-dismissible
-//   Toast        — bottom-centre, auto-dismiss
-//   Banner       — top-centre, garden status, always dark
-//   Health Bar   — right-centre, vertical bar mimicking 3D boards
+// At rest the HUD is two things at TOP RIGHT: a health ring and, once you hold
+// seeds, a seed chip under it. A banner opens at TOP CENTRE only when something
+// changes (threshold crossed, countdown, bloom, gardeners joining/leaving, or a
+// tap on the ring) and fades away again. Toasts and pills stack UNDER the banner.
+// Nothing lives in the bottom half: on phones the client owns both bottom corners
+// and the top left; on desktop it owns the left edge — top right and top centre
+// are the only zones free on both.
+//
+// Sizes are fractions of screen height (U = virtualHeight / 1080) so the look
+// does not depend on how a client reports its canvas. Mobile adds M (chrome) and
+// F (text). Motion is ALPHA ONLY — size/position tweens jitter on the phone.
 // =============================================================
 
 import ReactEcs, { ReactEcsRenderer, UiEntity, Label } from '@dcl/sdk/react-ecs'
@@ -15,6 +20,7 @@ import { readCanvasInfo, getSafeArea, getScreenInsets, pct } from './safeArea'
 import { isMobile } from '@dcl/sdk/platform'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, timers } from '@dcl/sdk/ecs'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor } from './shared/config'
 
 // ---------------------------------------------------------------
 // State
@@ -22,7 +28,6 @@ import { engine, timers } from '@dcl/sdk/ecs'
 
 let toastVisible  = false
 let toastText     = ''
-let toastLarge    = false
 let toastGen      = 0
 
 let dailyLimitVisible = false
@@ -33,39 +38,35 @@ let persistText    = ''
 
 type BannerState = 'idle' | 'countdown' | 'bloom'
 let bannerState:    BannerState = 'idle'
-let bannerCountdown = ''   // e.g. "3h 42m 15s" — always kept current by ticker
-let bannerVisible   = true // player can dismiss; auto-restores on bloom/countdown
-let bannerHealth    = 0    // 0–1 — drives the right-hand side bar
+let bannerCountdown = ''   // e.g. "42s" — kept current by the watering system's ticker
+let bannerBloomLabel = ''  // variant / scale-aware bloom headline
+let bannerHealth    = 0    // 0–1
 let playerCount     = 0
 
-// Banner animation
-let bannerOffsetY = 0   // slide-in from top
+let seedCount = 0          // seed chip (hidden at 0)
+let seedRare  = 0
+let bloomRemainingLabel = ''   // ring text during a bloom
+let bloomRemainingFrac  = 1    // ring sweep during a bloom (1 → 0)
 
+// Banner opens on change, then folds away. Alpha-only fade.
+const BANNER_OPEN_MS  = 6_000
+const BANNER_BLOOM_MS = 12_000
+const FADE_MS         = 180
+let bannerOpenUntil = Date.now() + 9_000   // greet the player with context on load
+let bannerWasOpen   = false
+let bannerFlipAt    = 0
+let healthBand      = -1
 
-function animateBannerIn(): void {
-  const STEPS   = 10
-  const STEP_MS = 25
-  let step = 0
-  bannerOffsetY = -20
-  function tick(): void {
-    step++
-    const t      = step / STEPS
-    const eased  = 1 - (1 - t) * (1 - t)   // ease-out quad
-    bannerOffsetY = Math.round(-20 * (1 - eased))
-    if (step < STEPS) timers.setTimeout(tick, STEP_MS)
-    else bannerOffsetY = 0
-  }
-  timers.setTimeout(tick, STEP_MS)
+function openBanner(ms = BANNER_OPEN_MS): void {
+  bannerOpenUntil = Math.max(bannerOpenUntil, Date.now() + ms)
 }
 
-
 // ---------------------------------------------------------------
-// Public API — bottom pills
+// Public API — toasts and pills (stacked under the banner)
 // ---------------------------------------------------------------
 
-export function showToast(text: string, durationMs: number, large = false): void {
+export function showToast(text: string, durationMs: number, _large = false): void {
   toastText    = text
-  toastLarge   = large
   toastVisible = true
   const gen    = ++toastGen
   timers.setTimeout(() => { if (toastGen === gen) toastVisible = false }, durationMs)
@@ -84,171 +85,108 @@ export function showPersistent(text: string): void {
 export function hidePersistent(): void { persistVisible = false }
 
 // ---------------------------------------------------------------
-// Public API — top banner
+// Public API — banner, ring, seed chip
 // ---------------------------------------------------------------
 
-export function showBannerIdle(): void  { bannerState = 'idle' }
-let bannerBloomLabel = ''   // Phase 6: variant / scale-aware headline; '' = default
-export function showBannerBloom(label = ''): void { bannerBloomLabel = label; bannerState = 'bloom'; bannerVisible = true; animateBannerIn() }
-
+export function showBannerIdle(): void {
+  if (bannerState !== 'idle') openBanner()
+  bannerState = 'idle'
+}
+export function showBannerBloom(label = ''): void {
+  bannerBloomLabel = label
+  bannerState = 'bloom'
+  bloomRemainingFrac = 1
+  bloomRemainingLabel = ''
+  openBanner(BANNER_BLOOM_MS)
+}
 export function showBannerCountdown(countdown: string): void {
-  const wasCountdown = bannerState === 'countdown'
-  bannerState     = 'countdown'
+  bannerState     = 'countdown'   // stays open for the whole countdown (see bannerIsOpen)
   bannerCountdown = countdown
-  bannerVisible   = true
-  if (!wasCountdown) {
-    animateBannerIn()
-  }
 }
 export function updateBannerCountdown(countdown: string): void {
   bannerCountdown = countdown
 }
-function hideBanner(): void { bannerVisible = false }
 
-// ---------------------------------------------------------------
-// Public API — side health bar
-// ---------------------------------------------------------------
-
-/** Update the vertical health bar (0–1). Call whenever wateredCount changes. */
+/** Garden health 0–1. Crossing the 50% / 80% lines opens the banner. */
 export function updateBannerHealth(ratio: number): void {
   bannerHealth = Math.max(0, Math.min(1, ratio))
+  const band = bannerHealth >= 0.8 ? 2 : bannerHealth >= 0.5 ? 1 : 0
+  if (healthBand !== -1 && band !== healthBand) openBanner()
+  healthBand = band
 }
 
-/** Update the player count label. */
+/** Gardeners present — a change matters now (it sets how fast plants dry), so say so. */
 export function updatePlayerCount(n: number): void {
+  if (n !== playerCount && playerCount !== 0) openBanner()
   playerCount = n
 }
 
-/** Update the top-left waters-remaining counter. */
-
-
-
-// ---------------------------------------------------------------
-// Layout constants  (virtual canvas 1920 × 1080)
-// ---------------------------------------------------------------
-
-const DARK         = { r: 0.13, g: 0.13, b: 0.13, a: 0.88 }   // DCL default dark
-const WHITE   = Color4.White()
-const GREY    = Color4.create(0.65, 0.65, 0.65, 1)
-
-// ── Bottom pills ──────────────────────────────────────────────
-const PILL_W          = 580
-const PILL_H_LG       = 72
-const PILL_H_SM       = 92
-const PILL_PAD_X      = 36   // horizontal padding inside toast + persistent pills
-const PERSIST_BOTTOM  = 90
-const PILL_STEP       = PILL_H_SM + 12   // vertical stride between stacked pills
-
-// ── Toast ─────────────────────────────────────────────────────
-const TOAST_FONT_LG   = 24
-const TOAST_FONT_SM   = 18
-
-// ── Daily Limit pill ──────────────────────────────────────────
-const DAILY_FONT          = 18
-const DAILY_DISMISS_SIZE  = 44   // dismiss button width & height (also used as ghost spacer)
-const DAILY_DISMISS_FONT  = 22
-
-// ── Persistent pill ───────────────────────────────────────────
-const PERSIST_FONT    = 18
-
-// ── Top banner ────────────────────────────────────────────────
-const BANNER_W            = 820   // wide enough for idle text + countdown + dismiss button
-const BANNER_TOP          = 28
-
-const BANNER_H_SINGLE     = 52   // one line of text
-const BANNER_H_COUNTDOWN  = 80   // main line + countdown subtitle
-
-const BANNER_DISMISS_SIZE = 36   // close button width & height
-const BANNER_DISMISS_FONT = 15
-
-const BANNER_FONT_BLOOM     = 20
-const BANNER_FONT_COUNTDOWN = 19
-const BANNER_FONT_IDLE      = 16
-const BANNER_LINE1_H        = 32   // height of the main text row
-const BANNER_SUBTEXT_FONT   = 13
-const BANNER_SUBTEXT_H      = 22   // height of the countdown subtitle row
-
-// Banner text colours per state (background is always DARK)
-const TEXT_IDLE      = Color4.create(0.72, 0.80, 0.72, 1.00)  // muted sage
-const TEXT_COUNTDOWN = Color4.create(0.95, 1.00, 0.88, 1.00)  // bright off-white
-const TEXT_BLOOM     = Color4.create(1.00, 0.92, 0.35, 1.00)  // golden yellow
-const TEXT_SUBTEXT   = Color4.create(0.65, 0.80, 0.65, 0.85)
-
-// ── Right-side vertical health bar ────────────────────────────
-const SIDE_W          = 48    // bar track width (px)
-const SIDE_H          = 420   // bar track height (px) — 1.5× original 280
-const SIDE_LABEL_H    = 26    // % label above the bar
-const SIDE_LABEL_FONT = 13
-const SIDE_GAP        = 6     // gap between label and bar
-const SIDE_FILL_MIN   = 2     // minimum fill height in px when health > 0
-const PLAYER_COUNT_H    = 22
-const PLAYER_COUNT_FONT = 11
-const GARDEN_TITLE_H    = 22
-const GARDEN_TITLE_FONT = 10
-const SIDE_PILL_PAD_Y   = 5   // vertical padding inside the dark pill
-const SIDE_PILL_GAP     = 6   // gap between pill and bar
-const SIDE_PILL_H       = PLAYER_COUNT_H + 4 + GARDEN_TITLE_H + 4 + SIDE_LABEL_H + SIDE_PILL_PAD_Y * 2
-
-// Watering can image — sits above the dark pill
-const WATERING_CAN_SRC  = 'assets/scene/Images/WateringCanRender.png'
-const CAN_IMG_SIZE       = 72    // square display size
-const CAN_IMG_GAP        = 8     // gap between image and dark pill
-const CAN_BADGE_H     = 22
-const CAN_BADGE_MIN_W = 34
-const CAN_BADGE_PAD_X = 6
-const CAN_BADGE_FONT  = 12
-
-const SIDE_COL_W    = SIDE_W
-const SIDE_TOTAL_H  = SIDE_PILL_H + SIDE_PILL_GAP + SIDE_H
-const SIDE_RIGHT_PAD  = 44    // distance from right edge
-
-// Tick marks (match the 3D boards: 25%, 50%, 80%)
-const TICK_W           = SIDE_W + 10   // slightly wider than bar (overhangs 5px each side)
-const TICK_OFFSET_X    = -5            // nudge left to centre the overhang
-const TICK_H_NORMAL    = 2
-const TICK_H_THRESHOLD = 3
-
-// Bar fill colours (same thresholds as 3D boards)
-const BAR_DARK   = Color4.create(0.08, 0.08, 0.09, 0.92)   // track background
-const BAR_RED    = Color4.create(0.85, 0.18, 0.18, 1)
-const BAR_ORANGE = Color4.create(1.00, 0.50, 0.05, 1)
-const BAR_GREEN  = Color4.create(0.20, 0.88, 0.35, 1)
-const TICK_COLOR = Color4.create(0.70, 0.70, 0.70, 1)
-const TICK_GOLD  = Color4.create(1.00, 0.84, 0.10, 1)      // threshold marker
-
-// ---------------------------------------------------------------
-// Helpers
-// ---------------------------------------------------------------
-
-function sideFillColor(): Color4 {
-  if (bannerHealth >= 0.80) return BAR_GREEN
-  if (bannerHealth >= 0.50) return BAR_ORANGE
-  return BAR_RED
+/** Seed chip under the ring (boxSystem pushes the pouch). Tier dots arrive with the rarity pass. */
+export function updateSeedChip(normal: number, rare: number): void {
+  seedCount = Math.max(0, normal) + Math.max(0, rare)
+  seedRare  = Math.max(0, rare)
 }
 
-function bannerLine1(): string {
-  if (bannerState === 'bloom')     return bannerBloomLabel || 'The Garden is in Full Bloom!'
-  if (bannerState === 'countdown') return `Keep garden health above 80% for ${bannerCountdown} to wake the big bloom`
-  return 'Keep garden health above 80% to wake the big bloom'
+/** During a bloom the ring shows time left (wateringSystem's reset ticker pushes it). */
+export function updateBloomRemaining(label: string, remainingMs: number): void {
+  bloomRemainingLabel = label
+  bloomRemainingFrac  = Math.max(0, Math.min(1, remainingMs / BLOOM_RESET_DELAY_MS))
 }
-function bannerHealthLine(): string | null {
-  if (bannerState === 'bloom') return null
-  return `Garden Health: ${Math.round(bannerHealth * 100)}%`
-}
-function bannerFontSize(): number {
-  return bannerState === 'bloom' ? BANNER_FONT_BLOOM : bannerState === 'countdown' ? BANNER_FONT_COUNTDOWN : BANNER_FONT_IDLE
-}
-function bannerTextColor(): Color4 {
-  if (bannerState === 'bloom')     return TEXT_BLOOM
-  if (bannerState === 'countdown') return TEXT_COUNTDOWN
-  return TEXT_IDLE
-}
-function showPlusOneWater(): void {
-  showToast('+1 water', 900, false)
-}
+
 // ---------------------------------------------------------------
-// Setup
+// Look
 // ---------------------------------------------------------------
+
+const UI_DIR = 'assets/scene/Images/ui/'
+const DARK   = { r: 0.07, g: 0.063, b: 0.055, a: 0.86 }
+const CREAM  = { r: 0.957, g: 0.918, b: 0.824 }
+const DIM    = { r: 0.83,  g: 0.82,  b: 0.78 }
+const GOLD   = { r: 0.98,  g: 0.78,  b: 0.46 }
+const MOON   = { r: 0.81,  g: 0.88,  b: 1.0 }
+const TRACK  = { r: 1, g: 1, b: 1, a: 0.18 }
+const BAR_RED    = { r: 0.89, g: 0.29, b: 0.29 }
+const BAR_ORANGE = { r: 0.94, g: 0.62, b: 0.15 }
+const BAR_GREEN  = { r: 0.36, g: 0.79, b: 0.48 }
+const TINT_WATER = { r: 0.52, g: 0.72, b: 0.92 }
+const TINT_SEED  = { r: 0.62, g: 0.88, b: 0.80 }
+
+// 1080-units (× U × M at render)
+const RING_SIZE  = 132
+const RING_FONT  = 30
+const CHIP_H     = 46
+const CHIP_FONT  = 22
+const BANNER_W   = 680
+const BANNER_PAD = 18
+const TITLE_FONT = 22
+const SUB_FONT   = 16
+const BAR_H      = 12
+const PILL_H     = 52
+const PILL_FONT  = 20
+const PILL_PAD_X = 26
+const GAP        = 10
+const EDGE       = 16          // gap from the safe-area edge
+
+function barColor(): { r: number; g: number; b: number } {
+  return bannerHealth >= 0.8 ? BAR_GREEN : bannerHealth >= 0.5 ? BAR_ORANGE : BAR_RED
+}
+function ringSprite(): string {
+  const step = (v: number) => String(Math.round(Math.max(0, Math.min(1, v)) * 20) * 5).padStart(3, '0')
+  return bannerState === 'bloom' ? `${UI_DIR}ringbloom_${step(bloomRemainingFrac)}.png` : `${UI_DIR}ring_${step(bannerHealth)}.png`
+}
+function toastGlyph(text: string): { src: string; tint: { r: number; g: number; b: number } } {
+  const t = text.toLowerCase()
+  if (t.includes('gave') || t.includes('gift')) return { src: `${UI_DIR}glyph_gift.png`, tint: GOLD }
+  if (t.includes('seed') || t.includes('plant') && !t.includes('watered')) return { src: `${UI_DIR}glyph_seed.png`, tint: TINT_SEED }
+  if (t.includes('water')) return { src: `${UI_DIR}glyph_drop.png`, tint: TINT_WATER }
+  return { src: `${UI_DIR}glyph_leaf.png`, tint: TINT_SEED }
+}
+function bannerIsOpen(now: number): boolean {
+  return bannerState === 'countdown' || now < bannerOpenUntil
+}
+function dryMinutes(): string {
+  const mins = (WATERED_EXPIRY_MS * decayFactor(Math.max(1, playerCount))) / 60_000
+  return Number.isInteger(mins) ? `${mins}` : mins.toFixed(1)
+}
 
 // ── Virtual canvas (ported from Clean The Club) ─────────────────────────────
 // SDK 7.26 (upgraded 2026-09-17 to the Clean The Club pin — scene UI did not
@@ -306,319 +244,141 @@ export function setupUi(): void {
 // Render
 // ---------------------------------------------------------------
 
-// Mobile text scale — set each render; fonts go through fs() so desktop is untouched.
-let uiFont = 1
-const fs = (n: number): number => Math.round(n * uiFont)
-
 function uiComponent() {
-  const sa = getSafeArea()
+  const sa     = getSafeArea()
+  const ins    = getScreenInsets()
+  const hIns   = Math.max(ins.left, ins.right)   // balanced → centre stays the physical centre
   const mobile = isMobile()
-  const M  = mobile ? 1.3 : 1        // touch targets + small screens want larger chrome
-  uiFont   = mobile ? 1.5 : 1        // …and larger text (16 px read as ~11 px on the phone)
-  // Health column: wider + bigger labels on mobile, but a SHORTER bar parked high —
-  // the client draws its F / + / jump cluster over the bottom-right by design
-  // (interactableArea only reserves ~6% there), so the bar must end by ~58%.
-  const SS          = mobile ? 1.5 : 1
-  const sideW       = Math.round(SIDE_W * SS)
-  const sideH       = mobile ? 300 : SIDE_H
-  const sidePillPadY = Math.round(SIDE_PILL_PAD_Y * SS)
-  const sideLabelH  = Math.round(SIDE_LABEL_H * SS)
-  const gardenTitleH = Math.round(GARDEN_TITLE_H * SS)
-  const sidePillH   = Math.round(SIDE_PILL_H * SS)
-  const sideTotalH  = sidePillH + SIDE_PILL_GAP + sideH
-  const tickW       = sideW + 10
-  const bannerDismiss = Math.round(BANNER_DISMISS_SIZE * M)
-  const dailyDismiss  = Math.round(DAILY_DISMISS_SIZE * M)
-  const safeBottomPx = Math.round(sa.bottom * currentVirtualH)   // explorer chrome along the bottom edge
-  const dailyBottom = PERSIST_BOTTOM + (persistVisible ? PILL_STEP : 0)
-  const toastBottom = dailyBottom    + (dailyLimitVisible ? PILL_STEP : 0)
-  const toastH      = toastLarge ? PILL_H_LG : PILL_H_SM
+  const U  = currentVirtualH / 1080              // size as a fraction of screen height
+  const M  = mobile ? 1.3 : 1                    // touch targets + small screens want larger chrome
+  const F  = mobile ? 1.5 : 1                    // …and larger text
+  const px = (n: number): number => Math.round(n * U * M)
+  const fs = (n: number): number => Math.round(n * U * F)
+  const now = Date.now()
 
-  const isCountdown  = bannerState === 'countdown'
-  const isBloom      = bannerState === 'bloom'
-  const bannerH      = BANNER_H_SINGLE
+  // banner fade (alpha only)
+  const open = bannerIsOpen(now)
+  if (open !== bannerWasOpen) { bannerWasOpen = open; bannerFlipAt = now }
+  const t = Math.min(1, (now - bannerFlipAt) / FADE_MS)
+  const a = open ? t : 1 - t
+  const bannerShown = a > 0.02
 
-  // Side bar fill — grows from bottom, minimum SIDE_FILL_MIN px when health > 0
-  const fillH       = bannerHealth > 0 ? Math.max(SIDE_FILL_MIN, Math.round(bannerHealth * sideH)) : 0
-  const fillTop     = sideH - fillH   // top offset within track (bottom-anchored)
+  const topPx      = Math.round(sa.top * currentVirtualH) + px(EDGE)
+  const isBloom    = bannerState === 'bloom'
+  const isCount    = bannerState === 'countdown'
+  const bannerH    = px(isBloom ? 96 : 122)
+  const ringSize   = px(RING_SIZE)
+  const gardeners  = Math.max(1, playerCount)
+  const watered    = Math.round(bannerHealth * TOTAL_PLANTS)
+  const need       = Math.max(0, BLOOM_THRESHOLD - watered)
+  const pctLabel   = `${Math.round(bannerHealth * 100)}%`
+  const ringLabel  = isBloom ? (bloomRemainingLabel || pctLabel) : pctLabel
 
-  // Tick positions (top offset from bar track top)
-  const tick25Top  = Math.round(sideH * 0.75) - TICK_H_NORMAL
-  const tick50Top  = Math.round(sideH * 0.50) - TICK_H_NORMAL
-  const tick80Top  = Math.round(sideH * 0.20) - TICK_H_THRESHOLD
+  const title = isBloom ? (bannerBloomLabel || 'The Garden is in Full Bloom!')
+              : isCount ? `Hold 80% for ${bannerCountdown} to wake the bloom`
+              : 'Garden health'
+  const sub   = isBloom ? 'Seeds are falling - walk through them to gather'
+              : isCount ? `${pctLabel} - ${gardeners} gardener${gardeners === 1 ? '' : 's'} here, plants dry in ${dryMinutes()} min`
+              : need > 0 ? `${pctLabel} - ${need} more plant${need === 1 ? '' : 's'} to wake the bloom`
+              : `${pctLabel} - hold it to wake the bloom`
+  const titleColor = isBloom ? MOON : isCount ? GOLD : CREAM
 
-  // Percent label (0–100)
-  const pctLabel = `${Math.round(bannerHealth * 100)}%`
+  // stack under the banner: toast → daily limit → persistent
+  let stackY = topPx + (bannerShown ? bannerH + px(GAP) : 0)
+  const toastY = stackY;   if (toastVisible)      stackY += px(PILL_H) + px(GAP)
+  const dailyY = stackY;   if (dailyLimitVisible) stackY += px(PILL_H) + px(GAP)
+  const persistY = stackY
+  const glyph = toastGlyph(toastText)
+  const dismiss = px(PILL_H)
 
   // Root MUST be full-screen: the mobile (Godot) client clips children to the
-  // parent's box, so a size-less root hides every absolute child (2026-09-17 —
-  // no scene UI at all on the phone, live or preview). Desktop never clipped.
-  const ins = getScreenInsets()
-  const h   = Math.max(ins.left, ins.right)   // balanced → centre stays the physical centre
+  // parent's box, so a size-less root hides every absolute child. Inside it, a
+  // horizontally BALANCED device-inset container keeps "centre" the physical centre.
   return (
     <UiEntity uiTransform={{ width: '100%', height: '100%' }}>
-    <UiEntity uiTransform={{ positionType: 'absolute', position: { top: pct(ins.top), left: pct(h), right: pct(h), bottom: pct(ins.bottom) } }}>
+    <UiEntity uiTransform={{ positionType: 'absolute', position: { top: pct(ins.top), left: pct(hIns), right: pct(hIns), bottom: pct(ins.bottom) } }}>
 
       {/* ── Test Panel — MOUNTED for v2 dev; comment out before production deploys ── */}
       <TestPanelUi />
-      {/* Dev calibration line (remove with the test panel): fixed top-left so it shows
-          whatever the phone's canvas/scale turns out to be. */}
+      {/* Dev calibration line (remove with the test panel) */}
       <Label
         value={getCanvasCalibration()}
-        fontSize={11}
-        color={{ r: 1, g: 1, b: 1, a: 0.85 }}
-        uiTransform={{ positionType: 'absolute', position: { left: 6, top: 4 }, width: 900, height: 18 }}
+        fontSize={fs(11)}
+        color={{ r: 1, g: 1, b: 1, a: 0.7 }}
+        uiTransform={{ positionType: 'absolute', position: { left: '30%', bottom: 4 }, width: '40%', height: fs(16) }}
       />
 
-      {/* ═══════════════════════════════════════════════════════════
-          TOP BANNER — always dark, compact, player-dismissible
-      ══════════════════════════════════════════════════════════════ */}
+      {/* ═════ HEALTH RING — top right, the resting HUD. Tap to open the banner. ═════ */}
       <UiEntity
-        uiTransform={{
-          display:        bannerVisible ? 'flex' : 'none',
-          positionType:   'absolute',
-          position:       { top: pct(sa.top), left: 0 },
-          width:          '100%',
-          flexDirection:  'row',
-          justifyContent: 'center',
-        }}
+        uiTransform={{ positionType: 'absolute', position: { top: topPx, right: pct(sa.right + 0.012) }, width: ringSize, height: ringSize, alignItems: 'center', justifyContent: 'center' }}
+        uiBackground={{ textureMode: 'stretch', texture: { src: ringSprite() } }}
+        onMouseDown={() => openBanner()}
       >
+        <Label value={ringLabel} fontSize={fs(isBloom && bloomRemainingLabel ? RING_FONT - 6 : RING_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+      </UiEntity>
+
+      {/* ═════ SEED CHIP — under the ring, only once you hold seeds ═════ */}
       <UiEntity
         uiTransform={{
-          margin:         { top: Math.round((BANNER_TOP + bannerOffsetY) * M) },
-          width:          Math.round(BANNER_W * M),
-          height:         Math.round(bannerH * M),
-          flexDirection:  'row',
-          alignItems:     'center',
+          display: seedCount > 0 ? 'flex' : 'none',
+          positionType: 'absolute', position: { top: topPx + ringSize + px(GAP), right: pct(sa.right + 0.012) },
+          height: px(CHIP_H), flexDirection: 'row', alignItems: 'center',
+          padding: { left: px(14), right: px(16) }, borderRadius: px(CHIP_H / 2),
         }}
         uiBackground={{ color: DARK }}
       >
-        {/* Ghost spacer — mirrors dismiss button so text stays centred */}
-        <UiEntity uiTransform={{ width: bannerDismiss, height: bannerDismiss, flexShrink: 0 }} />
+        <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(8) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: 1 } }} />
+        <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+        <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(12), height: px(12), margin: { left: px(10) }, borderRadius: px(6) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
+      </UiEntity>
 
-        {/* Centre content column */}
+      {/* ═════ BANNER — top centre, opens on change, alpha fade only ═════ */}
+      <UiEntity uiTransform={{ display: bannerShown ? 'flex' : 'none', positionType: 'absolute', position: { top: topPx, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
         <UiEntity
-          uiTransform={{
-            flexGrow:       1,
-            height:         '100%',
-            flexDirection:  'column',
-            alignItems:     'center',
-            justifyContent: 'center',
-          }}
+          uiTransform={{ width: px(BANNER_W), height: bannerH, flexDirection: 'column', justifyContent: 'center', padding: { left: px(BANNER_PAD + 4), right: px(BANNER_PAD + 4), top: px(BANNER_PAD - 4), bottom: px(BANNER_PAD - 4) }, borderRadius: px(22) }}
+          uiBackground={{ color: { ...DARK, a: DARK.a * a } }}
         >
-          <Label
-            value={bannerLine1()}
-            fontSize={fs(bannerFontSize())}
-            color={bannerTextColor()}
-            textAlign="middle-center"
-            uiTransform={{ width: '100%', height: Math.round(BANNER_LINE1_H * M) }}
-          />
-        </UiEntity>
+          <UiEntity uiTransform={{ width: '100%', height: fs(TITLE_FONT + 8), flexDirection: 'row', alignItems: 'center' }}>
+            <Label value={title} fontSize={fs(TITLE_FONT)} color={{ ...titleColor, a }} textAlign={isBloom ? 'middle-center' : 'middle-left'} uiTransform={{ flexGrow: 1, height: '100%' }} />
+            <UiEntity uiTransform={{ display: isBloom ? 'none' : 'flex', flexDirection: 'row', alignItems: 'center', height: '100%' }}>
+              <UiEntity uiTransform={{ width: fs(20), height: fs(20), margin: { right: px(6) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_users.png` }, color: { ...DIM, a } }} />
+              <Label value={`${gardeners}`} fontSize={fs(SUB_FONT + 2)} color={{ ...DIM, a }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+            </UiEntity>
+          </UiEntity>
 
-        {/* Dismiss button */}
-        <UiEntity
-          uiTransform={{ width: bannerDismiss, height: bannerDismiss, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
-          onMouseDown={hideBanner}
-        >
-          <Label
-            value="✕"
-            fontSize={fs(BANNER_DISMISS_FONT)}
-            color={TEXT_IDLE}
-            textAlign="middle-center"
-            uiTransform={{ width: '100%', height: '100%' }}
-          />
+          {/* bar + 80% marker (hidden during a bloom) */}
+          <UiEntity uiTransform={{ display: isBloom ? 'none' : 'flex', width: '100%', height: px(BAR_H), margin: { top: px(8), bottom: px(8) }, borderRadius: px(BAR_H / 2) }} uiBackground={{ color: { ...TRACK, a: TRACK.a * a } }}>
+            <UiEntity uiTransform={{ width: `${Math.round(bannerHealth * 100)}%`, height: '100%', borderRadius: px(BAR_H / 2) }} uiBackground={{ color: { ...barColor(), a } }} />
+            <UiEntity uiTransform={{ positionType: 'absolute', position: { left: '80%', top: -px(4) }, width: Math.max(2, px(3)), height: px(BAR_H + 8) }} uiBackground={{ color: { ...GOLD, a } }} />
+          </UiEntity>
+
+          <Label value={sub} fontSize={fs(SUB_FONT)} color={{ ...DIM, a }} textAlign={isBloom ? 'middle-center' : 'middle-left'} uiTransform={{ width: '100%', height: fs(SUB_FONT + 8) }} />
         </UiEntity>
       </UiEntity>
 
-      </UiEntity>
-
-      {/* ═══════════════════════════════════════════════════════════
-          RIGHT SIDE — vertical health bar (mimics 3D boards)
-      ══════════════════════════════════════════════════════════════ */}
-      <UiEntity
-        uiTransform={{
-          positionType:   'absolute',
-          position:       { top: pct(mobile ? Math.max(sa.top, 0.16) : Math.max(sa.top, 0.5 - sideTotalH / currentVirtualH / 2)), right: pct(sa.right + SIDE_RIGHT_PAD / 1920) },
-          width:          sideW,
-          height:         sideTotalH,
-          flexDirection:  'column',
-          alignItems:     'center',
-        }}
-      >
-        {/* Dark pill — player count + title + % */}
-        <UiEntity
-          uiTransform={{
-            width:          sideW,
-            height:         sidePillH,
-            flexShrink:     0,
-            flexDirection:  'column',
-            alignItems:     'center',
-            justifyContent: 'center',
-            padding:        { top: sidePillPadY, bottom: sidePillPadY },
-          }}
-          uiBackground={{ color: DARK }}
-        >
-          <Label
-            value="Garden Health"
-            fontSize={fs(GARDEN_TITLE_FONT)}
-            color={TEXT_IDLE}
-            textAlign="middle-center"
-            uiTransform={{ width: sideW, height: gardenTitleH }}
-          />
-          <UiEntity uiTransform={{ width: sideW, height: 4, flexShrink: 0 }} />
-          <Label
-            value={pctLabel}
-            fontSize={fs(SIDE_LABEL_FONT)}
-            color={GREY}
-            textAlign="middle-center"
-            uiTransform={{ width: sideW, height: sideLabelH }}
-          />
-        </UiEntity>
-
-        {/* Spacer between pill and bar */}
-        <UiEntity uiTransform={{ width: sideW, height: SIDE_PILL_GAP, flexShrink: 0 }} />
-
-        {/* Bar track */}
-        <UiEntity
-          uiTransform={{
-            width:        sideW,
-            height:       sideH,
-            flexShrink:   0,
-            positionType: 'relative',
-          }}
-          uiBackground={{ color: BAR_DARK }}
-        >
-          {/* Fill — bottom-anchored */}
-          {fillH > 0 && (
-            <UiEntity
-              uiTransform={{
-                positionType: 'absolute',
-                position:     { top: fillTop, left: 0 },
-                width:        sideW,
-                height:       fillH,
-              }}
-              uiBackground={{ color: sideFillColor() }}
-            />
-          )}
-
-          {/* Tick 25% */}
-          <UiEntity
-            uiTransform={{
-              positionType: 'absolute',
-              position:     { top: tick25Top, left: TICK_OFFSET_X },
-              width:        tickW,
-              height:       TICK_H_NORMAL,
-            }}
-            uiBackground={{ color: TICK_COLOR }}
-          />
-
-          {/* Tick 50% */}
-          <UiEntity
-            uiTransform={{
-              positionType: 'absolute',
-              position:     { top: tick50Top, left: TICK_OFFSET_X },
-              width:        tickW,
-              height:       TICK_H_NORMAL,
-            }}
-            uiBackground={{ color: TICK_COLOR }}
-          />
-
-          {/* Tick 80% — gold threshold marker */}
-          <UiEntity
-            uiTransform={{
-              positionType: 'absolute',
-              position:     { top: tick80Top, left: TICK_OFFSET_X },
-              width:        tickW,
-              height:       TICK_H_THRESHOLD,
-            }}
-            uiBackground={{ color: TICK_GOLD }}
-          />
+      {/* ═════ TOAST — under the banner, where the eyes already are ═════ */}
+      <UiEntity uiTransform={{ display: toastVisible ? 'flex' : 'none', positionType: 'absolute', position: { top: toastY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
+        <UiEntity uiTransform={{ height: px(PILL_H), flexDirection: 'row', alignItems: 'center', padding: { left: px(PILL_PAD_X - 6), right: px(PILL_PAD_X) }, borderRadius: px(PILL_H / 2) }} uiBackground={{ color: DARK }}>
+          <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(10) } }} uiBackground={{ textureMode: 'stretch', texture: { src: glyph.src }, color: { ...glyph.tint, a: 1 } }} />
+          <Label value={toastText} fontSize={fs(PILL_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
 
-      {/* ── Toast ─────────────────────────────────────────────── */}
-      <UiEntity
-        uiTransform={{
-          display:        toastVisible ? 'flex' : 'none',
-          positionType:   'absolute',
-          position:       { bottom: safeBottomPx + Math.round(toastBottom * M), left: '50%' },
-          margin:         { left: -Math.round(PILL_W * M / 2) },
-          width:          Math.round(PILL_W * M),
-          height:         Math.round(toastH * M),
-          alignItems:     'center',
-          justifyContent: 'center',
-          padding:        { left: PILL_PAD_X, right: PILL_PAD_X },
-        }}
-        uiBackground={{ color: DARK }}
-      >
-        <Label
-          value={toastText}
-          fontSize={fs(toastLarge ? TOAST_FONT_LG : TOAST_FONT_SM)}
-          color={WHITE}
-          textAlign="middle-center"
-          uiTransform={{ width: '100%', height: '100%' }}
-        />
-      </UiEntity>
-
-      {/* ── Daily Limit (dismissible) ──────────────────────────── */}
-      <UiEntity
-        uiTransform={{
-          display:        dailyLimitVisible ? 'flex' : 'none',
-          positionType:   'absolute',
-          position:       { bottom: safeBottomPx + Math.round(dailyBottom * M), left: '50%' },
-          margin:         { left: -Math.round(PILL_W * M / 2) },
-          width:          Math.round(PILL_W * M),
-          height:         Math.round(PILL_H_SM * M),
-          flexDirection:  'row',
-          alignItems:     'center',
-        }}
-        uiBackground={{ color: DARK }}
-      >
-        {/* Ghost spacer — mirrors the dismiss button so the label area is symmetric */}
-        <UiEntity uiTransform={{ width: dailyDismiss, height: dailyDismiss, flexShrink: 0 }} />
-        <Label
-          value={dailyLimitText}
-          fontSize={fs(DAILY_FONT)}
-          color={WHITE}
-          textAlign="middle-center"
-          uiTransform={{ flexGrow: 1, height: '100%' }}
-        />
-        <UiEntity
-          uiTransform={{ width: dailyDismiss, height: dailyDismiss, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
-          onMouseDown={hideDailyLimit}
-        >
-          <Label
-            value="✕"
-            fontSize={fs(DAILY_DISMISS_FONT)}
-            color={WHITE}
-            textAlign="middle-center"
-            uiTransform={{ width: '100%', height: '100%' }}
-          />
+      {/* ═════ DAILY LIMIT — dismissible ═════ */}
+      <UiEntity uiTransform={{ display: dailyLimitVisible ? 'flex' : 'none', positionType: 'absolute', position: { top: dailyY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
+        <UiEntity uiTransform={{ height: px(PILL_H), flexDirection: 'row', alignItems: 'center', padding: { left: px(PILL_PAD_X) }, borderRadius: px(PILL_H / 2) }} uiBackground={{ color: DARK }}>
+          <Label value={dailyLimitText} fontSize={fs(PILL_FONT - 2)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+          <UiEntity uiTransform={{ width: dismiss, height: dismiss, alignItems: 'center', justifyContent: 'center' }} onMouseDown={hideDailyLimit}>
+            <Label value="x" fontSize={fs(PILL_FONT)} color={{ ...DIM, a: 1 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+          </UiEntity>
         </UiEntity>
       </UiEntity>
 
-      {/* ── Persistent ────────────────────────────────────────── */}
-      <UiEntity
-        uiTransform={{
-          display:        persistVisible ? 'flex' : 'none',
-          positionType:   'absolute',
-          position:       { bottom: safeBottomPx + Math.round(PERSIST_BOTTOM * M), left: '50%' },
-          margin:         { left: -Math.round(PILL_W * M / 2) },
-          width:          Math.round(PILL_W * M),
-          height:         Math.round(PILL_H_SM * M),
-          alignItems:     'center',
-          justifyContent: 'center',
-          padding:        { left: PILL_PAD_X, right: PILL_PAD_X },
-        }}
-        uiBackground={{ color: DARK }}
-      >
-        <Label
-          value={persistText}
-          fontSize={fs(PERSIST_FONT)}
-          color={WHITE}
-          textAlign="middle-center"
-          uiTransform={{ width: '100%', height: '100%' }}
-        />
+      {/* ═════ PERSISTENT ═════ */}
+      <UiEntity uiTransform={{ display: persistVisible ? 'flex' : 'none', positionType: 'absolute', position: { top: persistY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
+        <UiEntity uiTransform={{ height: px(PILL_H), flexDirection: 'row', alignItems: 'center', padding: { left: px(PILL_PAD_X), right: px(PILL_PAD_X) }, borderRadius: px(PILL_H / 2) }} uiBackground={{ color: DARK }}>
+          <Label value={persistText} fontSize={fs(PILL_FONT - 2)} color={{ ...DIM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+        </UiEntity>
       </UiEntity>
 
     </UiEntity>

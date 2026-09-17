@@ -48,7 +48,7 @@ import { setBloomSparklePalette } from './sparkleSystem'
 import { setAmbientPalette } from './ambientFX'
 import { setupLeaderboardBoards, updateLeaderboardDisplay, BoardEntry }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
-import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
+import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, updateBloomRemaining, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
 import { clockSync } from './shared/clockSync'
 import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
@@ -58,6 +58,8 @@ import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
 import { setupTributeSystem } from './tributeSystem'
+import { PLANT_LAYOUT } from './shared/layout'
+import { Quaternion } from '@dcl/sdk/math'
 
 // ===============================================================
 // ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -161,7 +163,15 @@ const SND_INIT_POS = { x: 8, y: 1, z: 8 }   // initial transform — overwritten
 
 // ── Clickbox (optional alternative pointer target) ────────────
 const CLICKBOX_Y     = 1    // local Y offset above plant pivot
-const CLICKBOX_SCALE = { x: 1.5, y: 2, z: 1.5 }
+const CLICKBOX_SCALE = { x: 1.5, y: 2, z: 1.5 }   // initial only — resizeClickboxes() sets the real size
+// Click boxes are sized in WORLD metres (2026-09-17). The old fixed LOCAL scale made a
+// full-size plant's box 1.5 m wide × 2 m tall while a 0.38-scale fast plant 0.5 m away
+// got 0.57 m — inside its neighbour's box, so small plants were untappable everywhere.
+const CLICKBOX_W_MAX   = 1.2    // m — never wider than this, however isolated the plant
+const CLICKBOX_W_MIN   = 0.4    // m — touch floor, even for the tightest pairs (0.49 m apart)
+const CLICKBOX_GAP     = 0.96   // fraction of the neighbour gap the two boxes may fill together
+const CLICKBOX_H_PER_SCALE = 1.9  // m of box height per unit of plant scale
+const CLICKBOX_H_MIN   = 0.9    // m — short plants still need a finger-sized target
 
 // ── In-world text labels ──────────────────────────────────────
 const FONT_PCT_LABEL      = 6    // Image_2–5 + wateringPercentage entity
@@ -346,6 +356,7 @@ function startBloomResetTicker(): void {
       ? (m > 0 ? `${m}m ${s}s` : `${s}s`)
       : '…'
     setBloomResetText(label)
+    updateBloomRemaining(totalSecs > 0 ? `${m}:${String(s).padStart(2, '0')}` : '', remaining)   // HUD ring shows time left
     if (remaining > 0) timers.setTimeout(tick, 1_000)
     // No startBloomClose() here — the dedicated timer above handles it
   }
@@ -553,6 +564,35 @@ function showWelcomeProgress() {
 // ---------------------------------------------------------------
 // Plant click registry
 // ---------------------------------------------------------------
+
+/** Size every clickbox in world metres from its nearest neighbour: the gap between two
+ *  plants is split in proportion to their scales (big plant → bigger share), so boxes
+ *  never swallow a smaller neighbour. Call once all plants are registered. */
+function resizeClickboxes(): void {
+  const items: Array<{ box: Entity; x: number; z: number; s: number }> = []
+  for (const info of plantRegistry.values()) {
+    if (!info.clickboxEntity) continue
+    const tf = Transform.getOrNull(info.anchor)
+    if (!tf) continue
+    items.push({ box: info.clickboxEntity, x: tf.position.x, z: tf.position.z, s: Math.max(0.05, tf.scale.x) })
+  }
+  for (const a of items) {
+    let width = CLICKBOX_W_MAX
+    for (const b of items) {
+      if (b === a) continue
+      const d = Math.hypot(a.x - b.x, a.z - b.z)
+      // my share of the gap, as a full width: 2 × d × myScale / (myScale + theirScale)
+      width = Math.min(width, 2 * d * CLICKBOX_GAP * a.s / (a.s + b.s))
+    }
+    width = Math.max(CLICKBOX_W_MIN, Math.min(CLICKBOX_W_MAX, width))
+    const height = Math.max(CLICKBOX_H_MIN, CLICKBOX_H_PER_SCALE * a.s)
+    const t = Transform.getMutable(a.box)
+    // anchor mirrors the plant's scale, so convert world metres → local units
+    t.scale    = { x: width / a.s, y: height / a.s, z: width / a.s }
+    t.position = { x: 0, y: (height / 2) / a.s, z: 0 }
+  }
+  console.log(`[WateringSystem] clickboxes sized for ${items.length} plants (world metres, neighbour-aware)`)
+}
 
 const plantRegistry     = new Map<Entity, { clickTarget: Entity; plantName: string; clickboxEntity: Entity | null; anchor: Entity }>()
 const plantNameToEntity = new Map<string, Entity>()
@@ -909,6 +949,23 @@ function refreshWateredByLabels(): void {
   }
 }
 
+/** Code-owned layout (shared/layout.ts): move the composite's plant entities BEFORE
+ *  setupPlant derives anchors / drops / click boxes from their transforms. */
+function applyPlantLayout(): void {
+  let moved = 0
+  for (const [name, p] of Object.entries(PLANT_LAYOUT)) {
+    const entity = engine.getEntityOrNullByName(name)
+    if (!entity) { console.log(`[Layout] no entity named "${name}" — skipped`); continue }
+    const tf = Transform.getMutableOrNull(entity)
+    if (!tf) continue
+    tf.position = { x: p.x, y: p.y, z: p.z }
+    if (p.rotY !== undefined) tf.rotation = Quaternion.fromEulerDegrees(0, p.rotY, 0)
+    if (p.scale !== undefined) tf.scale = { x: p.scale, y: p.scale, z: p.scale }
+    moved++
+  }
+  if (moved > 0) console.log(`[Layout] ${moved} plants placed from shared/layout.ts`)
+}
+
 function setupPlant(plantName: string) {
   const entity = engine.getEntityOrNullByName(plantName)
   if (!entity) { console.log(`[WateringSystem] Entity not found: ${plantName}`); return }
@@ -921,8 +978,10 @@ function setupPlant(plantName: string) {
   PlantData.create(entity, { isWatered: false, wateredAt: 0 })
 
   if (GltfContainer.has(entity)) {
+    // With clickboxes the mesh has no pointer handler — on the pointer layer it would
+    // only BLOCK taps meant for a smaller neighbour behind it.
     GltfContainer.getMutable(entity).visibleMeshesCollisionMask =
-      ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
+      useClickbox ? ColliderLayer.CL_PHYSICS : ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
   }
 
   // Neutral anchor mirroring the plant's transform. Runtime children (rose, drop,
@@ -1101,7 +1160,9 @@ export function setupWateringSystem(): void {
     magicSoundEntities.push(ent)
   }
 
+  applyPlantLayout()
   for (const name of PLANT_NAMES) setupPlant(name)
+  resizeClickboxes()
 
   // Deferred animator setup — ensures GltfContainers have loaded
   timers.setTimeout(() => {
@@ -1554,8 +1615,14 @@ export function setUseClickbox(val: boolean): void {
       info.clickboxEntity = null
       info.clickTarget    = plantEntity
     }
+    // mesh is only a pointer target when it IS the click target
+    if (GltfContainer.has(plantEntity)) {
+      GltfContainer.getMutable(plantEntity).visibleMeshesCollisionMask =
+        val ? ColliderLayer.CL_PHYSICS : ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
+    }
     enablePlantClick(plantEntity)
   }
+  if (val) resizeClickboxes()
 }
 
 export function getUseClickbox(): boolean { return useClickbox }
@@ -1571,10 +1638,16 @@ export function getWateringStatus() {
   }
 }
 
-export function forceTriggerBloom(): void {
+/** Test panel: +amount lifetime waters through the server's real flair / tribute path. */
+export function adminGrantWaters(amount: number): void {
+  if (room.isReady()) room.send('adminGrantWaters', { amount })
+}
+
+/** @param variant '' = normal roll; a BLOOM_VARIANTS id forces it at full scale (test panel) */
+export function forceTriggerBloom(variant = ''): void {
   if (isBloomActive()) return
   if (room.isReady()) {
-    room.send('forceBloom', {})
+    room.send('forceBloom', { variant })
   } else {
     // Local fallback — room not connected yet (common in local preview)
     triggerBloomEvent()

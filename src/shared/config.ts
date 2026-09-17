@@ -128,6 +128,11 @@ export const FLOWERS = {
   rare:   ['Moonbloom', 'Sunflare'],
 } as const
 
+// ── Test tooling ─────────────────────────────────────────────
+/** Wallets allowed to use test handlers that write PERMANENT data (lifetime board /
+ *  tributes). Lower-case. Pre-production: gate every test handler + unmount TestPanelUi. */
+export const ADMIN_ADDRESSES: ReadonlyArray<string> = ['0x8967ad851ccbd4c1a2d57a128d3c606fcab29bad']
+
 // ── v2 Phase 6: bloom variants + scaled-bloom FX (GDD §3 step 3, §5 "shareable moment") ──
 // The variant SYSTEM ships now; the catalog grows later and odds can be rotated
 // every few weeks without a new build of anything but this table (GDD §9).
@@ -184,10 +189,19 @@ export const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000
 export const TRIBUTE_MILESTONE = 1000   // TUNING — GDD "TBD: threshold, ~1,000"
 /** Fixed memorial-bed plots, filled in the order tributes are earned (never placed
  *  dynamically — clutter would cheapen the founding rose). Add plots when the bed fills. */
-export const TRIBUTE_PLOTS: ReadonlyArray<{ x: number; z: number }> = [
+export const TRIBUTE_HERO_PLOTS: ReadonlyArray<{ x: number; z: number }> = [
   { x: 4.5, z: 21.5 }, { x: 5.7, z: 21.5 }, { x: 6.9,  z: 21.5 }, { x: 8.1,  z: 21.5 },
   { x: 9.3, z: 21.5 }, { x: 10.5, z: 21.5 }, { x: 11.7, z: 21.5 }, { x: 12.9, z: 21.5 },
 ]
+/** Overflow plots once the hero bed is full — rendered COMPACT (one model, hover text,
+ *  no plaque). Left EMPTY on purpose: the plants run along the garden's edges and the
+ *  Blender layout is about to change, so these come from the new layout export, not
+ *  from a generated row. Until then, tribute #9+ is register-only. */
+export const TRIBUTE_HEDGE_PLOTS: ReadonlyArray<{ x: number; z: number }> = []
+/** All plant-bearing plots, hero first. A record with plot −1 lives on the register only. */
+export const TRIBUTE_PLOTS: ReadonlyArray<{ x: number; z: number }> = [...TRIBUTE_HERO_PLOTS, ...TRIBUTE_HEDGE_PLOTS]
+/** The permanent roll of every tribute (one text entity, paged) — in front of the bed. */
+export const TRIBUTE_REGISTER_POS = { x: 8.7, y: 1.25, z: 20.3 } as const
 export interface FoundingTribute { displayName: string; address: string; note: string }
 /** Seeded on first run — v2 ships with the first tribute already grown (GDD §4.2).
  *  address: fill in the honoree's wallet when known → the server also seeds their

@@ -22,16 +22,15 @@ import {
   ColliderLayer,
   Material,
   TextShape,
-  Billboard,
-  BillboardMode,
   GltfContainer,
   pointerEventsSystem,
   InputAction,
 } from '@dcl/sdk/ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
-import { TRIBUTE_PLOTS, TRIBUTE_MILESTONE, TRIBUTE_MODEL_FOUNDING, TRIBUTE_MODEL_STANDARD } from './shared/config'
+import { TRIBUTE_PLOTS, TRIBUTE_HERO_PLOTS, TRIBUTE_REGISTER_POS, TRIBUTE_MILESTONE, TRIBUTE_MODEL_FOUNDING, TRIBUTE_MODEL_STANDARD } from './shared/config'
 import { showToast } from './notifications'
+import { createSign, removeSign, setupSignSystem, Sign } from './signs'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals)
@@ -40,12 +39,13 @@ import { showToast } from './notifications'
 const STEM_H        = 1.2
 const STEM_R        = 0.06
 const BLOOM_SCALE   = 0.5
-const PLAQUE_Y      = 2.0
+const PLAQUE_Y      = 0.40
+const PLAQUE_OFFSET_Z = -0.55   // toward the garden; readers stand on −Z
+const PLAQUE_SIZE   = { w: 1.1, h: 0.55 }
 const TAP_DISTANCE  = 8
 const TOAST_MS      = 6_000
 const COLOR_STEM    = Color4.create(0.25, 0.55, 0.25, 1)
 const COLOR_FOUNDING = Color4.create(0.85, 0.10, 0.20, 1)   // a red rose until KJ's model lands
-const COLOR_PLAQUE  = Color4.create(1, 0.92, 0.6, 1)
 
 // ---------------------------------------------------------------
 // State
@@ -54,7 +54,7 @@ const COLOR_PLAQUE  = Color4.create(1, 0.92, 0.6, 1)
 interface TributeRecord {
   address: string; displayName: string; earnedAt: number; plot: number; founding: boolean; note: string
 }
-interface TributeView { root: Entity; key: string }
+interface TributeView { root: Entity; key: string; sign: Sign | null }
 
 const views = new Map<number, TributeView>()   // plot → view
 
@@ -108,34 +108,74 @@ function createView(t: TributeRecord): TributeView {
     () => showToast(plaqueText(t).replace(/\n/g, ' - '), TOAST_MS, false),
   )
 
-  const plaque = engine.addEntity()
-  Transform.create(plaque, { position: { x: 0, y: PLAQUE_Y, z: 0 }, parent: root })
-  TextShape.create(plaque, { text: plaqueText(t), fontSize: 1.4, textColor: COLOR_PLAQUE, outlineWidth: 0.1, outlineColor: Color4.Black() })
-  Billboard.create(plaque, { billboardMode: BillboardMode.BM_Y })
+  // Plaques only on the hero bed; hedge plots stay compact (hover + tap toast + register)
+  let sign: Sign | null = null
+  if (t.plot < TRIBUTE_HERO_PLOTS.length) {
+    sign = createSign({ x: pos.x, y: PLAQUE_Y, z: pos.z + PLAQUE_OFFSET_Z }, 0, PLAQUE_SIZE, 0.8)
+    TextShape.getMutable(sign.text).text = plaqueText(t)
+  }
 
-  return { root, key: `${t.address}|${t.displayName}|${t.note}` }
+  return { root, key: `${t.address}|${t.displayName}|${t.note}`, sign }
 }
 
 // ---------------------------------------------------------------
 // Setup
 // ---------------------------------------------------------------
 
+// ── Tribute Register — the permanent roll, one text entity however long the list ──
+const REGISTER_SIZE     = { w: 2.4, h: 1.5 }
+const REGISTER_PER_PAGE = 8
+const REGISTER_PAGE_MS  = 7_000
+let registerText: Entity | null = null
+let registerRecords: TributeRecord[] = []
+let registerPage  = 0
+let registerAccum = 0
+
+function refreshRegister(): void {
+  if (registerText === null) return
+  const pages = Math.max(1, Math.ceil(registerRecords.length / REGISTER_PER_PAGE))
+  const start = (registerPage % pages) * REGISTER_PER_PAGE
+  const rows  = registerRecords.slice(start, start + REGISTER_PER_PAGE)
+    .map(t => `${t.displayName}  -  ${new Date(t.earnedAt).toISOString().slice(0, 10)}${t.founding ? '  (founding)' : ''}`)
+  const head = `TRIBUTE REGISTER  -  ${TRIBUTE_MILESTONE} lifetime waters${pages > 1 ? `  (${(registerPage % pages) + 1}/${pages})` : ''}`
+  TextShape.getMutable(registerText).text = [head, '', ...(rows.length ? rows : ['No tributes yet'])].join('\n')
+}
+
+function registerPagerSystem(dt: number): void {
+  if (registerRecords.length <= REGISTER_PER_PAGE) return
+  registerAccum += dt * 1_000
+  if (registerAccum < REGISTER_PAGE_MS) return
+  registerAccum = 0
+  registerPage++
+  refreshRegister()
+}
+
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupTributeSystem(): void {
+  const reg = createSign({ ...TRIBUTE_REGISTER_POS }, 0, REGISTER_SIZE, 0.75)
+  registerText = reg.text
+  refreshRegister()
+  engine.addSystem(registerPagerSystem)
+
   room.onMessage('tributesUpdate', (data) => {
     let records: TributeRecord[] = []
     try { records = JSON.parse(data.json) } catch { return }
     const seen = new Set<number>()
+    registerRecords = records.slice().sort((a, b) => a.earnedAt - b.earnedAt)
+    registerPage = 0
+    refreshRegister()
     for (const t of records) {
+      if (t.plot < 0 || t.plot >= TRIBUTE_PLOTS.length) continue   // register-only honour
       seen.add(t.plot)
       const key = `${t.address}|${t.displayName}|${t.note}`
       const existing = views.get(t.plot)
       if (existing?.key === key) continue
-      if (existing) engine.removeEntityWithChildren(existing.root)
+      if (existing) { if (existing.sign) removeSign(existing.sign); engine.removeEntityWithChildren(existing.root) }
       views.set(t.plot, createView(t))
     }
-    for (const [plot, v] of views) if (!seen.has(plot)) { engine.removeEntityWithChildren(v.root); views.delete(plot) }
+    for (const [plot, v] of views) if (!seen.has(plot)) { if (v.sign) removeSign(v.sign); engine.removeEntityWithChildren(v.root); views.delete(plot) }
     console.log(`[Tributes] ${records.length} tribute plant(s) standing`)
   })
+  setupSignSystem()
   console.log(`[Tributes] ready · listeners=${room.listenerCount('tributesUpdate')}`)
 }

@@ -102,8 +102,11 @@ export const room = registerMessages({
   // Expected casualties of the position cap; verify with the test panel.
   /** Test-panel only — tells the server to bypass the daily limit for this player. */
   setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
-  /** Test-panel only — triggers bloom on the server so all clients sync correctly. */
-  forceBloom:       Schemas.Map({}),
+  /** Test-panel only — triggers bloom on the server so all clients sync correctly.
+   *  variant: '' = roll normally; a BLOOM_VARIANTS id forces that variant at full scale. */
+  forceBloom:       Schemas.Map({ variant: Schemas.String }),
+  /** Test-panel only — adds lifetime (+weekly) waters through the REAL flair/tribute path. */
+  adminGrantWaters: Schemas.Map({ amount: Schemas.Number }),
   /** Test-panel only — waters exactly enough plants to reach the 80% bloom threshold. */
   forceWater80:     Schemas.Map({}),
 })

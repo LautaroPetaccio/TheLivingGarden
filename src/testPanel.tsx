@@ -12,6 +12,7 @@ import {
   getUseClickbox,
   resetAllPlants,
   forceTriggerBloom,
+  adminGrantWaters,
   forceWaterToThreshold,
   forceStartPlayerTrail,
   forceStopPlayerTrail,
@@ -49,10 +50,12 @@ const ERR_TEXT   = Color4.create(0.95, 0.56, 0.14, 1.0)
 
 // ── Layout — right-anchored, top of screen ───────────────────────
 const PANEL_W      = 390
-const PANEL_RIGHT  = 20   // anchored from the RIGHT edge — a fixed left:1510 was off-screen on narrower canvases
+// Dev panel lives on the LEFT edge, below the client's top-left chrome: the HUD ring and
+// seed chip own the top right. (A fixed left:1510 was off-screen on narrower canvases.)
+const PANEL_LEFT   = 24
 const PANEL_TOP    = 20
 const HEADER_H     = 46
-const PANEL_H_OPEN = 760
+const PANEL_H_OPEN = 850
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
@@ -122,7 +125,7 @@ export function TestPanelUi() {
     <UiEntity
       uiTransform={{
         positionType: 'absolute',
-        position:     { right: PANEL_RIGHT, top: PANEL_TOP },
+        position:     { left: PANEL_LEFT, top: '26%' },
         width:        PANEL_W,
         height:       pnH,
         flexDirection: 'column',
@@ -232,9 +235,25 @@ export function TestPanelUi() {
         <UiEntity
           uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
           uiBackground={{ color: BTN_BLOOM }}
-          onMouseDown={forceTriggerBloom}
+          onMouseDown={() => forceTriggerBloom()}
         >
           <Label value="Force Bloom Now" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_BLOOM }}
+          onMouseDown={() => forceTriggerBloom('moonlit')}
+        >
+          <Label value="Force MOONLIT Bloom (rare, full scale)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_BLOOM }}
+          onMouseDown={() => adminGrantWaters(100)}
+        >
+          <Label value="Grant +100 lifetime waters (flair / tribute)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Divider */}

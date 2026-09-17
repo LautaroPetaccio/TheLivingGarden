@@ -34,6 +34,7 @@ import {
   FOUNDING_TRIBUTES,
   rollBloomVariant,
   bloomVariantById,
+  ADMIN_ADDRESSES,
   seedSpawnCount,
   seedRareChance,
   SEED_LIFETIME_MS,
@@ -193,7 +194,7 @@ interface TributeRecord {
 let tributes: TributeRecord[] = []
 
 function nextFreePlot(): number {
-  const used = new Set(tributes.map(t => t.plot))
+  const used = new Set(tributes.filter(t => t.plot >= 0).map(t => t.plot))
   for (let i = 0; i < TRIBUTE_PLOTS.length; i++) if (!used.has(i)) return i
   return -1
 }
@@ -232,7 +233,7 @@ async function loadTributes(): Promise<void> {
     }
   }
   if (changed) await saveTributes()
-  console.log(`[Server] Tributes: ${tributes.length} (${tributes.filter(t => t.founding).length} founding, ${TRIBUTE_PLOTS.length - tributes.length} plots free)`)
+  console.log(`[Server] Tributes: ${tributes.length} (${tributes.filter(t => t.founding).length} founding, ${TRIBUTE_PLOTS.length - tributes.filter(t => t.plot >= 0).length} plots free)`)
 }
 
 /** Call after a lifetime total changes. Grows the plant the moment the milestone is crossed. */
@@ -240,8 +241,9 @@ async function grantTributeIfEarned(address: string): Promise<void> {
   const entry = lifetime.get(address)
   if (!entry || entry.total < TRIBUTE_MILESTONE) return
   if (tributes.some(t => t.address === address)) return
+  // No free plot → the honour is still permanent: plot −1 = Tribute Register only.
   const plot = nextFreePlot()
-  if (plot < 0) { console.error(`[Server] ${entry.displayName} earned a tribute but the bed is full — add TRIBUTE_PLOTS`); return }
+  if (plot < 0) console.log(`[Server] ${entry.displayName} earned a tribute; all plots taken → register only (add TRIBUTE_HEDGE_PLOTS)`)
   tributes.push({ address, displayName: entry.displayName, earnedAt: Date.now(), plot, founding: false, note: '' })
   await saveTributes()
   sendTributes()
@@ -433,14 +435,15 @@ function checkBloomThreshold(): void {
   }
 }
 
-function triggerBloom(): void {
+/** @param forcedVariant test-panel only: a BLOOM_VARIANTS id to show at FULL scale ('' = normal roll) */
+function triggerBloom(forcedVariant = ''): void {
   if (bloomActive) return
   const threshold = currentBloomThreshold()
   cancelBloomSustain()
   bloomActive    = true
   bloomStartedAt = Date.now()
-  bloomScale     = bloomScaleFor(knownPlayers.size)
-  const variant  = rollBloomVariant(bloomScale)
+  bloomScale     = forcedVariant ? 1 : bloomScaleFor(knownPlayers.size)
+  const variant  = forcedVariant ? bloomVariantById(forcedVariant) : rollBloomVariant(bloomScale)
   bloomVariant   = variant.id
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name})`)
   room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant })
@@ -1113,8 +1116,25 @@ export async function server(): Promise<void> {
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
-  onRoomMessage<Record<string, never>>('forceBloom', async (_data, _address) => {
-    triggerBloom()
+  onRoomMessage<{ variant: string }>('forceBloom', async (data, _address) => {
+    triggerBloom(data?.variant || '')
+  })
+
+  // ── Message: adminGrantWaters (test panel) — exercise flair tiers + tribute grant ──
+  onRoomMessage<{ amount: number }>('adminGrantWaters', async (data, address) => {
+    if (!ADMIN_ADDRESSES.includes(address.toLowerCase())) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    const amount = Math.max(1, Math.min(1000, Math.floor(data?.amount ?? 0)))
+    const tierBefore = tierOf(address)
+    for (let i = 0; i < amount; i++) bumpWaterTotals(address)
+    const tier = tierOf(address)
+    try { await saveLeaderboard(); await saveLifetime() } catch (err) { console.error('[Server] adminGrantWaters: persist failed:', err) }
+    broadcastLeaderboard()
+    const total = lifetime.get(address)?.total ?? 0
+    console.log(`[Server] [Test] granted ${amount} waters to ${address} → lifetime ${total}, tier ${tierBefore}→${tier}`)
+    sendNotice(address, tier > tierBefore
+      ? `${total} lifetime waters — your name now carries ${['', 'a sprout', 'a flower', 'a golden flower'][tier]}`
+      : `[Test] +${amount} waters → ${total} lifetime`)
+    await grantTributeIfEarned(address)
   })
 
   // ── Message: forceWater80 (test panel) ──────────────────────

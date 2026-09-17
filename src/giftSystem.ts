@@ -25,11 +25,14 @@ import {
   AvatarAttach,
   AvatarAnchorPointType,
   PlayerIdentityData,
+  TextShape,
   pointerEventsSystem,
   InputAction,
 } from '@dcl/sdk/ecs'
 import { room } from './shared/messages'
 import { showToast } from './notifications'
+import { createSign, setupSignSystem } from './signs'
+import { FLOWERS } from './shared/config'
 
 // ---------------------------------------------------------------
 // Config
@@ -53,6 +56,41 @@ let scanAccum = 0
 const tags = new Map<string, Entity>()   // remote address → AvatarAttach parent
 
 export function getCollection(): Keepsake[] { return flowers.slice() }
+
+// Keepsakes post — right end of the planter row. The only place a player can SEE what
+// they hold (GDD §4.2 "the rare collection at x/N"); tap lists every flower.
+const KEEPSAKE_POST_POS  = { x: 15.2, y: 0.75, z: 4.4 }
+const KEEPSAKE_POST_SIZE = { w: 1.3, h: 0.85 }
+let keepsakePostText: Entity | null = null
+
+function raresFound(): number {
+  const found = new Set<string>()
+  for (const f of flowers) if (f.rare) found.add(f.flower)
+  return found.size
+}
+function refreshKeepsakePost(): void {
+  if (keepsakePostText === null) return
+  const newest = flowers.length > 0 ? flowers[flowers.length - 1].flower : 'none yet'
+  TextShape.getMutable(keepsakePostText).text =
+    `Your keepsakes: ${flowers.length}\nRare collection ${raresFound()}/${FLOWERS.rare.length}\nNewest: ${newest}`
+}
+function createKeepsakePost(): void {
+  const sign = createSign(KEEPSAKE_POST_POS, 180, KEEPSAKE_POST_SIZE, 0.85)
+  keepsakePostText = sign.text
+  const tap = engine.addEntity()
+  Transform.create(tap, { position: KEEPSAKE_POST_POS, scale: { x: KEEPSAKE_POST_SIZE.w, y: KEEPSAKE_POST_SIZE.h, z: 0.3 } })
+  MeshCollider.setBox(tap, ColliderLayer.CL_POINTER)
+  pointerEventsSystem.onPointerDown(
+    { entity: tap, opts: { button: InputAction.IA_POINTER, hoverText: 'My keepsakes', maxDistance: GIFT_DISTANCE + 2 } },
+    () => {
+      if (flowers.length === 0) { showToast('No keepsakes yet — harvest a flower, or receive one as a gift', TOAST_MS, false); return }
+      const counts = new Map<string, number>()
+      for (const f of flowers) { const k = f.rare ? `${f.flower} (rare)` : f.flower; counts.set(k, (counts.get(k) ?? 0) + 1) }
+      showToast([...counts].map(([k, n]) => (n > 1 ? `${k} x${n}` : k)).join(', '), TOAST_MS + 2_000, false)
+    },
+  )
+  refreshKeepsakePost()
+}
 export function getBoxCap(): number { return boxCap }
 
 // ---------------------------------------------------------------
@@ -113,6 +151,7 @@ export function setupGiftSystem(): void {
   room.onMessage('collectionUpdate', (data) => {
     try { flowers = JSON.parse(data.flowersJson) } catch { flowers = [] }
     boxCap = data.boxCap
+    refreshKeepsakePost()
     console.log(`[Gift] collection: ${flowers.length} flower(s), box cap ${boxCap}`)
   })
 
@@ -124,6 +163,8 @@ export function setupGiftSystem(): void {
     showToast(data.text, TOAST_MS, false)
   })
 
+  setupSignSystem()
+  createKeepsakePost()
   engine.addSystem(tagScanSystem)
   console.log(`[Gift] ready · notice listeners=${room.listenerCount('notice')}`)
 }
