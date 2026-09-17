@@ -13,6 +13,7 @@
 
 import { Storage } from '@dcl/sdk/server'
 
+/** Outcome of a read: a value, null when the key holds nothing, or a failure. */
 export type LoadResult<T> =
   | { ok: true; value: T | null }     // null = the key holds nothing
   | { ok: false }                     // the read threw and returned no answer
@@ -33,6 +34,7 @@ const MAX_IN_FLIGHT = 8
 let   inFlight      = 0
 const waiting: Array<() => void> = []
 
+/** Runs `fn` once a call slot frees up, keeping the scene under the fetch cap. */
 async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   if (inFlight >= MAX_IN_FLIGHT) await new Promise<void>(resolve => waiting.push(resolve))
   inFlight++
@@ -48,6 +50,7 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
 // Reads
 // ---------------------------------------------------------------
 
+/** Reads through a slot, reporting a rejected read as a failure. */
 async function load<T>(read: () => Promise<T | null>): Promise<LoadResult<T>> {
   try {
     return { ok: true, value: await withSlot(read) }
@@ -56,10 +59,12 @@ async function load<T>(read: () => Promise<T | null>): Promise<LoadResult<T>> {
   }
 }
 
+/** Reads a scene-scoped key, shared by everyone in the world. */
 export function loadScene<T>(key: string): Promise<LoadResult<T>> {
   return load<T>(() => Storage.get<T>(key))
 }
 
+/** Reads a key held against one player's address. */
 export function loadPlayer<T>(address: string, key: string): Promise<LoadResult<T>> {
   return load<T>(() => Storage.player.get<T>(address, key))
 }
@@ -71,6 +76,7 @@ export function loadPlayer<T>(address: string, key: string): Promise<LoadResult<
 const RETRY_BASE_MS = 1_000
 const RETRY_MAX_MS  = 30_000
 
+/** Write-through for a single storage key: hold, coalesce, retry. */
 export interface KeyWriter {
   /** Queue the current state. The SDK coalesces and orders the writes; this adds
    *  retry with backoff so a failed save is not silently lost. */
@@ -82,6 +88,7 @@ export interface KeyWriter {
   idle(): Promise<void>
 }
 
+/** Builds a writer over `write`. `label` names the key in retry logs. */
 function createWriter(label: string, write: (value: unknown) => Promise<boolean>): KeyWriter {
   let enabled    = false
   let writing    = false
@@ -91,6 +98,7 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
   let retryTimer: ReturnType<typeof setTimeout> | null = null
   let idleWaiters: Array<() => void> = []
 
+  /** Releases idle() waiters once nothing is left to write. */
   function settleIdle(): void {
     if (hasPending || writing || retryTimer !== null) return
     const waiters = idleWaiters
@@ -98,6 +106,7 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
     for (const resolve of waiters) resolve()
   }
 
+  /** One write attempt. A throw counts as a failure, like a false result. */
   async function attempt(value: unknown): Promise<boolean> {
     try {
       return await withSlot(() => write(value))
@@ -106,6 +115,7 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
     }
   }
 
+  /** Writes the newest snapshot, retrying with backoff until one lands. */
   async function flush(): Promise<void> {
     if (writing || !enabled || !hasPending) return
     writing = true
@@ -143,10 +153,12 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
   }
 }
 
+/** Writer for a scene-scoped key. */
 export function createSceneWriter(key: string): KeyWriter {
   return createWriter(key, value => Storage.set(key, value))
 }
 
+/** Writer for a key held against one player's address. */
 export function createPlayerWriter(address: string, key: string): KeyWriter {
   return createWriter(`${key}@${address.slice(0, 8)}`, value => Storage.player.set(address, key, value))
 }
