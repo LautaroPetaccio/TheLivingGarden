@@ -24,8 +24,9 @@ import {
   Entity,
   Transform,
   MeshRenderer,
-  MeshCollider,
   Material,
+  GltfContainer,
+  ColliderLayer,
   TextShape,
   Billboard,
   BillboardMode,
@@ -36,7 +37,7 @@ import {
 import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS, BOX_WATER_MAX } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y } from './shared/config'
 import { showToast } from './notifications'
 import { setupGiftSystem, getBoxCap } from './giftSystem'
 
@@ -44,13 +45,9 @@ import { setupGiftSystem, getBoxCap } from './giftSystem'
 // Config (greybox visuals)
 // ---------------------------------------------------------------
 
-const BOX_SIZE      = { x: 0.9, y: 0.45, z: 0.9 }
-const BOX_Y         = 0.225
-const LABEL_Y       = 1.35
+const LABEL_Y       = 2.2    // above the template's balloons (3.1 × scale)
 const SPROUT_SCALE  = 0.25
 const FLOWER_SCALE  = 0.5
-const COLOR_BOX     = Color4.create(0.45, 0.30, 0.18, 1)
-const COLOR_BOX_MINE = Color4.create(0.55, 0.40, 0.22, 1)
 const COLOR_SPROUT  = Color4.create(0.35, 0.75, 0.35, 1)
 const COLOR_NORMAL  = Color4.create(0.95, 0.55, 0.75, 1)   // opened, normal flower
 const COLOR_RARE    = Color4.create(1.0, 0.82, 0.25, 1)    // opened, rare flower
@@ -118,7 +115,7 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
   if (!v.owner) return
   const e = engine.addEntity()
   const k = v.opened ? FLOWER_SCALE : SPROUT_SCALE
-  Transform.create(e, { position: { x: pos.x, y: BOX_Y + BOX_SIZE.y / 2 + k / 2, z: pos.z }, scale: { x: k, y: k, z: k } })
+  Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y + k / 2, z: pos.z }, scale: { x: k, y: k, z: k } })
   MeshRenderer.setSphere(e)
   const c = v.opened ? (v.rare ? COLOR_RARE : COLOR_NORMAL) : COLOR_SPROUT
   Material.setPbrMaterial(e, { albedoColor: c, emissiveColor: c, emissiveIntensity: v.opened ? 0.8 : 0.3 })
@@ -127,7 +124,6 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
 
 function refresh(v: BoxView): void {
   const pos = BOX_POSITIONS.find(p => p.id === v.boxId)!
-  Material.setPbrMaterial(v.base, { albedoColor: isMine(v) ? COLOR_BOX_MINE : COLOR_BOX })
   setPlantVisual(v, pos)
   TextShape.getMutable(v.label).text = labelFor(v, Date.now())
   const pe = PointerEvents.getMutableOrNull(v.base)?.pointerEvents[0]?.eventInfo
@@ -175,11 +171,11 @@ function onTap(v: BoxView): void {
 // ---------------------------------------------------------------
 
 function createBox(p: { id: string; x: number; z: number }): BoxView {
+  // KJ's planter template. The GLB has no _collider mesh, so the visible meshes
+  // carry both pointer (tap) and physics (walkable) collision.
   const base = engine.addEntity()
-  Transform.create(base, { position: { x: p.x, y: BOX_Y, z: p.z }, scale: BOX_SIZE })
-  MeshRenderer.setBox(base)
-  MeshCollider.setBox(base)
-  Material.setPbrMaterial(base, { albedoColor: COLOR_BOX })
+  Transform.create(base, { position: { x: p.x, y: 0, z: p.z }, scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
+  GltfContainer.create(base, { src: BOX_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS })
 
   const label = engine.addEntity()
   Transform.create(label, { position: { x: p.x, y: LABEL_Y, z: p.z } })

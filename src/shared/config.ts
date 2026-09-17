@@ -105,12 +105,20 @@ export function plantDecayMs(plantId: string, gardeners: number): number {
 // A caught seed is planted in a named box in the SHARED garden; it grows on a
 // real-world timer and opens as an unidentified flower (rarity known, identity not).
 // Greybox row along the garden's front edge (z just inside zMin); move freely.
+// Spacing 1.4 m: the planter template is ~1.8 × 2.2 m at scale 1, placed at
+// BOX_MODEL_SCALE so eight fit the 11 m front edge without overlapping.
 export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number }> = [
-  { id: 'box_1', x: 4.5,  z: 3.6 }, { id: 'box_2', x: 5.7,  z: 3.6 },
-  { id: 'box_3', x: 6.9,  z: 3.6 }, { id: 'box_4', x: 8.1,  z: 3.6 },
-  { id: 'box_5', x: 9.3,  z: 3.6 }, { id: 'box_6', x: 10.5, z: 3.6 },
-  { id: 'box_7', x: 11.7, z: 3.6 }, { id: 'box_8', x: 12.9, z: 3.6 },
+  { id: 'box_1', x: 4.0,  z: 3.6 }, { id: 'box_2', x: 5.4,  z: 3.6 },
+  { id: 'box_3', x: 6.8,  z: 3.6 }, { id: 'box_4', x: 8.2,  z: 3.6 },
+  { id: 'box_5', x: 9.6,  z: 3.6 }, { id: 'box_6', x: 11.0, z: 3.6 },
+  { id: 'box_7', x: 12.4, z: 3.6 }, { id: 'box_8', x: 13.8, z: 3.6 },
 ]
+/** KJ's planter template (2026-09-17): origin at the base, front (+z) faces the
+ *  garden, rim at y≈1.1, balloons to y≈3.1 (static in this export — the balloon
+ *  animation + countdown sync is a to-do). 4,440 tris — decimate before ship. */
+export const BOX_MODEL_SRC   = 'assets/scene/Models/planterBox/planterBox.glb'
+export const BOX_MODEL_SCALE = 0.6
+export const BOX_MODEL_RIM_Y = 1.1 * BOX_MODEL_SCALE   // where the soil surface sits
 /** TUNING — GDD: overnight scale, "an evening plant opens by next morning" (~10 h).
  *  Set to 2 minutes for the greybox playtest so the whole loop fits one session. */
 export const BOX_GROW_MS = 2 * 60_000

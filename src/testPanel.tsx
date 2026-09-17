@@ -20,6 +20,7 @@ import {
   getWateringStatus,
 } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
+import { getCanvasCalibration } from './ui'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -48,7 +49,7 @@ const ERR_TEXT   = Color4.create(0.95, 0.56, 0.14, 1.0)
 
 // ── Layout — right-anchored, top of screen ───────────────────────
 const PANEL_W      = 390
-const PANEL_LEFT   = 1920 - PANEL_W - 20   // 1510
+const PANEL_RIGHT  = 20   // anchored from the RIGHT edge — a fixed left:1510 was off-screen on narrower canvases
 const PANEL_TOP    = 20
 const HEADER_H     = 46
 const PANEL_H_OPEN = 760
@@ -121,7 +122,7 @@ export function TestPanelUi() {
     <UiEntity
       uiTransform={{
         positionType: 'absolute',
-        position:     { left: PANEL_LEFT, top: PANEL_TOP },
+        position:     { right: PANEL_RIGHT, top: PANEL_TOP },
         width:        PANEL_W,
         height:       pnH,
         flexDirection: 'column',
@@ -146,6 +147,11 @@ export function TestPanelUi() {
         <Label value="🧪  PROTOTYPE TEST PANEL" fontSize={12} color={MUTED} />
         <Label value={panelOpen ? '▲ close' : '▼ open'} fontSize={10} color={MUTED} />
       </UiEntity>
+
+      {/* Canvas calibration — the phone has no console; read the numbers here */}
+      {panelOpen && (
+        <Label value={getCanvasCalibration()} fontSize={9} color={MUTED} uiTransform={{ width: '100%', height: 16, margin: { left: 14 } }} />
+      )}
 
       {/* ── Content ───────────────────────────────────────────── */}
       <UiEntity

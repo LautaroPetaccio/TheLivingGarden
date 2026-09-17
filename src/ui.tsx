@@ -11,8 +11,10 @@
 
 import ReactEcs, { ReactEcsRenderer, UiEntity, Label } from '@dcl/sdk/react-ecs'
 import { TestPanelUi } from './testPanel'
+import { readCanvasInfo, getSafeArea, getScreenInsets, pct } from './safeArea'
+import { isMobile } from '@dcl/sdk/platform'
 import { Color4 } from '@dcl/sdk/math'
-import { timers } from '@dcl/sdk/ecs'
+import { engine, timers } from '@dcl/sdk/ecs'
 
 // ---------------------------------------------------------------
 // State
@@ -133,7 +135,6 @@ const GREY    = Color4.create(0.65, 0.65, 0.65, 1)
 const PILL_W          = 580
 const PILL_H_LG       = 72
 const PILL_H_SM       = 92
-const PILL_LEFT       = (1920 - PILL_W) / 2   // 670
 const PILL_PAD_X      = 36   // horizontal padding inside toast + persistent pills
 const PERSIST_BOTTOM  = 90
 const PILL_STEP       = PILL_H_SM + 12   // vertical stride between stacked pills
@@ -152,7 +153,6 @@ const PERSIST_FONT    = 18
 
 // ── Top banner ────────────────────────────────────────────────
 const BANNER_W            = 820   // wide enough for idle text + countdown + dismiss button
-const BANNER_LEFT         = (1920 - BANNER_W) / 2
 const BANNER_TOP          = 28
 
 const BANNER_H_SINGLE     = 52   // one line of text
@@ -201,8 +201,6 @@ const CAN_BADGE_FONT  = 12
 const SIDE_COL_W    = SIDE_W
 const SIDE_TOTAL_H  = SIDE_PILL_H + SIDE_PILL_GAP + SIDE_H
 const SIDE_RIGHT_PAD  = 44    // distance from right edge
-const SIDE_LEFT       = 1920 - SIDE_RIGHT_PAD - SIDE_COL_W
-const SIDE_TOP        = Math.round((1080 - SIDE_TOTAL_H) / 2)
 
 // Tick marks (match the 3D boards: 25%, 50%, 80%)
 const TICK_W           = SIDE_W + 10   // slightly wider than bar (overhangs 5px each side)
@@ -252,8 +250,56 @@ function showPlusOneWater(): void {
 // Setup
 // ---------------------------------------------------------------
 
+// ── Virtual canvas (ported from Clean The Club) ─────────────────────────────
+// SDK 7.26 (upgraded 2026-09-17 to the Clean The Club pin — scene UI did not
+// render at all on the mobile app under 7.21): the renderer scales by
+// min(canvasW / virtualW, canvasH / virtualH) with NO pixel-ratio term, and the
+// canvas is reported in physical px. So px values map to screenH / virtualH:
+// 2160 keeps the garden's 1080-tuned desktop look on KJ's retina iMac (dpr 2);
+// 1440 is CTC's tuned mobile value ("720 × dpr", 720 was 2–3× too big).
+// Width is flexed to the real screen aspect so a fit-to-height letterbox
+// never left-anchors "centred" content. screenInset is 'none' (as in Clean The
+// Club): 'interactable' centres the HUD inside the joystick-free rectangle, i.e.
+// well RIGHT of the physical centre on phones — we inset ourselves instead, with
+// a horizontally balanced device-inset container (see the root below).
+// Calibrate with the top-left canvas line (the phone has a console under >_).
+const DESKTOP_VIRTUAL_H = 2160    // TUNING — lower = bigger HUD on desktop
+const MOBILE_VIRTUAL_H  = 1080    // TUNING — lower = bigger HUD on phones (1440 read too small)
+let currentVirtualH = DESKTOP_VIRTUAL_H
+let currentVirtualW = Math.round(DESKTOP_VIRTUAL_H * 16 / 9)
+let loggedCanvasCalib = false
+
+export function getCanvasCalibration(): string {
+  const c  = readCanvasInfo()
+  const sa = getSafeArea()
+  return `${isMobile() ? 'mobile' : 'desktop'} canvas ${c ? `${c.width}x${c.height} dpr=${c.devicePixelRatio}` : '?'} -> virtual ${currentVirtualW}x${currentVirtualH} | safe ${sa.known ? 'live' : 'fallback'} t${pct(sa.top)} b${pct(sa.bottom)} l${pct(sa.left)} r${pct(sa.right)}`
+}
+
+/** Engine system (NOT called from the render — re-entering setUiRenderer mid-render
+ *  can unmount the whole tree): re-fits the virtual canvas when platform / aspect /
+ *  dpr change. isMobile() flips from false once the platform round-trip lands. */
+let fitAccum = 0
+function fitVirtualCanvasSystem(dt: number): void {
+  fitAccum += dt
+  if (fitAccum < 0.25) return
+  fitAccum = 0
+  const c = readCanvasInfo()
+  if (!c) return
+  const vh     = isMobile() ? MOBILE_VIRTUAL_H : DESKTOP_VIRTUAL_H
+  const aspect = c.width / c.height
+  const vw     = Math.round(vh * Math.max(1, Math.min(10 / 3, aspect)))
+  if (!loggedCanvasCalib) { loggedCanvasCalib = true; console.log(`[UI] ${getCanvasCalibration()}`) }
+  if (vh !== currentVirtualH || Math.abs(vw - currentVirtualW) >= 8) {
+    currentVirtualH = vh
+    currentVirtualW = vw
+    ReactEcsRenderer.setUiRenderer(uiComponent, { virtualWidth: currentVirtualW, virtualHeight: currentVirtualH, screenInset: 'none' })
+    console.log(`[UI] virtual canvas -> ${currentVirtualW}x${currentVirtualH}`)
+  }
+}
+
 export function setupUi(): void {
-  ReactEcsRenderer.setUiRenderer(uiComponent, { virtualWidth: 1920, virtualHeight: 1080 })
+  ReactEcsRenderer.setUiRenderer(uiComponent, { virtualWidth: currentVirtualW, virtualHeight: currentVirtualH, screenInset: 'none' })
+  engine.addSystem(fitVirtualCanvasSystem)
 }
 
 // ---------------------------------------------------------------
@@ -261,6 +307,9 @@ export function setupUi(): void {
 // ---------------------------------------------------------------
 
 function uiComponent() {
+  const sa = getSafeArea()
+  const M  = isMobile() ? 1.15 : 1   // touch targets + small screens want larger chrome
+  const safeBottomPx = Math.round(sa.bottom * currentVirtualH)   // explorer chrome along the bottom edge
   const dailyBottom = PERSIST_BOTTOM + (persistVisible ? PILL_STEP : 0)
   const toastBottom = dailyBottom    + (dailyLimitVisible ? PILL_STEP : 0)
   const toastH      = toastLarge ? PILL_H_LG : PILL_H_SM
@@ -281,11 +330,25 @@ function uiComponent() {
   // Percent label (0–100)
   const pctLabel = `${Math.round(bannerHealth * 100)}%`
 
+  // Root MUST be full-screen: the mobile (Godot) client clips children to the
+  // parent's box, so a size-less root hides every absolute child (2026-09-17 —
+  // no scene UI at all on the phone, live or preview). Desktop never clipped.
+  const ins = getScreenInsets()
+  const h   = Math.max(ins.left, ins.right)   // balanced → centre stays the physical centre
   return (
-    <UiEntity>
+    <UiEntity uiTransform={{ width: '100%', height: '100%' }}>
+    <UiEntity uiTransform={{ positionType: 'absolute', position: { top: pct(ins.top), left: pct(h), right: pct(h), bottom: pct(ins.bottom) } }}>
 
       {/* ── Test Panel — MOUNTED for v2 dev; comment out before production deploys ── */}
       <TestPanelUi />
+      {/* Dev calibration line (remove with the test panel): fixed top-left so it shows
+          whatever the phone's canvas/scale turns out to be. */}
+      <Label
+        value={getCanvasCalibration()}
+        fontSize={11}
+        color={{ r: 1, g: 1, b: 1, a: 0.85 }}
+        uiTransform={{ positionType: 'absolute', position: { left: 6, top: 4 }, width: 900, height: 18 }}
+      />
 
       {/* ═══════════════════════════════════════════════════════════
           TOP BANNER — always dark, compact, player-dismissible
@@ -294,9 +357,17 @@ function uiComponent() {
         uiTransform={{
           display:        bannerVisible ? 'flex' : 'none',
           positionType:   'absolute',
-          position:       { top: BANNER_TOP + bannerOffsetY, left: BANNER_LEFT },
-          width:          BANNER_W,
-          height:         bannerH,
+          position:       { top: pct(sa.top), left: 0 },
+          width:          '100%',
+          flexDirection:  'row',
+          justifyContent: 'center',
+        }}
+      >
+      <UiEntity
+        uiTransform={{
+          margin:         { top: Math.round((BANNER_TOP + bannerOffsetY) * M) },
+          width:          Math.round(BANNER_W * M),
+          height:         Math.round(bannerH * M),
           flexDirection:  'row',
           alignItems:     'center',
         }}
@@ -339,13 +410,15 @@ function uiComponent() {
         </UiEntity>
       </UiEntity>
 
+      </UiEntity>
+
       {/* ═══════════════════════════════════════════════════════════
           RIGHT SIDE — vertical health bar (mimics 3D boards)
       ══════════════════════════════════════════════════════════════ */}
       <UiEntity
         uiTransform={{
           positionType:   'absolute',
-          position:       { top: SIDE_TOP, left: SIDE_LEFT },
+          position:       { top: pct(Math.max(sa.top, 0.5 - SIDE_TOTAL_H / currentVirtualH / 2)), right: pct(sa.right + SIDE_RIGHT_PAD / 1920) },
           width:          SIDE_COL_W,
           height:         SIDE_TOTAL_H,
           flexDirection:  'column',
@@ -448,9 +521,10 @@ function uiComponent() {
         uiTransform={{
           display:        toastVisible ? 'flex' : 'none',
           positionType:   'absolute',
-          position:       { bottom: toastBottom, left: PILL_LEFT },
-          width:          PILL_W,
-          height:         toastH,
+          position:       { bottom: safeBottomPx + Math.round(toastBottom * M), left: '50%' },
+          margin:         { left: -Math.round(PILL_W * M / 2) },
+          width:          Math.round(PILL_W * M),
+          height:         Math.round(toastH * M),
           alignItems:     'center',
           justifyContent: 'center',
           padding:        { left: PILL_PAD_X, right: PILL_PAD_X },
@@ -471,9 +545,10 @@ function uiComponent() {
         uiTransform={{
           display:        dailyLimitVisible ? 'flex' : 'none',
           positionType:   'absolute',
-          position:       { bottom: dailyBottom, left: PILL_LEFT },
-          width:          PILL_W,
-          height:         PILL_H_SM,
+          position:       { bottom: safeBottomPx + Math.round(dailyBottom * M), left: '50%' },
+          margin:         { left: -Math.round(PILL_W * M / 2) },
+          width:          Math.round(PILL_W * M),
+          height:         Math.round(PILL_H_SM * M),
           flexDirection:  'row',
           alignItems:     'center',
         }}
@@ -507,9 +582,10 @@ function uiComponent() {
         uiTransform={{
           display:        persistVisible ? 'flex' : 'none',
           positionType:   'absolute',
-          position:       { bottom: PERSIST_BOTTOM, left: PILL_LEFT },
-          width:          PILL_W,
-          height:         PILL_H_SM,
+          position:       { bottom: safeBottomPx + Math.round(PERSIST_BOTTOM * M), left: '50%' },
+          margin:         { left: -Math.round(PILL_W * M / 2) },
+          width:          Math.round(PILL_W * M),
+          height:         Math.round(PILL_H_SM * M),
           alignItems:     'center',
           justifyContent: 'center',
           padding:        { left: PILL_PAD_X, right: PILL_PAD_X },
@@ -525,6 +601,7 @@ function uiComponent() {
         />
       </UiEntity>
 
+    </UiEntity>
     </UiEntity>
   )
 }
