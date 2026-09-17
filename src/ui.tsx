@@ -20,6 +20,9 @@ import { readCanvasInfo, getSafeArea, getScreenInsets, pct } from './safeArea'
 import { isMobile } from '@dcl/sdk/platform'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, timers } from '@dcl/sdk/ecs'
+import { getPouch } from './playerInventory'
+import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
+import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor } from './shared/config'
 
 // ---------------------------------------------------------------
@@ -43,10 +46,10 @@ let bannerBloomLabel = ''  // variant / scale-aware bloom headline
 let bannerHealth    = 0    // 0–1
 let playerCount     = 0
 
-let seedCount = 0          // seed chip (hidden at 0)
-let seedRare  = 0
 let bloomRemainingLabel = ''   // ring text during a bloom
 let bloomRemainingFrac  = 1    // ring sweep during a bloom (1 → 0)
+let shownHealth   = 0          // eased toward bannerHealth so the ring sweeps instead of jumping
+let lastRenderAt  = 0
 
 // Banner opens on change, then folds away. Alpha-only fade.
 const BANNER_OPEN_MS  = 6_000
@@ -121,12 +124,6 @@ export function updatePlayerCount(n: number): void {
   playerCount = n
 }
 
-/** Seed chip under the ring (boxSystem pushes the pouch). Tier dots arrive with the rarity pass. */
-export function updateSeedChip(normal: number, rare: number): void {
-  seedCount = Math.max(0, normal) + Math.max(0, rare)
-  seedRare  = Math.max(0, rare)
-}
-
 /** During a bloom the ring shows time left (wateringSystem's reset ticker pushes it). */
 export function updateBloomRemaining(label: string, remainingMs: number): void {
   bloomRemainingLabel = label
@@ -169,9 +166,23 @@ const EDGE       = 16          // gap from the safe-area edge
 function barColor(): { r: number; g: number; b: number } {
   return bannerHealth >= 0.8 ? BAR_GREEN : bannerHealth >= 0.5 ? BAR_ORANGE : BAR_RED
 }
-function ringSprite(): string {
-  const step = (v: number) => String(Math.round(Math.max(0, Math.min(1, v)) * 20) * 5).padStart(3, '0')
-  return bannerState === 'bloom' ? `${UI_DIR}ringbloom_${step(bloomRemainingFrac)}.png` : `${UI_DIR}ring_${step(bannerHealth)}.png`
+// Ring sprites: 41 health frames (2.5% ≈ one watering) + 21 bloom frames (time left).
+// Every frame is mounted once at the ring's position (see ringIndex) — nothing is ever swapped.
+const RING_STEPS  = 40
+const BLOOM_STEPS = 20
+const two = (n: number): string => String(n).padStart(2, '0')
+const RING_FILES: string[] = [
+  ...Array.from({ length: RING_STEPS + 1 },  (_, i) => `${UI_DIR}ring_${two(i)}.png`),
+  ...Array.from({ length: BLOOM_STEPS + 1 }, (_, i) => `${UI_DIR}ringbloom_${two(i)}.png`),
+]
+/** Index into RING_FILES of the one frame to show. Frames are STACKED and toggled by alpha —
+ *  changing an element's texture makes the client rebuild its background (a blank frame),
+ *  which with eased values meant several flashes per watering. */
+function ringIndex(): number {
+  const clamp = (v: number) => Math.max(0, Math.min(1, v))
+  return bannerState === 'bloom'
+    ? RING_STEPS + 1 + Math.round(clamp(bloomRemainingFrac) * BLOOM_STEPS)
+    : Math.round(clamp(shownHealth) * RING_STEPS)
 }
 function toastGlyph(text: string): { src: string; tint: { r: number; g: number; b: number } } {
   const t = text.toLowerCase()
@@ -201,7 +212,8 @@ function dryMinutes(): string {
 // well RIGHT of the physical centre on phones — we inset ourselves instead, with
 // a horizontally balanced device-inset container (see the root below).
 // Calibrate with the top-left canvas line (the phone has a console under >_).
-const DESKTOP_VIRTUAL_H = 2160    // TUNING — lower = bigger HUD on desktop
+const DESKTOP_VIRTUAL_H = 1080    // HUD sizes are fractions of screen height (U), so this only sets the scale of
+                                  // legacy fixed-px UI (the dev test panel, designed at 1080). 2160 made it microscopic.
 const MOBILE_VIRTUAL_H  = 1080    // TUNING — lower = bigger HUD on phones (1440 read too small)
 let currentVirtualH = DESKTOP_VIRTUAL_H
 let currentVirtualW = Math.round(DESKTOP_VIRTUAL_H * 16 / 9)
@@ -238,6 +250,7 @@ function fitVirtualCanvasSystem(dt: number): void {
 export function setupUi(): void {
   ReactEcsRenderer.setUiRenderer(uiComponent, { virtualWidth: currentVirtualW, virtualHeight: currentVirtualH, screenInset: 'none' })
   engine.addSystem(fitVirtualCanvasSystem)
+  startFpsMeter()   // dev: frame rate in the bottom calibration line (remove with the test panel)
 }
 
 // ---------------------------------------------------------------
@@ -256,6 +269,12 @@ function uiComponent() {
   const fs = (n: number): number => Math.round(n * U * F)
   const now = Date.now()
 
+  // ease the ring toward the real health (frame-rate independent; snaps when close)
+  const dt = lastRenderAt ? Math.min(0.1, (now - lastRenderAt) / 1000) : 0
+  lastRenderAt = now
+  shownHealth += (bannerHealth - shownHealth) * Math.min(1, dt * 5)
+  if (Math.abs(bannerHealth - shownHealth) < 0.002) shownHealth = bannerHealth
+
   // banner fade (alpha only)
   const open = bannerIsOpen(now)
   if (open !== bannerWasOpen) { bannerWasOpen = open; bannerFlipAt = now }
@@ -263,11 +282,19 @@ function uiComponent() {
   const a = open ? t : 1 - t
   const bannerShown = a > 0.02
 
-  const topPx      = Math.round(sa.top * currentVirtualH) + px(EDGE)
+  // The container below is already inset by the device insets, so measure the client's
+  // safe area RELATIVE to it (max, not sum) — summing pushed the phone's ring 14% in.
+  const topPx      = Math.round(Math.max(0, sa.top - ins.top) * currentVirtualH) + px(EDGE)
+  const rightPct   = Math.max(0, sa.right - hIns) + (mobile ? 0.012 : 0.035)   // desktop: clear the client's edge icons
+  const frame      = ringIndex()
+  const pouch      = getPouch()
+  const seedCount  = pouch.normal + pouch.rare
+  const seedRare   = pouch.rare
   const isBloom    = bannerState === 'bloom'
   const isCount    = bannerState === 'countdown'
   const bannerH    = px(isBloom ? 96 : 122)
   const ringSize   = px(RING_SIZE)
+  const chipTop    = topPx + ringSize + px(GAP)
   const gardeners  = Math.max(1, playerCount)
   const watered    = Math.round(bannerHealth * TOTAL_PLANTS)
   const need       = Math.max(0, BLOOM_THRESHOLD - watered)
@@ -302,33 +329,42 @@ function uiComponent() {
       <TestPanelUi />
       {/* Dev calibration line (remove with the test panel) */}
       <Label
-        value={getCanvasCalibration()}
+        value={`${getFps()} fps${getTestPotCount() > 0 ? ` with ${getTestPotCount()} test planters` : ''} | ${getCanvasCalibration()}`}
         fontSize={fs(11)}
         color={{ r: 1, g: 1, b: 1, a: 0.7 }}
         uiTransform={{ positionType: 'absolute', position: { left: '30%', bottom: 4 }, width: '40%', height: fs(16) }}
       />
 
       {/* ═════ HEALTH RING — top right, the resting HUD. Tap to open the banner. ═════ */}
-      <UiEntity
-        uiTransform={{ positionType: 'absolute', position: { top: topPx, right: pct(sa.right + 0.012) }, width: ringSize, height: ringSize, alignItems: 'center', justifyContent: 'center' }}
-        uiBackground={{ textureMode: 'stretch', texture: { src: ringSprite() } }}
-        onMouseDown={() => openBanner()}
-      >
-        <Label value={ringLabel} fontSize={fs(isBloom && bloomRemainingLabel ? RING_FONT - 6 : RING_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+      <UiEntity uiTransform={{ positionType: 'absolute', position: { top: topPx, right: pct(rightPct) }, width: ringSize, height: ringSize }}>
+        {RING_FILES.map((src, i) => (
+          <UiEntity
+            key={src}
+            uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize }}
+            uiBackground={{ textureMode: 'stretch', texture: { src }, color: { r: 1, g: 1, b: 1, a: i === frame ? 1 : 0 } }}
+          />
+        ))}
+        <UiEntity
+          uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize, alignItems: 'center', justifyContent: 'center' }}
+          onMouseDown={() => openBanner()}
+        >
+          <Label value={ringLabel} fontSize={fs(isBloom && bloomRemainingLabel ? RING_FONT - 6 : RING_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+        </UiEntity>
       </UiEntity>
 
-      {/* ═════ SEED CHIP — under the ring, only once you hold seeds ═════ */}
+      {/* ═════ SEED CHIP — under the ring; always there (dim when empty) so the menu and
+          your flower collection are always one tap away ═════ */}
       <UiEntity
         uiTransform={{
-          display: seedCount > 0 ? 'flex' : 'none',
-          positionType: 'absolute', position: { top: topPx + ringSize + px(GAP), right: pct(sa.right + 0.012) },
+          positionType: 'absolute', position: { top: chipTop, right: pct(rightPct) },
           height: px(CHIP_H), flexDirection: 'row', alignItems: 'center',
           padding: { left: px(14), right: px(16) }, borderRadius: px(CHIP_H / 2),
         }}
-        uiBackground={{ color: DARK }}
+        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
+        onMouseDown={() => toggleSeedMenu()}
       >
-        <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(8) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: 1 } }} />
-        <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+        <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(8) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
+        <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: seedCount > 0 ? 1 : 0.55 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(12), height: px(12), margin: { left: px(10) }, borderRadius: px(6) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
       </UiEntity>
 
@@ -380,6 +416,8 @@ function uiComponent() {
           <Label value={persistText} fontSize={fs(PILL_FONT - 2)} color={{ ...DIM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
+
+      <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} rightPct={pct(rightPct)} belowChipPx={chipTop + px(CHIP_H) + px(GAP)} />
 
     </UiEntity>
     </UiEntity>

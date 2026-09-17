@@ -22,6 +22,7 @@ import {
 } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
+import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -55,7 +56,7 @@ const PANEL_W      = 390
 const PANEL_LEFT   = 24
 const PANEL_TOP    = 20
 const HEADER_H     = 46
-const PANEL_H_OPEN = 850
+const PANEL_H_OPEN = 940
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
@@ -254,6 +255,15 @@ export function TestPanelUi() {
           onMouseDown={() => adminGrantWaters(100)}
         >
           <Label value="Grant +100 lifetime waters (flair / tribute)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* 100-planter performance test — local only */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_BLOOM }}
+          onMouseDown={() => (getTestPotCount() > 0 ? removeTestPots() : spawnTestPots())}
+        >
+          <Label value={getTestPotCount() > 0 ? `Remove ${getTestPotCount()} test planters  (${getFps()} fps)` : `Spawn 100 test planters  (${getFps()} fps)`} fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Divider */}

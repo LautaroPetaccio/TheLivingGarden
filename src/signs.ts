@@ -55,6 +55,13 @@ export function createSign(
   return { root, text }
 }
 
+/** Re-home a (pooled) plaque: moves it and keeps the proximity check pointed at the new spot. */
+export function moveSign(sign: Sign, pos: { x: number; y: number; z: number }): void {
+  const st = signs.find(s => s.root === sign.root)
+  if (st) { st.x = pos.x; st.z = pos.z }
+  Transform.getMutable(sign.root).position = pos
+}
+
 export function removeSign(sign: Sign): void {
   const i = signs.findIndex(s => s.root === sign.root)
   if (i >= 0) signs.splice(i, 1)

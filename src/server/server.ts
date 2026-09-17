@@ -23,7 +23,7 @@ import {
   FAST_PLANT_EXPIRY_MS,
   FAST_PLANT_NAMES,
   BLOOM_RESET_DELAY_MS,
-  BLOOM_SUSTAIN_MS,
+  bloomSustainMs,
   BLOOM_WINDOWS,
   plantDecayMs,
   bloomScaleFor,
@@ -64,6 +64,27 @@ let   countdownPaused  = false
 let   bloomScale       = 1                    // bloomScaleFor(gardeners) of the active bloom
 let   bloomVariant     = 'classic'            // BLOOM_VARIANTS id of the active bloom (Phase 6)
 
+
+// ── Storage write queue ──────────────────────────────────────
+// ONE storage write in flight at a time. The local preview's storage service serves each
+// PUT as read-whole-file → set one key → write-whole-file with no lock, so overlapping
+// writes erase each other: on 2026-09-17 a harvest's 'boxes' write lost to its own
+// 'flowers' write (box stayed "opened" after restart) and the seed pouch never reached
+// disk. Every write goes through here; it is harmless on the Worlds key-value store.
+let storageQueue: Promise<unknown> = Promise.resolve()
+function queuedWrite<T>(write: () => Promise<T>): Promise<T> {
+  const run = storageQueue.then(write, write)
+  storageQueue = run.catch(() => undefined)
+  return run
+}
+async function setWorld(key: string, value: string): Promise<void> {
+  const ok: unknown = await queuedWrite(() => Storage.set(key, value))
+  if (ok === false) console.error(`[Server] Storage.set('${key}') returned false — NOT persisted`)
+}
+async function setPlayer(address: string, key: string, value: string): Promise<void> {
+  const ok: unknown = await queuedWrite(() => Storage.player.set(address, key, value))
+  if (ok === false) console.error(`[Server] Storage.player.set('${key}') returned false — NOT persisted`)
+}
 
 // ── Leaderboard ──────────────────────────────────────────────
 interface LeaderboardEntry { displayName: string; total: number }
@@ -136,7 +157,7 @@ async function savePlantStates(): Promise<void> {
     if (!ps) continue
     records.push({ plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresAt: plantExpiresAt.get(plantId), tier: wateredTierMap.get(plantId) })
   }
-  await Storage.set('plants', JSON.stringify(records))
+  await setWorld('plants', JSON.stringify(records))
 }
 
 // ── Leaderboard helpers ──────────────────────────────────────
@@ -170,7 +191,7 @@ async function loadLeaderboard(): Promise<void> {
   // Weekly reset clock — persisted so restarts don't move the reset moment
   const rawResetAt = await Storage.get<string>('leaderboardResetAt')
   if (!rawResetAt) {
-    await Storage.set('leaderboardResetAt', String(Date.now()))
+    await setWorld('leaderboardResetAt', String(Date.now()))
     console.log('[Server] Leaderboard weekly reset clock started')
     weeklyResetAt = Date.now() + WEEKLY_RESET_MS
   } else {
@@ -200,7 +221,7 @@ function nextFreePlot(): number {
 }
 
 async function saveTributes(): Promise<void> {
-  await Storage.set('tributes', JSON.stringify(tributes))
+  await setWorld('tributes', JSON.stringify(tributes))
 }
 
 function sendTributes(to?: string[]): void {
@@ -260,18 +281,18 @@ async function ensureWeeklyReset(): Promise<void> {
   while (weeklyResetAt <= now) weeklyResetAt += WEEKLY_RESET_MS
   leaderboard.clear()
   await saveLeaderboard()
-  await Storage.set('leaderboardResetAt', String(weeklyResetAt - WEEKLY_RESET_MS))
+  await setWorld('leaderboardResetAt', String(weeklyResetAt - WEEKLY_RESET_MS))
   console.log(`[Server] Weekly leaderboard reset complete — next at ${new Date(weeklyResetAt).toISOString()}`)
 }
 
 async function saveLeaderboard(): Promise<void> {
   const records = [...leaderboard.entries()].map(([address, e]) => ({ address, ...e }))
-  await Storage.set('leaderboard', JSON.stringify(records))
+  await setWorld('leaderboard', JSON.stringify(records))
 }
 
 async function saveLifetime(): Promise<void> {
   const records = [...lifetime.entries()].map(([address, e]) => ({ address, ...e }))
-  await Storage.set('lifetime', JSON.stringify(records))
+  await setWorld('lifetime', JSON.stringify(records))
 }
 
 function tierOf(address: string): number {
@@ -326,7 +347,7 @@ return DAILY_WATER_LIMIT
 async function incrementPlayerDailyCount(address: string): Promise<number> {
   const today    = new Date().toISOString().slice(0, 10)
   const newCount = (await getPlayerDailyCount(address)) + 1
-  await Storage.player.set(address, dailyKey(today), String(newCount))
+  await setPlayer(address, dailyKey(today), String(newCount))
   return newCount
 }
 */
@@ -409,7 +430,7 @@ function checkBloomThreshold(): void {
   if (count >= threshold) {
     countdownPaused = false
     if (bloomSustainTimer === null) {
-      const remaining = BLOOM_SUSTAIN_MS - bloomSustainElapsedMs
+      const remaining = Math.max(0, bloomSustainMs(knownPlayers.size) - bloomSustainElapsedMs)
       bloomSustainStartedAt = Date.now()
       console.log(`[Server] Health ${count}/${threshold} ≥ threshold — bloom fires in ${Math.ceil(remaining / 1_000)}s (${Math.round(bloomSustainElapsedMs / 1_000)}s already elapsed)`)
       bloomSustainTimer = setTimeout(() => {
@@ -446,7 +467,7 @@ function triggerBloom(forcedVariant = ''): void {
   const variant  = forcedVariant ? bloomVariantById(forcedVariant) : rollBloomVariant(bloomScale)
   bloomVariant   = variant.id
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name})`)
-  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant })
+  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0 })
   spawnBloomSeeds()
   setTimeout(() => executeTask(resetGarden), BLOOM_RESET_DELAY_MS)
 }
@@ -534,7 +555,7 @@ function savePouch(address: string): Promise<void> {
   const snapshot = JSON.stringify(pouch)
   const prev = pouchWrites.get(address) ?? Promise.resolve()
   const next: Promise<void> = prev
-    .then(async () => { await Storage.player.set(address, 'seeds', snapshot) })
+    .then(async () => { await setPlayer(address, 'seeds', snapshot) })
     .catch(err => { console.error('[Server] savePouch failed:', err) })
   pouchWrites.set(address, next)
   return next
@@ -614,7 +635,7 @@ function savePlayerJson(address: string, key: string): Promise<void> {
   const snapshot = JSON.stringify(value)
   const prev = playerJsonWrites.get(k) ?? Promise.resolve()
   const next: Promise<void> = prev
-    .then(async () => { await Storage.player.set(address, key, snapshot) })
+    .then(async () => { await setPlayer(address, key, snapshot) })
     .catch(err => { console.error(`[Server] save ${key} failed:`, err) })
   playerJsonWrites.set(k, next)
   return next
@@ -640,7 +661,7 @@ function isConnected(address: string): boolean {
 
 async function saveBoxes(): Promise<void> {
   try {
-    await Storage.set('boxes', JSON.stringify([...boxes.values()]))
+    await setWorld('boxes', JSON.stringify([...boxes.values()]))
   } catch (err) {
     console.error('[Server] saveBoxes failed:', err)   // fail-open: in-memory state stays authoritative
   }
@@ -839,7 +860,7 @@ function playerJoinSystem(): void {
       await loadPouch(address)
       sendPouch(address)
       // Re-send bloom state to players who join while it is already active
-      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant }, { to: [address] })
+      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0 }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
@@ -1185,7 +1206,7 @@ export async function server(): Promise<void> {
     sendThreshold([address])
     await loadPouch(address)
     sendPouch(address)
-    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant }, { to: [address] })
+    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0 }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)

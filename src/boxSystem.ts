@@ -24,7 +24,6 @@ import {
   Entity,
   Transform,
   MeshRenderer,
-  MeshCollider,
   Material,
   GltfContainer,
   ColliderLayer,
@@ -37,8 +36,9 @@ import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
 import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y } from './shared/config'
-import { showToast, updateSeedChip } from './notifications'
-import { setupGiftSystem, getBoxCap } from './giftSystem'
+import { showToast } from './notifications'
+import { setupGiftSystem } from './giftSystem'
+import { setPouch, getBoxCap, nextSeedIsRare } from './playerInventory'
 import { createSign, setupSignSystem } from './signs'
 
 // ---------------------------------------------------------------
@@ -81,47 +81,6 @@ interface BoxView {
 const views  = new Map<string, BoxView>()
 let   pouch  = { normal: 0, rare: 0 }
 let   tickAccum = 0
-// Which kind the next planting uses when the pouch holds both (GDD §3: "which seed to
-// plant in your limited boxes" is a player decision). Switched at the Seed pouch post.
-let   preferRare = false
-let   pouchPostText: Entity | null = null
-
-// Seed pouch post — left end of the planter row, facing the garden
-const POUCH_POST_POS  = { x: 2.7, y: 0.75, z: 4.4 }
-const POUCH_POST_SIZE = { w: 1.3, h: 0.85 }
-
-function pouchPostLabel(): string {
-  const both = pouch.normal > 0 && pouch.rare > 0
-  const next = pouch.normal + pouch.rare === 0 ? 'nothing yet - catch bloom seeds'
-             : both ? `${preferRare ? 'RARE' : 'NORMAL'} (tap to switch)`
-             : pouch.rare > 0 ? 'RARE' : 'NORMAL'
-  return `Seed pouch\n${pouch.normal} normal, ${pouch.rare} rare\nPlanting next: ${next}`
-}
-function refreshPouchPost(): void {
-  if (pouchPostText !== null) TextShape.getMutable(pouchPostText).text = pouchPostLabel()
-}
-function createPouchPost(): void {
-  const sign = createSign(POUCH_POST_POS, 180, POUCH_POST_SIZE, 0.85)
-  pouchPostText = sign.text
-  const tap = engine.addEntity()
-  Transform.create(tap, { position: POUCH_POST_POS, scale: { x: POUCH_POST_SIZE.w, y: POUCH_POST_SIZE.h, z: 0.3 } })
-  MeshCollider.setBox(tap, ColliderLayer.CL_POINTER)
-  pointerEventsSystem.onPointerDown(
-    { entity: tap, opts: { button: InputAction.IA_POINTER, hoverText: 'Switch seed', maxDistance: TAP_DISTANCE } },
-    () => {
-      if (pouch.normal > 0 && pouch.rare > 0) {
-        preferRare = !preferRare
-        showToast(`Next planting: a ${preferRare ? 'RARE' : 'normal'} seed`, TOAST_MS, false)
-      } else {
-        showToast(pouch.normal + pouch.rare === 0 ? 'No seeds yet — catch some from a bloom' : 'You only hold one kind of seed', TOAST_MS, false)
-      }
-      refreshPouchPost()
-    },
-  )
-  refreshPouchPost()
-}
-
-export function getPouch(): { normal: number; rare: number } { return { ...pouch } }
 
 function localId(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 function isMine(v: BoxView): boolean { return !!v.owner && v.owner.toLowerCase() === localId() }
@@ -187,8 +146,8 @@ function tryPlant(v: BoxView): void {
     showToast('No seeds yet — catch some from a bloom', TOAST_MS, false)
     return
   }
-  // One kind in the pouch → that kind; both → the player's choice at the Seed pouch post.
-  const rare = pouch.normal <= 0 ? true : pouch.rare <= 0 ? false : preferRare
+  // One kind in the pouch → that kind; both → the player's choice in the seed menu.
+  const rare = nextSeedIsRare() === true
   console.log(`[Boxes] planting ${rare ? 'RARE' : 'normal'} seed in ${v.boxId}`)
   room.send('plantSeed', { boxId: v.boxId, rare })
 }
@@ -268,13 +227,11 @@ export function setupBoxSystem(): void {
 
   room.onMessage('pouchUpdate', (data) => {
     pouch = { normal: data.normal, rare: data.rare }
-    refreshPouchPost()
-    updateSeedChip(pouch.normal, pouch.rare)
+    setPouch(pouch.normal, pouch.rare)   // HUD chip + seed menu read the shared store
     for (const v of views.values()) if (!v.owner) TextShape.getMutable(v.label).text = labelFor(v, Date.now())
   })
 
   setupSignSystem()
-  createPouchPost()
   engine.addSystem(boxTickSystem)
   console.log(`[Boxes] ${views.size} seed boxes ready · boxState listeners=${room.listenerCount('boxState')}`)
 }

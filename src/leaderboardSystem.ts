@@ -13,9 +13,12 @@ import {
   Transform,
   TextShape,
   TextAlignMode,
+  MeshRenderer,
+  Material,
+  MaterialTransparencyMode,
 } from '@dcl/sdk/ecs'
-import { Quaternion } from '@dcl/sdk/math'
-import { flairTag } from './shared/config'
+import { Quaternion, Color4 } from '@dcl/sdk/math'
+import { flairIcon } from './shared/config'
 
 // ===============================================================
 // ██████╗  ██████╗  █████╗ ██████╗ ██████╗     ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -97,6 +100,22 @@ const LB_MOCK_DATA: BoardEntry[] = [
 // Each entry = two label entities [nameLabel, scoreLabel],
 // interleaved per board: [name0, score0, name1, score1, …] × boards
 const leaderboardLabels: Entity[] = []
+// One flair icon plane per row, left of the rank (scale 0 = no flair). Same order as rows.
+const flairIcons: Entity[] = []
+const LB_FLAIR_X    = LB_NAME_X - 0.14
+const LB_FLAIR_SIZE = 0.13
+
+function setRowFlair(icon: Entity, tier: number): void {
+  const f = flairIcon(tier)
+  const k = f ? LB_FLAIR_SIZE : 0
+  Transform.getMutable(icon).scale = { x: k, y: k, z: k }
+  if (!f) return
+  Material.setPbrMaterial(icon, {
+    texture: Material.Texture.Common({ src: f.src }), alphaTexture: Material.Texture.Common({ src: f.src }),
+    albedoColor: Color4.create(f.tint.r, f.tint.g, f.tint.b, 1), emissiveColor: f.tint, emissiveIntensity: 0.9,
+    transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND, castShadows: false,
+  })
+}
 const titleLabels: Entity[] = []          // one per board, same order as LB_BOARDS
 let   weeklyResetAt = 0                   // epoch ms; 0 = unknown (mock)
 let   countdownAccum = 0
@@ -174,6 +193,11 @@ export function setupLeaderboardBoards(): void {
       TextShape.create(scoreLabel, { text: '', fontSize: LB_FONT_ENTRY, textColor: LB_COLOR_SCORE })
 
       leaderboardLabels.push(nameLabel, scoreLabel)
+
+      const flair = engine.addEntity()
+      Transform.create(flair, { position: { x: LB_FLAIR_X, y, z: LB_DEPTH }, scale: { x: 0, y: 0, z: 0 }, parent: board })
+      MeshRenderer.setPlane(flair)
+      flairIcons.push(flair)
     }
   }
 
@@ -191,7 +215,9 @@ export function updateLeaderboardDisplay(data: BoardData): void {
       const entry          = entries[i]
       const { name, score } = getLabels(b, i)
       if (!name || !score) continue
-      TextShape.getMutable(name).text  = entry ? `${i + 1}.  ${flairTag(entry.tier ?? 0)}${entry.displayName}` : ''
+      TextShape.getMutable(name).text  = entry ? `${i + 1}.  ${entry.displayName}` : ''
+      const icon = flairIcons[b * LB_ENTRIES + i]
+      if (icon) setRowFlair(icon, entry?.tier ?? 0)
       TextShape.getMutable(score).text = entry ? `${entry.count}` : ''
     }
   }

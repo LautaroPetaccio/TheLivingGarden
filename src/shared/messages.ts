@@ -86,7 +86,9 @@ export const room = registerMessages({
   /** Broadcast when the bloom threshold is reached.
    *  scale: bloomScaleFor(gardeners) (0–1] — 1 = full-garden bloom, below 1 = the
    *  smaller, quieter scaled bloom. variant: BLOOM_VARIANTS id rolled by the server (v2 Phase 6). */
-  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String }),
+  /** elapsedMs: how far into the bloom we already are — 0 on the live broadcast, >0 when
+   *  re-sent to a late joiner, so their 6-minute countdown matches everyone else's. */
+  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number }),
   /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
    *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),

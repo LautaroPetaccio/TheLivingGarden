@@ -61,7 +61,13 @@ export function seedRareChance(bloomScale: number): number {
 }
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */
-export const BLOOM_SUSTAIN_MS   = 60_000
+export const BLOOM_SUSTAIN_MS   = 60_000   // the FULL-garden hold (4+ gardeners)
+/** Hold time scales with gardeners like decay does (KJ 2026-09-17): solo, a minute is dead
+ *  time — nothing can dry at 9-min decay — while in a group the hold IS the tension. */
+const SUSTAIN_BY_GARDENERS_MS = [20_000, 35_000, 50_000, BLOOM_SUSTAIN_MS]   // TUNING — 1, 2, 3, 4+
+export function bloomSustainMs(gardeners: number): number {
+  return SUSTAIN_BY_GARDENERS_MS[Math.max(1, Math.min(SUSTAIN_BY_GARDENERS_MS.length, gardeners)) - 1]
+}
 export const DAILY_WATER_LIMIT  = 8
 export const WATERED_EXPIRY_MS  = 3 * 60 * 1000        // 3 minutes
 export const FAST_PLANT_EXPIRY_MS = 75_000               // 75 seconds
@@ -177,9 +183,13 @@ export function flairTier(lifetimeWaters: number): number {
   for (const t of FLAIR_TIERS) if (lifetimeWaters >= t) tier++
   return tier
 }
-/** Greybox text tag shown before a name. Art pass: replace with a PNG glyph (no emoji — Unity client). */
-export function flairTag(tier: number): string {
-  return ['', '[sprout] ', '[flower] ', '[golden] '][Math.max(0, Math.min(3, tier))]
+/** Flair icon shown beside a name (boards) or above a "Watered by" label: the HUD glyph
+ *  set, tinted per tier. null = no flair yet. (Text tags retired 2026-09-17.) */
+export function flairIcon(tier: number): { src: string; tint: { r: number; g: number; b: number } } | null {
+  if (tier >= 3) return { src: 'assets/scene/Images/ui/glyph_flower.png', tint: { r: 1.0,  g: 0.82, b: 0.30 } }   // golden flower
+  if (tier === 2) return { src: 'assets/scene/Images/ui/glyph_flower.png', tint: { r: 0.96, g: 0.55, b: 0.75 } }   // flower
+  if (tier === 1) return { src: 'assets/scene/Images/ui/glyph_seed.png',   tint: { r: 0.45, g: 0.85, b: 0.55 } }   // sprout
+  return null
 }
 /** Weekly board cadence — the reset moment is shown in-world (GDD §4.3). */
 export const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000
@@ -207,7 +217,7 @@ export interface FoundingTribute { displayName: string; address: string; note: s
  *  address: fill in the honoree's wallet when known → the server also seeds their
  *  lifetime total to TRIBUTE_MILESTONE so they carry golden flair on the boards. */
 export const FOUNDING_TRIBUTES: ReadonlyArray<FoundingTribute> = [
-  { displayName: 'PeterParker', address: '', note: 'v1 gardener - reached 1,000 waters twice' },
+  { displayName: 'PeterParker', address: '0xCE0A77432DC952460c6cA1B8d8cf54169db3e210', note: 'v1 gardener - reached 1,000 waters twice' },
 ]
 /** GLB paths; empty = greybox stand-in. Founding gets a unique model (KJ's custom rose),
  *  every later tribute reuses ONE standard plant tinted per player + a plaque. */

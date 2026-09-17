@@ -33,6 +33,7 @@ import {
   EasingFunction,
   timers,
   PlayerIdentityData,
+  MaterialTransparencyMode,
 } from '@dcl/sdk/ecs'
 import { getPlayer }              from '@dcl/sdk/players'
 import { onEnterSceneObservable } from '@dcl/sdk/observables'
@@ -43,23 +44,24 @@ import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSyst
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { flairTag, bloomVariantById, bloomFxLevel } from './shared/config'
+import { flairIcon, bloomSustainMs, bloomVariantById, bloomFxLevel } from './shared/config'
 import { setBloomSparklePalette } from './sparkleSystem'
 import { setAmbientPalette } from './ambientFX'
+import { startMoonlight, stopMoonlight } from './moonlight'
 import { setupLeaderboardBoards, updateLeaderboardDisplay, BoardEntry }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
 import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, updateBloomRemaining, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
 import { clockSync } from './shared/clockSync'
 import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
-import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_SUSTAIN_MS, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
 import { setupTributeSystem } from './tributeSystem'
 import { PLANT_LAYOUT } from './shared/layout'
-import { Quaternion } from '@dcl/sdk/math'
+import { Quaternion, Color4 } from '@dcl/sdk/math'
 
 // ===============================================================
 // ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -256,6 +258,30 @@ let lastSyncRequestMs    = 0
 const SYNC_REQUEST_MIN_MS = 5_000   // don't flood server with requestFullSync on rapid reloads
 
 const wateredByLabelMap = new Map<Entity, Entity>()
+// Flair icon above a "Watered by" label — created lazily (most waterers have no tier yet),
+// parented to the billboarded label so it turns with the text.
+const flairIconMap = new Map<Entity, Entity>()
+const FLAIR_ICON_Y = 0.30
+const FLAIR_ICON_S = 0.22
+function setLabelFlair(plant: Entity, tier: number): void {
+  const f = flairIcon(tier)
+  let icon = flairIconMap.get(plant)
+  if (!f) { if (icon) Transform.getMutable(icon).scale = { x: 0, y: 0, z: 0 }; return }
+  const label = wateredByLabelMap.get(plant)
+  if (!label) return
+  if (!icon) {
+    icon = engine.addEntity()
+    Transform.create(icon, { position: { x: 0, y: FLAIR_ICON_Y, z: 0 }, parent: label })
+    MeshRenderer.setPlane(icon)
+    flairIconMap.set(plant, icon)
+  }
+  Transform.getMutable(icon).scale = { x: FLAIR_ICON_S, y: FLAIR_ICON_S, z: FLAIR_ICON_S }
+  Material.setPbrMaterial(icon, {
+    texture: Material.Texture.Common({ src: f.src }), alphaTexture: Material.Texture.Common({ src: f.src }),
+    albedoColor: Color4.create(f.tint.r, f.tint.g, f.tint.b, 1), emissiveColor: f.tint, emissiveIntensity: 0.9,
+    transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND, castShadows: false,
+  })
+}
 const wateredByNames    = new Map<Entity, string>()   // entity → display name
 
 const bloomContributors = new Set<string>()           // unique waterer names this bloom cycle
@@ -332,8 +358,10 @@ function setVisible(entity: Entity | null, visible: boolean) {
 let bloomResetTickerGen  = 0
 let bloomResetStartMs: number | null = null
 
-function startBloomResetTicker(): void {
-  bloomResetStartMs = Date.now()
+/** @param elapsedMs how far into the bloom we join (late joiners) — keeps every client's
+ *  countdown and end-of-bloom moment aligned with the server's. */
+function startBloomResetTicker(elapsedMs = 0): void {
+  bloomResetStartMs = Date.now() - elapsedMs
   const myGen = ++bloomResetTickerGen
 
   // Dedicated terminal timer — fires startBloomClose() at exactly countdown=0,
@@ -343,7 +371,7 @@ function startBloomResetTicker(): void {
   // against stale timers firing during a subsequent bloom cycle (test mode).
   timers.setTimeout(() => {
     if (isBloomActive()) startBloomClose()
-  }, BLOOM_RESET_DELAY_MS)
+  }, Math.max(0, BLOOM_RESET_DELAY_MS - elapsedMs))
 
   function tick(): void {
     if (bloomResetTickerGen !== myGen) return
@@ -468,13 +496,14 @@ let countdownUnlocked = false
 // ── Client-side 60 s sustain countdown ───────────────────────
 // Mirrors the server's pauseable sustain timer so the 3D labels show
 // exactly how long until bloom fires (not the scheduled window time).
+let gardenersPresent = 1   // server's count (thresholdUpdate) — drives hold length + the HUD
 let clientSustainStartMs:  number | null = null   // wall-clock ms when current run started
 let clientSustainElapsedMs: number       = 0      // ms accumulated across paused segments
 
 function formatSustainCountdown(): string {
   const elapsed     = clientSustainElapsedMs
                     + (clientSustainStartMs !== null ? Date.now() - clientSustainStartMs : 0)
-  const remainingMs = Math.max(0, BLOOM_SUSTAIN_MS - elapsed)
+  const remainingMs = Math.max(0, bloomSustainMs(gardenersPresent) - elapsed)
   return `${Math.ceil(remainingMs / 1_000)}s`
 }
 
@@ -757,6 +786,7 @@ function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: numbe
 
     // Clear the "watered by" label immediately on expiry
     wateredByNames.delete(entity)
+    setLabelFlair(entity, 0)
     const expiredLabel = wateredByLabelMap.get(entity)
     if (expiredLabel) TextShape.getMutable(expiredLabel).text = ''
 
@@ -888,6 +918,7 @@ export function resetAllPlants(): void {
     TextShape.getMutable(labelEntity).text = ''
   }
   wateredByNames.clear()
+  for (const plant of flairIconMap.keys()) setLabelFlair(plant, 0)
 
   reset.queue = []
   for (const [entity] of engine.getEntitiesWith(PlantData)) {
@@ -940,12 +971,12 @@ function refreshWateredByLabels(): void {
     const pd   = PlantData.getOrNull(entity)
     const name = wateredByNames.get(entity)
     if (!pd?.isWatered || !name) continue
-    const pid      = entityPlantId.get(entity)
-    const expiryMs = plantExpiryMs(pid ?? '')
-    const alpha    = Math.max(0, 1 - (now - pd.wateredAt) / expiryMs)
     const ts = TextShape.getMutable(labelEntity)
     ts.text      = `Watered by ${name}\n${formatTimeAgo(pd.wateredAt)}`
-    ts.textColor = { ...WATERED_BY_COLOR, a: alpha }
+    // Fixed alpha, matching the flair icon above it (which never fades) — a fade tied to
+    // time-to-expiry made the name go fully invisible on any plant watered a while ago,
+    // leaving just the flair badge floating with no name under it. Found 2026-09-17.
+    ts.textColor = WATERED_BY_COLOR
   }
 }
 
@@ -1229,16 +1260,7 @@ export function setupWateringSystem(): void {
   engine.addSystem(bloomSparkleSystem)
   engine.addSystem(ambientFXSystem)
 
-  // Player count — throttled, updates UI every 5 s
-  let playerCountTimer = 0
-  engine.addSystem((dt: number) => {
-    playerCountTimer += dt
-    if (playerCountTimer < 5) return
-    playerCountTimer = 0
-    let count = 0
-    for (const _ of engine.getEntitiesWith(PlayerIdentityData)) count++
-    updatePlayerCount(count)
-  })
+  // (HUD gardener count now comes from the server's thresholdUpdate — see that handler.)
 
   // Refresh "X min ago" timestamps and decay alpha on watered-by labels every 5 s
   let labelRefreshTimer = 0
@@ -1350,6 +1372,12 @@ export function setupWateringSystem(): void {
 
   room.onMessage('thresholdUpdate', (data) => {
     if (!data || typeof data.threshold !== 'number' || data.threshold <= 0) return
+    // Gardeners first: the threshold is flat since the decay rework, so the early return
+    // below used to swallow every gardener change (hold length + HUD never heard of it).
+    if (typeof data.gardeners === 'number' && data.gardeners > 0) {
+      gardenersPresent = data.gardeners
+      updatePlayerCount(gardenersPresent)
+    }
     if (data.threshold === bloomThreshold) return
     bloomThreshold = data.threshold
     setBloomRatio(bloomThreshold / TOTAL_PLANTS)
@@ -1366,6 +1394,8 @@ export function setupWateringSystem(): void {
     if (!isBloomActive() && variant.id !== 'classic') {
       showToast(`A ${variant.name}! Rare seeds fall thicker tonight`, 6_000, false)
     }
+    // The rare variant changes the light itself — also on a late joiner's re-send
+    if (variant.id === 'moonlit') startMoonlight()
     // Phase 6b: the variant's palette on every pooled bloom FX, before any of it fires
     setBloomSparklePalette(variant.palette)
     setAmbientPalette(variant.palette)
@@ -1379,7 +1409,7 @@ export function setupWateringSystem(): void {
     resetClientSustain()   // sustain complete — bloom is firing
     showBannerBloom(bannerLabel)   // switch banner from countdown → bloom before visual effects ramp up
     for (const e of bloomCountdownLabels) TextShape.getMutable(e).text = ''  // clear countdown before reset ticker starts
-    startBloomResetTicker()  // begin counting down to garden reset (phase 3 label)
+    startBloomResetTicker(typeof data?.elapsedMs === 'number' && data.elapsedMs > 0 ? data.elapsedMs : 0)  // countdown to garden reset, aligned for late joiners
     if (!isBloomActive()) {
       triggerBloomEvent()
       startContributorCycle([...bloomContributors])   // thank each waterer in turn
@@ -1407,6 +1437,7 @@ export function setupWateringSystem(): void {
     stopContributorCycle()
     setBloomSparklePalette(bloomVariantById('classic').palette)   // back to the warm default for the next cycle
     setAmbientPalette(bloomVariantById('classic').palette)
+    stopMoonlight()          // dawn breaks as the garden resets (no-op after a classic bloom)
     startBloomFlower([...bloomContributors])  // attach hand flower to contributors — must run BEFORE clear()
     bloomContributors.clear()
     resetAllPlants()         // stops bloom, resets visuals + audio via endBloom()
@@ -1449,19 +1480,18 @@ export function setupWateringSystem(): void {
     // Update "Watered by" label + accumulate bloom contributors
     const wateredByLabel = wateredByLabelMap.get(entity)
     if (data.isWatered && data.wateredBy) {
-      wateredByNames.set(entity, `${flairTag(data.tier)}${data.wateredBy}`)   // flair shows on the label (GDD §5)
+      wateredByNames.set(entity, data.wateredBy)
+      setLabelFlair(entity, data.tier)   // flair icon above the label (GDD §5)
       bloomContributors.add(data.wateredBy)   // tracks everyone who contributed this cycle
     } else {
       wateredByNames.delete(entity)
+      setLabelFlair(entity, 0)
     }
     if (wateredByLabel) {
       const ts = TextShape.getMutable(wateredByLabel)
       if (data.isWatered && data.wateredBy) {
-        const pid      = entityPlantId.get(entity)
-        const expiryMs = plantExpiryMs(pid ?? '')
-        const alpha    = Math.max(0, 1 - (Date.now() - wateredAt) / expiryMs)
-        ts.text      = `Last watered by ${flairTag(data.tier)}${data.wateredBy}\n${formatTimeAgo(wateredAt)}`
-        ts.textColor = { ...WATERED_BY_COLOR, a: alpha }
+        ts.text      = `Last watered by ${data.wateredBy}\n${formatTimeAgo(wateredAt)}`
+        ts.textColor = WATERED_BY_COLOR   // fixed — matches the flair icon, see refreshWateredByLabels
       } else {
         ts.text = ''
       }
