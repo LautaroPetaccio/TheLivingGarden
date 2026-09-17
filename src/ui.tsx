@@ -306,9 +306,29 @@ export function setupUi(): void {
 // Render
 // ---------------------------------------------------------------
 
+// Mobile text scale — set each render; fonts go through fs() so desktop is untouched.
+let uiFont = 1
+const fs = (n: number): number => Math.round(n * uiFont)
+
 function uiComponent() {
   const sa = getSafeArea()
-  const M  = isMobile() ? 1.15 : 1   // touch targets + small screens want larger chrome
+  const mobile = isMobile()
+  const M  = mobile ? 1.3 : 1        // touch targets + small screens want larger chrome
+  uiFont   = mobile ? 1.5 : 1        // …and larger text (16 px read as ~11 px on the phone)
+  // Health column: wider + bigger labels on mobile, but a SHORTER bar parked high —
+  // the client draws its F / + / jump cluster over the bottom-right by design
+  // (interactableArea only reserves ~6% there), so the bar must end by ~58%.
+  const SS          = mobile ? 1.5 : 1
+  const sideW       = Math.round(SIDE_W * SS)
+  const sideH       = mobile ? 300 : SIDE_H
+  const sidePillPadY = Math.round(SIDE_PILL_PAD_Y * SS)
+  const sideLabelH  = Math.round(SIDE_LABEL_H * SS)
+  const gardenTitleH = Math.round(GARDEN_TITLE_H * SS)
+  const sidePillH   = Math.round(SIDE_PILL_H * SS)
+  const sideTotalH  = sidePillH + SIDE_PILL_GAP + sideH
+  const tickW       = sideW + 10
+  const bannerDismiss = Math.round(BANNER_DISMISS_SIZE * M)
+  const dailyDismiss  = Math.round(DAILY_DISMISS_SIZE * M)
   const safeBottomPx = Math.round(sa.bottom * currentVirtualH)   // explorer chrome along the bottom edge
   const dailyBottom = PERSIST_BOTTOM + (persistVisible ? PILL_STEP : 0)
   const toastBottom = dailyBottom    + (dailyLimitVisible ? PILL_STEP : 0)
@@ -319,13 +339,13 @@ function uiComponent() {
   const bannerH      = BANNER_H_SINGLE
 
   // Side bar fill — grows from bottom, minimum SIDE_FILL_MIN px when health > 0
-  const fillH       = bannerHealth > 0 ? Math.max(SIDE_FILL_MIN, Math.round(bannerHealth * SIDE_H)) : 0
-  const fillTop     = SIDE_H - fillH   // top offset within track (bottom-anchored)
+  const fillH       = bannerHealth > 0 ? Math.max(SIDE_FILL_MIN, Math.round(bannerHealth * sideH)) : 0
+  const fillTop     = sideH - fillH   // top offset within track (bottom-anchored)
 
   // Tick positions (top offset from bar track top)
-  const tick25Top  = Math.round(SIDE_H * 0.75) - TICK_H_NORMAL
-  const tick50Top  = Math.round(SIDE_H * 0.50) - TICK_H_NORMAL
-  const tick80Top  = Math.round(SIDE_H * 0.20) - TICK_H_THRESHOLD
+  const tick25Top  = Math.round(sideH * 0.75) - TICK_H_NORMAL
+  const tick50Top  = Math.round(sideH * 0.50) - TICK_H_NORMAL
+  const tick80Top  = Math.round(sideH * 0.20) - TICK_H_THRESHOLD
 
   // Percent label (0–100)
   const pctLabel = `${Math.round(bannerHealth * 100)}%`
@@ -374,7 +394,7 @@ function uiComponent() {
         uiBackground={{ color: DARK }}
       >
         {/* Ghost spacer — mirrors dismiss button so text stays centred */}
-        <UiEntity uiTransform={{ width: BANNER_DISMISS_SIZE, height: BANNER_DISMISS_SIZE, flexShrink: 0 }} />
+        <UiEntity uiTransform={{ width: bannerDismiss, height: bannerDismiss, flexShrink: 0 }} />
 
         {/* Centre content column */}
         <UiEntity
@@ -388,21 +408,21 @@ function uiComponent() {
         >
           <Label
             value={bannerLine1()}
-            fontSize={bannerFontSize()}
+            fontSize={fs(bannerFontSize())}
             color={bannerTextColor()}
             textAlign="middle-center"
-            uiTransform={{ width: '100%', height: BANNER_LINE1_H }}
+            uiTransform={{ width: '100%', height: Math.round(BANNER_LINE1_H * M) }}
           />
         </UiEntity>
 
         {/* Dismiss button */}
         <UiEntity
-          uiTransform={{ width: BANNER_DISMISS_SIZE, height: BANNER_DISMISS_SIZE, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+          uiTransform={{ width: bannerDismiss, height: bannerDismiss, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
           onMouseDown={hideBanner}
         >
           <Label
             value="✕"
-            fontSize={BANNER_DISMISS_FONT}
+            fontSize={fs(BANNER_DISMISS_FONT)}
             color={TEXT_IDLE}
             textAlign="middle-center"
             uiTransform={{ width: '100%', height: '100%' }}
@@ -418,9 +438,9 @@ function uiComponent() {
       <UiEntity
         uiTransform={{
           positionType:   'absolute',
-          position:       { top: pct(Math.max(sa.top, 0.5 - SIDE_TOTAL_H / currentVirtualH / 2)), right: pct(sa.right + SIDE_RIGHT_PAD / 1920) },
-          width:          SIDE_COL_W,
-          height:         SIDE_TOTAL_H,
+          position:       { top: pct(mobile ? Math.max(sa.top, 0.16) : Math.max(sa.top, 0.5 - sideTotalH / currentVirtualH / 2)), right: pct(sa.right + SIDE_RIGHT_PAD / 1920) },
+          width:          sideW,
+          height:         sideTotalH,
           flexDirection:  'column',
           alignItems:     'center',
         }}
@@ -428,41 +448,41 @@ function uiComponent() {
         {/* Dark pill — player count + title + % */}
         <UiEntity
           uiTransform={{
-            width:          SIDE_W,
-            height:         SIDE_PILL_H,
+            width:          sideW,
+            height:         sidePillH,
             flexShrink:     0,
             flexDirection:  'column',
             alignItems:     'center',
             justifyContent: 'center',
-            padding:        { top: SIDE_PILL_PAD_Y, bottom: SIDE_PILL_PAD_Y },
+            padding:        { top: sidePillPadY, bottom: sidePillPadY },
           }}
           uiBackground={{ color: DARK }}
         >
           <Label
             value="Garden Health"
-            fontSize={GARDEN_TITLE_FONT}
+            fontSize={fs(GARDEN_TITLE_FONT)}
             color={TEXT_IDLE}
             textAlign="middle-center"
-            uiTransform={{ width: SIDE_W, height: GARDEN_TITLE_H }}
+            uiTransform={{ width: sideW, height: gardenTitleH }}
           />
-          <UiEntity uiTransform={{ width: SIDE_W, height: 4, flexShrink: 0 }} />
+          <UiEntity uiTransform={{ width: sideW, height: 4, flexShrink: 0 }} />
           <Label
             value={pctLabel}
-            fontSize={SIDE_LABEL_FONT}
+            fontSize={fs(SIDE_LABEL_FONT)}
             color={GREY}
             textAlign="middle-center"
-            uiTransform={{ width: SIDE_W, height: SIDE_LABEL_H }}
+            uiTransform={{ width: sideW, height: sideLabelH }}
           />
         </UiEntity>
 
         {/* Spacer between pill and bar */}
-        <UiEntity uiTransform={{ width: SIDE_W, height: SIDE_PILL_GAP, flexShrink: 0 }} />
+        <UiEntity uiTransform={{ width: sideW, height: SIDE_PILL_GAP, flexShrink: 0 }} />
 
         {/* Bar track */}
         <UiEntity
           uiTransform={{
-            width:        SIDE_W,
-            height:       SIDE_H,
+            width:        sideW,
+            height:       sideH,
             flexShrink:   0,
             positionType: 'relative',
           }}
@@ -474,7 +494,7 @@ function uiComponent() {
               uiTransform={{
                 positionType: 'absolute',
                 position:     { top: fillTop, left: 0 },
-                width:        SIDE_W,
+                width:        sideW,
                 height:       fillH,
               }}
               uiBackground={{ color: sideFillColor() }}
@@ -486,7 +506,7 @@ function uiComponent() {
             uiTransform={{
               positionType: 'absolute',
               position:     { top: tick25Top, left: TICK_OFFSET_X },
-              width:        TICK_W,
+              width:        tickW,
               height:       TICK_H_NORMAL,
             }}
             uiBackground={{ color: TICK_COLOR }}
@@ -497,7 +517,7 @@ function uiComponent() {
             uiTransform={{
               positionType: 'absolute',
               position:     { top: tick50Top, left: TICK_OFFSET_X },
-              width:        TICK_W,
+              width:        tickW,
               height:       TICK_H_NORMAL,
             }}
             uiBackground={{ color: TICK_COLOR }}
@@ -508,7 +528,7 @@ function uiComponent() {
             uiTransform={{
               positionType: 'absolute',
               position:     { top: tick80Top, left: TICK_OFFSET_X },
-              width:        TICK_W,
+              width:        tickW,
               height:       TICK_H_THRESHOLD,
             }}
             uiBackground={{ color: TICK_GOLD }}
@@ -533,7 +553,7 @@ function uiComponent() {
       >
         <Label
           value={toastText}
-          fontSize={toastLarge ? TOAST_FONT_LG : TOAST_FONT_SM}
+          fontSize={fs(toastLarge ? TOAST_FONT_LG : TOAST_FONT_SM)}
           color={WHITE}
           textAlign="middle-center"
           uiTransform={{ width: '100%', height: '100%' }}
@@ -555,21 +575,21 @@ function uiComponent() {
         uiBackground={{ color: DARK }}
       >
         {/* Ghost spacer — mirrors the dismiss button so the label area is symmetric */}
-        <UiEntity uiTransform={{ width: DAILY_DISMISS_SIZE, height: DAILY_DISMISS_SIZE, flexShrink: 0 }} />
+        <UiEntity uiTransform={{ width: dailyDismiss, height: dailyDismiss, flexShrink: 0 }} />
         <Label
           value={dailyLimitText}
-          fontSize={DAILY_FONT}
+          fontSize={fs(DAILY_FONT)}
           color={WHITE}
           textAlign="middle-center"
           uiTransform={{ flexGrow: 1, height: '100%' }}
         />
         <UiEntity
-          uiTransform={{ width: DAILY_DISMISS_SIZE, height: DAILY_DISMISS_SIZE, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
+          uiTransform={{ width: dailyDismiss, height: dailyDismiss, alignItems: 'center', justifyContent: 'center', flexShrink: 0 }}
           onMouseDown={hideDailyLimit}
         >
           <Label
             value="✕"
-            fontSize={DAILY_DISMISS_FONT}
+            fontSize={fs(DAILY_DISMISS_FONT)}
             color={WHITE}
             textAlign="middle-center"
             uiTransform={{ width: '100%', height: '100%' }}
@@ -594,7 +614,7 @@ function uiComponent() {
       >
         <Label
           value={persistText}
-          fontSize={PERSIST_FONT}
+          fontSize={fs(PERSIST_FONT)}
           color={WHITE}
           textAlign="middle-center"
           uiTransform={{ width: '100%', height: '100%' }}
