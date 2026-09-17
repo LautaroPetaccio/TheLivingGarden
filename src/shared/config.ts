@@ -120,11 +120,22 @@ export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number }> 
   { id: 'box_7', x: 12.4, z: 3.6 }, { id: 'box_8', x: 13.8, z: 3.6 },
 ]
 /** KJ's planter template (2026-09-17): origin at the base, front (+z) faces the
- *  garden, rim at y≈1.1, balloons to y≈3.1 (static in this export — the balloon
- *  animation + countdown sync is a to-do). 4,440 tris — decimate before ship. */
+ *  garden, rim at y≈1.1. 4,440 tris — decimate before ship. */
 export const BOX_MODEL_SRC   = 'assets/scene/Models/planterBox/planterBox.glb'
 export const BOX_MODEL_SCALE = 0.6
 export const BOX_MODEL_RIM_Y = 1.1 * BOX_MODEL_SCALE   // where the soil surface sits
+/** KJ split the balloons out of the box template (2026-09-17) into their own GLB so
+ *  they can animate independently — same origin/scale as the box, balloons rise to
+ *  y≈3.1 in model space, so placing it at the box's own transform reconstructs the
+ *  original combined layout exactly. Shown while a box holds a seed or an unharvested
+ *  flower (v.owner truthy). The file has two 5 s loop clips, presumably one per balloon
+ *  cluster — both are played simultaneously since it isn't confirmed which drives what. */
+export const BALLOON_MODEL_SRC   = 'assets/scene/Models/planterBalloon/planterBalloon.glb'
+export const BALLOON_ANIM_CLIPS  = ['balloons', 'balloons.001'] as const
+/** KJ's seedling model (2026-09-17) — one untextured plane, no material of its own.
+ *  Stands in for the greybox sprout sphere while a box's seed is growing (unopened),
+ *  tinted per rarity in code so it reads as a hint before the flower is revealed. */
+export const SEEDLING_MODEL_SRC = 'assets/scene/Models/seedling/seedling.glb'
 /** TUNING — GDD: overnight scale, "an evening plant opens by next morning" (~10 h).
  *  Set to 2 minutes for the greybox playtest so the whole loop fits one session. */
 export const BOX_GROW_MS = 2 * 60_000

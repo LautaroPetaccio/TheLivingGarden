@@ -4,15 +4,17 @@
 // KJ is considering 100+ planters in the scene. This spawns 100 of the REAL planter
 // model (same GLB, scale, spacing and collision mask as boxSystem — primitive pots
 // gave a falsely good reading) and lets the phone answer the question with a frame
-// rate: one entity per pot, a sprout on every other pot,
-// and a POOL of 8 plaques that hop to the pots nearest the player (a plaque per
-// pot would be 300 more entities). Local only — nothing is sent to the server.
-// Remove with the test panel before production.
+// rate: one entity per pot, a real animated balloon + sprout on every other pot
+// (boxSystem's real occupied-box visual, not a cheap stand-in — an unanimated pot
+// undercounts the actual cost of a busy garden), and a POOL of 8 plaques that hop
+// to the pots nearest the player (a plaque per pot would be 300 more entities).
+// Local only — nothing is sent to the server. Remove with the test panel before
+// production.
 // =============================================================
 
-import { engine, Entity, Transform, MeshRenderer, GltfContainer, ColliderLayer, Material, TextShape, PointerEvents, PointerEventType, InputAction } from '@dcl/sdk/ecs'
+import { engine, Entity, Transform, MeshRenderer, GltfContainer, ColliderLayer, Material, TextShape, PointerEvents, PointerEventType, InputAction, Animator, timers } from '@dcl/sdk/ecs'
 import { Color4 } from '@dcl/sdk/math'
-import { BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y } from './shared/config'
+import { BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS } from './shared/config'
 import { createSign, moveSign, removeSign, setupSignSystem, Sign } from './signs'
 
 const COLS = 10, ROWS = 10
@@ -72,6 +74,12 @@ export function spawnTestPots(): void {
       MeshRenderer.setSphere(sprout)
       Material.setPbrMaterial(sprout, { albedoColor: COLOR_SPROUT })
       entities.push(sprout)
+
+      const balloon = engine.addEntity()
+      Transform.create(balloon, { position: { x, y: 0, z }, scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
+      GltfContainer.create(balloon, { src: BALLOON_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+      timers.setTimeout(() => Animator.createOrReplace(balloon, { states: BALLOON_ANIM_CLIPS.map(clip => ({ clip, playing: true, loop: true })) }), 1_000)
+      entities.push(balloon)
     }
     pots.push({ x, z, label: growing ? `Gardener ${n}'s seed\nopens in 7h ${n % 60}m` : 'Empty planter\nTap to plant' })
   }

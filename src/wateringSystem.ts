@@ -1165,8 +1165,9 @@ export function setupWateringSystem(): void {
       triggerBloomSparkles(positions)
 
       // All VFX, audio, petals, and lights driven by intensity system —
-      // budget from bloom scale (solo = quiet bloom), flavour from the variant.
-      startBloomPhases(bloomFxLevel(currentBloomScale), currentBloomVariant)
+      // budget from bloom scale (solo = quiet bloom), flavour from the variant,
+      // pacing from the real hold time so the finale actually plays before reset.
+      startBloomPhases(bloomFxLevel(currentBloomScale), currentBloomVariant, bloomSustainMs(gardenersPresent))
       bloomActive = true
     },
   })

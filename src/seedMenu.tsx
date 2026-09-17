@@ -19,6 +19,15 @@ let giftMode = false      // choosing who to give the selected flower to
 
 export function isSeedMenuOpen(): boolean { return open }
 export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false } }
+export function openSeedMenu(): void { open = true }
+
+/** The keepsake index the menu currently has selected for gifting, or null if none —
+ *  the world tap-a-player shortcut reuses this instead of guessing "the newest one". */
+export function getSelectedGiftIndex(): number | null {
+  if (!selectedKey) return null
+  const g = groupFlowers().find(g => g.key === selectedKey)
+  return g ? g.lastIndex : null
+}
 
 const DARK   = { r: 0.085, g: 0.078, b: 0.067, a: 0.95 }
 const RAISED = { r: 1, g: 1, b: 1, a: 0.08 }

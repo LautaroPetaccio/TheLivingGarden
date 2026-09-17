@@ -20,10 +20,15 @@ const PANEL_COLOR   = Color4.create(0.10, 0.08, 0.06, 0.92)
 const TEXT_COLOR    = Color4.create(1.0, 0.95, 0.82, 1)
 const PANEL_DEPTH   = 0.03
 const SIGN_SHOW_M   = 9       // plaques farther than this are hidden (less noise, fewer draw calls)
+const SIGN_MAX_VISIBLE = 8    // even within range, only the N nearest are shown — a crowd of
+                               // planters (100-planter perf test, a busy tribute bed) must not
+                               // pop every plaque at once. KJ 2026-09-17: "too much floating
+                               // text... like a cemetery for the living".
+const FADE_S        = 0.30    // grow-in / shrink-out, not a hard pop
 const SCAN_MS       = 400
 
 export interface Sign { root: Entity; text: Entity }
-interface SignState { root: Entity; x: number; z: number; shown: boolean }
+interface SignState { root: Entity; x: number; z: number; shown: boolean; k: number }
 
 const signs: SignState[] = []
 let scanAccum = 0
@@ -51,7 +56,7 @@ export function createSign(
     textWrapping: true, width: size.w * 0.92, height: size.h * 0.9,
   })
 
-  signs.push({ root, x: pos.x, z: pos.z, shown: false })
+  signs.push({ root, x: pos.x, z: pos.z, shown: false, k: 0 })
   return { root, text }
 }
 
@@ -68,19 +73,31 @@ export function removeSign(sign: Sign): void {
   engine.removeEntityWithChildren(sign.root)
 }
 
-/** Show plaques near the local player, hide the rest (scale 0 hides children on both clients). */
-function signProximitySystem(dt: number): void {
+/** Decide WHICH plaques should be visible: in range, nearest SIGN_MAX_VISIBLE win — a
+ *  crowd of them (a busy tribute bed, 100 test planters) must not all pop up together. */
+function signRankSystem(dt: number): void {
   scanAccum += dt * 1_000
   if (scanAccum < SCAN_MS) return
   scanAccum = 0
   const me = Transform.getOrNull(engine.PlayerEntity)?.position
   if (!me) return
+  const inRange = signs
+    .map(s => ({ s, d: Math.hypot(s.x - me.x, s.z - me.z) }))
+    .filter(r => r.d <= SIGN_SHOW_M)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, SIGN_MAX_VISIBLE)
+  const winners = new Set(inRange.map(r => r.s))
+  for (const s of signs) s.shown = winners.has(s)
+}
+
+/** Ease every plaque's scale toward its target every frame — a fade, not a pop. */
+function signFadeSystem(dt: number): void {
+  const step = dt / FADE_S
   for (const s of signs) {
-    const near = Math.hypot(s.x - me.x, s.z - me.z) <= SIGN_SHOW_M
-    if (near === s.shown) continue
-    s.shown = near
-    const k = near ? 1 : 0
-    Transform.getMutable(s.root).scale = { x: k, y: k, z: k }
+    const target = s.shown ? 1 : 0
+    if (s.k === target) continue
+    s.k = target > s.k ? Math.min(target, s.k + step) : Math.max(target, s.k - step)
+    Transform.getMutable(s.root).scale = { x: s.k, y: s.k, z: s.k }
   }
 }
 
@@ -88,5 +105,6 @@ let started = false
 export function setupSignSystem(): void {
   if (started) return
   started = true
-  engine.addSystem(signProximitySystem)
+  engine.addSystem(signRankSystem)
+  engine.addSystem(signFadeSystem)
 }

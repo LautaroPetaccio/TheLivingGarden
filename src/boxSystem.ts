@@ -7,8 +7,9 @@
 // return hook, so the box, its name, its sprout and its countdown must all
 // be visible in the shared garden — to everyone.
 //
-// Greybox pass: a brown box with a floating label; a green sprout while
-// growing; a coloured sphere as the flower. Real models come in the FX phase.
+// Real planter model + an animated balloon (both KJ's Blender exports) while the box
+// holds a seed or an unharvested flower; a coloured sphere still stands in for the
+// sprout/flower itself until those models land.
 //
 // Server communication (server is authoritative; the client only requests):
 //   send    →  plantSeed   { boxId, rare }        empty box
@@ -31,11 +32,13 @@ import {
   PointerEvents,
   pointerEventsSystem,
   InputAction,
+  Animator,
+  timers,
 } from '@dcl/sdk/ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC } from './shared/config'
 import { showToast } from './notifications'
 import { setupGiftSystem } from './giftSystem'
 import { setPouch, getBoxCap, nextSeedIsRare } from './playerInventory'
@@ -50,14 +53,18 @@ const PLAQUE_OFFSET_Z = 0.80
 const PLAQUE_Y        = 0.42
 const PLAQUE_SIZE     = { w: 1.25, h: 0.62 }
 const PLAQUE_FONT     = 0.9
-const SPROUT_SCALE  = 0.25
+const SEEDLING_SCALE = 0.25
 const FLOWER_SCALE  = 0.5
-const COLOR_SPROUT  = Color4.create(0.35, 0.75, 0.35, 1)
+// Same palette for the growing seedling as the opened flower — a rarity hint before
+// the reveal, not just after it.
+const COLOR_SEEDLING_NORMAL = Color4.create(0.55, 0.85, 0.55, 1)   // growing, normal — soft green
+const COLOR_SEEDLING_RARE   = Color4.create(1.0, 0.88, 0.45, 1)    // growing, rare — pale gold
 const COLOR_NORMAL  = Color4.create(0.95, 0.55, 0.75, 1)   // opened, normal flower
 const COLOR_RARE    = Color4.create(1.0, 0.82, 0.25, 1)    // opened, rare flower
 const TOAST_MS      = 5_000
 const LABEL_TICK_MS = 1_000
 const TAP_DISTANCE  = 8     // m — mobile is third-person only, camera sits well behind the avatar
+const BALLOON_ANIM_INIT_DELAY_MS = 1_000   // let the GLB load before starting the Animator
 
 // ---------------------------------------------------------------
 // State
@@ -68,6 +75,7 @@ interface BoxView {
   base:         Entity
   label:        Entity
   plant:        Entity | null   // sprout or flower entity while planted
+  balloon:      Entity | null   // animated balloon while the box holds a seed or flower
   owner:        string
   ownerName:    string
   rare:         boolean
@@ -116,17 +124,52 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
   if (v.plant !== null) { engine.removeEntity(v.plant); v.plant = null }
   if (!v.owner) return
   const e = engine.addEntity()
-  const k = v.opened ? FLOWER_SCALE : SPROUT_SCALE
+
+  if (!v.opened) {
+    // Growing: KJ's seedling model, untextured — tinted per rarity in code so it
+    // hints at what's coming before the flower is revealed.
+    const k = SEEDLING_SCALE
+    Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y, z: pos.z }, scale: { x: k, y: k, z: k } })
+    GltfContainer.create(e, { src: SEEDLING_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+    const c = v.rare ? COLOR_SEEDLING_RARE : COLOR_SEEDLING_NORMAL
+    Material.setPbrMaterial(e, { albedoColor: c, emissiveColor: c, emissiveIntensity: 0.3 })
+    v.plant = e
+    return
+  }
+
+  // Opened: still the greybox flower sphere until a real flower model lands.
+  const k = FLOWER_SCALE
   Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y + k / 2, z: pos.z }, scale: { x: k, y: k, z: k } })
   MeshRenderer.setSphere(e)
-  const c = v.opened ? (v.rare ? COLOR_RARE : COLOR_NORMAL) : COLOR_SPROUT
-  Material.setPbrMaterial(e, { albedoColor: c, emissiveColor: c, emissiveIntensity: v.opened ? 0.8 : 0.3 })
+  const c = v.rare ? COLOR_RARE : COLOR_NORMAL
+  Material.setPbrMaterial(e, { albedoColor: c, emissiveColor: c, emissiveIntensity: 0.8 })
   v.plant = e
+}
+
+/** Create/remove the balloon on ownership change only — recreating it on every
+ *  refresh() (every water, every tick) would restart its animation and pop. */
+function setBalloonVisual(v: BoxView, pos: { x: number; z: number }): void {
+  const wantBalloon = !!v.owner
+  if (wantBalloon === (v.balloon !== null)) return
+  if (!wantBalloon) {
+    if (v.balloon !== null) engine.removeEntity(v.balloon)
+    v.balloon = null
+    return
+  }
+  const balloon = engine.addEntity()
+  Transform.create(balloon, { position: { x: pos.x, y: 0, z: pos.z }, scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
+  GltfContainer.create(balloon, { src: BALLOON_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  v.balloon = balloon
+  timers.setTimeout(() => {
+    if (v.balloon !== balloon) return   // box was emptied before the GLB finished loading
+    Animator.createOrReplace(balloon, { states: BALLOON_ANIM_CLIPS.map(clip => ({ clip, playing: true, loop: true })) })
+  }, BALLOON_ANIM_INIT_DELAY_MS)
 }
 
 function refresh(v: BoxView): void {
   const pos = BOX_POSITIONS.find(p => p.id === v.boxId)!
   setPlantVisual(v, pos)
+  setBalloonVisual(v, pos)
   TextShape.getMutable(v.label).text = labelFor(v, Date.now())
   const pe = PointerEvents.getMutableOrNull(v.base)?.pointerEvents[0]?.eventInfo
   if (pe) pe.hoverText = hoverFor(v)
@@ -181,7 +224,7 @@ function createBox(p: { id: string; x: number; z: number }): BoxView {
   const sign  = createSign({ x: p.x, y: PLAQUE_Y, z: p.z + PLAQUE_OFFSET_Z }, 180, PLAQUE_SIZE, PLAQUE_FONT)
   const label = sign.text
 
-  const v: BoxView = { boxId: p.id, base, label, plant: null, owner: '', ownerName: '', rare: false, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, label, plant: null, balloon: null, owner: '', ownerName: '', rare: false, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
     { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),

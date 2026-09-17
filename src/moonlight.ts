@@ -7,6 +7,9 @@
 //                      removing it at bloom reset lets dawn break again
 //   2. moon wisps    — slow glowing lights rise from the whole garden, only
 //                      readable because the sky is dark
+//   3. the moon glow — a breathing blue-white glow that hangs over BLOOM_CENTER for
+//                      the whole event; the garden has no single "Bloom" mesh, so
+//                      this is the one persistent mark on the moment itself
 // Everything is created on the first Moonlit Bloom — zero cost on a normal day.
 // =============================================================
 
@@ -14,7 +17,7 @@ import {
   engine, Entity, Transform, MeshRenderer, Material, MaterialTransparencyMode,
   Billboard, BillboardMode, SkyboxTime, TransitionMode,
 } from '@dcl/sdk/ecs'
-import { GARDEN_BOUNDS, SPARKLE_SRC } from './shared/config'
+import { GARDEN_BOUNDS, BLOOM_CENTER, SPARKLE_SRC } from './shared/config'
 
 const NIGHT_TIME_S   = 0        // seconds since 00:00 — midnight
 const WISP_COUNT     = 28       // TUNING — pooled, billboard planes
@@ -24,6 +27,15 @@ const WISP_SIZE_MIN  = 0.22
 const WISP_SIZE_MAX  = 0.55
 const WISP_RAMP_S    = 6        // wisps swell in over the nightfall, not all at once
 const SYSTEM_NAME    = 'moonlight-wisps'
+
+// A soft moon-blue glow that hangs over the Bloom itself for the whole event — the
+// garden has no single "Bloom" mesh (it's a moment, not an object), so this is the
+// one persistent, unmissable mark that THIS bloom is the rare one, not just tinted
+// ambient FX. Breathes slowly; never fully still.
+const GLOW_Y         = BLOOM_CENTER.y + 2.4
+const GLOW_SIZE_MIN  = 3.2
+const GLOW_SIZE_MAX  = 3.9
+const GLOW_BREATHE_S = 4.5
 
 interface Wisp {
   entity: Entity
@@ -35,8 +47,27 @@ interface Wisp {
 const wisps: Wisp[] = []
 let active = false
 let ramp   = 0   // 0→1 master scale, eases the whole field in
+let glowEntity: Entity | null = null
+let glowT = 0   // seconds, drives the breathing sine
 
 function rnd(min: number, max: number): number { return min + Math.random() * (max - min) }
+
+function createGlow(): void {
+  const entity = engine.addEntity()
+  Transform.create(entity, { position: { x: BLOOM_CENTER.x, y: GLOW_Y, z: BLOOM_CENTER.z }, scale: { x: 0, y: 0, z: 0 } })
+  MeshRenderer.setPlane(entity)
+  Material.setPbrMaterial(entity, {
+    texture:           Material.Texture.Common({ src: SPARKLE_SRC }),
+    alphaTexture:      Material.Texture.Common({ src: SPARKLE_SRC }),
+    transparencyMode:  MaterialTransparencyMode.MTM_ALPHA_BLEND,
+    albedoColor:       { r: 0.75, g: 0.85, b: 1.0, a: 0.55 },
+    emissiveColor:     { r: 0.5, g: 0.7, b: 1.0 },
+    emissiveIntensity: 2.2,
+    castShadows:       false,
+  })
+  Billboard.create(entity, { billboardMode: BillboardMode.BM_ALL })
+  glowEntity = entity
+}
 
 function respawn(w: Wisp, y: number): void {
   w.x = rnd(GARDEN_BOUNDS.xMin, GARDEN_BOUNDS.xMax)
@@ -71,6 +102,12 @@ function createWisps(): void {
 
 function wispSystem(dt: number): void {
   ramp = Math.min(1, ramp + dt / WISP_RAMP_S)
+  if (glowEntity !== null) {
+    glowT += dt
+    const breathe = (Math.sin((glowT / GLOW_BREATHE_S) * Math.PI * 2) + 1) / 2   // 0..1
+    const k = (GLOW_SIZE_MIN + breathe * (GLOW_SIZE_MAX - GLOW_SIZE_MIN)) * ramp
+    Transform.getMutable(glowEntity).scale = { x: k, y: k, z: k }
+  }
   for (const w of wisps) {
     w.y += w.speed * dt
     if (w.y > WISP_Y_MAX) respawn(w, WISP_Y_MIN)
@@ -90,12 +127,14 @@ export function startMoonlight(): void {
   if (active) return
   active = true
   ramp   = 0
+  glowT  = 0
   if (wisps.length === 0) createWisps()
+  if (glowEntity === null) createGlow()
   engine.addSystem(wispSystem, undefined, SYSTEM_NAME)
   console.log('[Moonlight] night falls')
 }
 
-/** Dawn breaks: hand the sky back to the world clock and put the wisps away. */
+/** Dawn breaks: hand the sky back to the world clock and put the wisps and the glow away. */
 export function stopMoonlight(): void {
   if (!active) return
   active = false
@@ -106,5 +145,6 @@ export function stopMoonlight(): void {
     t.position = { x: w.x, y: -100, z: w.z }
     t.scale    = { x: 0, y: 0, z: 0 }
   }
+  if (glowEntity !== null) Transform.getMutable(glowEntity).scale = { x: 0, y: 0, z: 0 }
   console.log('[Moonlight] dawn')
 }

@@ -32,6 +32,7 @@ import { room } from './shared/messages'
 import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
 import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake } from './playerInventory'
+import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
 
 // ---------------------------------------------------------------
 // Config
@@ -62,9 +63,16 @@ function tryGift(toAddress: string): void {
     showToast('No flower to give yet — harvest one first', TOAST_MS, false)
     return
   }
-  // Give the newest keepsake; a picker can come with the collection UI.
-  const flowerIndex = flowers.length - 1
-  console.log(`[Gift] offering ${flowers[flowerIndex].flower} to ${toAddress}`)
+  // World-tap is a shortcut for "who" — "which flower" comes from the seed menu's own
+  // picker (My flowers → tap a kind → Gift), so tapping a player sends THAT selection
+  // instead of silently guessing the newest keepsake.
+  const flowerIndex = getSelectedGiftIndex()
+  if (flowerIndex === null) {
+    showToast('Open your seed pouch and pick a flower to gift first', TOAST_MS, false)
+    openSeedMenu()
+    return
+  }
+  console.log(`[Gift] offering ${flowers[flowerIndex]?.flower ?? '?'} to ${toAddress}`)
   room.send('giftFlower', { toAddress, flowerIndex })
 }
 
