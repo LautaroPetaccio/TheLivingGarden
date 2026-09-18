@@ -164,7 +164,17 @@ function retirePlant(e: Entity): void {
   timers.setTimeout(() => engine.removeEntity(e), PLANT_RETIRE_MS)
 }
 
-function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
+type PlanterPos = { x: number; z: number; rot: number }
+
+/** A point given in the planter's own frame (lx right, lz front) → world x/z. Same
+ *  convention as Quaternion.fromEulerDegrees(0, rot, 0): rot 90 turns the front to +x. */
+function planterPoint(pos: PlanterPos, lx: number, lz: number): { x: number; z: number } {
+  const r = (pos.rot * Math.PI) / 180
+  return { x: pos.x + lx * Math.cos(r) + lz * Math.sin(r), z: pos.z - lx * Math.sin(r) + lz * Math.cos(r) }
+}
+const planterRotation = (pos: PlanterPos) => Quaternion.fromEulerDegrees(0, pos.rot, 0)
+
+function setPlantVisual(v: BoxView, pos: PlanterPos): void {
   detachPlantVfx(v.boxId)
   if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
   if (!v.owner) return
@@ -175,7 +185,7 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
     // far (SEEDLING_MODEL_SRC_NORMAL/_RARE), so tier 0 (Common) gets normal and
     // everything above it borrows the rare variant until per-tier seedling art exists.
     const k = SEEDLING_SCALE
-    Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k, z: pos.z }, scale: { x: k, y: k, z: k } })
+    Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k, z: pos.z }, rotation: planterRotation(pos), scale: { x: k, y: k, z: k } })
     const src = v.rarityTier > 0 ? SEEDLING_MODEL_SRC_RARE : SEEDLING_MODEL_SRC_NORMAL
     GltfContainer.create(e, { src, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
     v.plant = e
@@ -186,7 +196,8 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
   // scale/offsets); rarity effects are layered on by plantVfx.
   const species = plantSpeciesById(v.flower)
   if (species) {
-    Transform.create(e, { position: { x: pos.x + species.offsetX, y: BOX_MODEL_RIM_Y + species.baseYOffset, z: pos.z + species.offsetZ }, scale: { x: species.scale, y: species.scale, z: species.scale } })
+    const at = planterPoint(pos, species.offsetX, species.offsetZ)   // footprint-centring offset turns with the planter
+    Transform.create(e, { position: { x: at.x, y: BOX_MODEL_RIM_Y + species.baseYOffset, z: at.z }, rotation: planterRotation(pos), scale: { x: species.scale, y: species.scale, z: species.scale } })
     GltfContainer.create(e, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
     attachPlantVfx(v.boxId, e, species.id, v.rarityTier, { x: pos.x, y: BOX_MODEL_RIM_Y, z: pos.z })
   } else {
@@ -204,16 +215,16 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
  *  Removing it made the Unity explorer's ResetMaterialSystem throw (it restores the
  *  Text.002 override's material on a GLB already being torn down — KJ log 2026-09-18
  *  15:40, on harvest), and every replant re-loaded the GLB and re-synced its clip. */
-function setBalloonVisual(v: BoxView, pos: { x: number; z: number }): void {
+function setBalloonVisual(v: BoxView, pos: PlanterPos): void {
   if (v.balloon === null) createBalloon(v, pos)
   const k = v.owner ? BOX_MODEL_SCALE : 0
   const tr = Transform.getMutable(v.balloon!)
   if (tr.scale.x !== k) tr.scale = { x: k, y: k, z: k }
 }
 
-function createBalloon(v: BoxView, pos: { x: number; z: number }): void {
+function createBalloon(v: BoxView, pos: PlanterPos): void {
   const balloon = engine.addEntity()
-  Transform.create(balloon, { position: { x: pos.x, y: 0, z: pos.z }, scale: { x: 0, y: 0, z: 0 } })
+  Transform.create(balloon, { position: { x: pos.x, y: 0, z: pos.z }, rotation: planterRotation(pos), scale: { x: 0, y: 0, z: 0 } })
   GltfContainer.create(balloon, { src: BALLOON_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
   // Hide the baked "Harvest in" mesh (KJ's GLB left untouched) — the live text below replaces it
   GltfNodeModifiers.create(balloon, { modifiers: [{
@@ -308,14 +319,15 @@ function onTap(v: BoxView): void {
 // Setup
 // ---------------------------------------------------------------
 
-function createBox(p: { id: string; x: number; z: number }): BoxView {
+function createBox(p: PlanterPos & { id: string }): BoxView {
   // KJ's planter template. The GLB has no _collider mesh, so the visible meshes
   // carry both pointer (tap) and physics (walkable) collision.
   const base = engine.addEntity()
-  Transform.create(base, { position: { x: p.x, y: 0, z: p.z }, scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
+  Transform.create(base, { position: { x: p.x, y: 0, z: p.z }, rotation: planterRotation(p), scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
   GltfContainer.create(base, { src: BOX_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS })
 
-  const sign  = createSign({ x: p.x, y: PLAQUE_Y, z: p.z + PLAQUE_OFFSET_Z }, 180, PLAQUE_SIZE, PLAQUE_FONT, false)
+  const at    = planterPoint(p, 0, PLAQUE_OFFSET_Z)   // on the planter's front board
+  const sign  = createSign({ x: at.x, y: PLAQUE_Y, z: at.z }, (180 + p.rot) % 360, PLAQUE_SIZE, PLAQUE_FONT, false)
   const label = sign.text
 
   const v: BoxView = { boxId: p.id, base, label, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
