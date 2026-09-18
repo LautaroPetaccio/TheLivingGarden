@@ -104,7 +104,12 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       uiBackground={{ color: g.key === selectedKey ? { ...MOSS, a: 0.55 } : RAISED }}
       onMouseDown={() => { selectedKey = selectedKey === g.key ? '' : g.key; giftMode = false }}
     >
-      <UiEntity uiTransform={{ width: px(60), height: px(60) }} uiBackground={{ textureMode: 'stretch', texture: { src: thumbSrc(g.flower) } }} />
+      {plantSpeciesById(g.flower)
+        ? <UiEntity uiTransform={{ width: px(60), height: px(60) }} uiBackground={{ textureMode: 'stretch', texture: { src: thumbSrc(g.flower) } }} />
+        : /* pre-catalog keepsake (Tulip/Poppy/Daisy/Moonbloom/Sunflare, old two-tier list): no species → no thumbnail */
+          <UiEntity uiTransform={{ width: px(60), height: px(60), alignItems: 'center', justifyContent: 'center' }}>
+            <UiEntity uiTransform={{ width: px(36), height: px(36), borderRadius: px(18) }} uiBackground={{ color: { ...rarityTierById(g.rarityTier).seedColor, a: 1 } }} />
+          </UiEntity>}
       <UiEntity uiTransform={{ positionType: 'absolute', position: { top: px(6), right: px(6) }, width: px(14), height: px(14), borderRadius: px(7) }} uiBackground={{ color: { ...rarityTierById(g.rarityTier).seedColor, a: 1 } }} />
       <Label value={g.count > 1 ? `${speciesName(g.flower)} x${g.count}` : speciesName(g.flower)} fontSize={fs(12)} color={CREAM} textAlign="middle-center" textWrap="wrap" uiTransform={{ width: '100%', height: fs(34), padding: { left: px(4), right: px(4) } }} />
       <Label value={isHeld(g) ? 'in hand' : ''} fontSize={fs(11)} color={{ ...MOSS, g: 0.8 }} textAlign="middle-center" uiTransform={{ width: '100%', height: fs(14) }} />
@@ -136,7 +141,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
 
       {/* my flowers */}
       <UiEntity uiTransform={{ width: '100%', height: fs(28), flexDirection: 'row', alignItems: 'center' }}>
-        <Label value="My flowers" fontSize={fs(19)} color={CREAM} textAlign="middle-left" uiTransform={{ flexGrow: 1, height: '100%' }} />
+        <Label value="My flowers" fontSize={fs(19)} color={CREAM} textAlign="middle-left" uiTransform={{ flexGrow: 1, flexShrink: 0, height: '100%' }} />
         <Label value={`${getFlowers().length} kept - ${speciesFound}/${PLANT_SPECIES.length} species found`} fontSize={fs(14)} color={DIM} textAlign="middle-right" uiTransform={{ height: '100%' }} />
       </UiEntity>
       <Label value="Harvest an opened planter, or receive a gift" fontSize={fs(14)} color={{ ...DIM, a: 0.7 }} textAlign="middle-left" uiTransform={{ display: groups.length === 0 ? 'flex' : 'none', width: '100%', height: fs(26), margin: { top: px(6) } }} />

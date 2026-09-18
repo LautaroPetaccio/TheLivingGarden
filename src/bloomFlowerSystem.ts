@@ -145,6 +145,9 @@ export function startBloomFlower(contributorNames: string[]): void {
  * Remove the attached flower immediately.
  * Any in-progress auto-stop timer is invalidated via the gen-counter.
  */
+/** True while the contributor's hand-flower is attached (giftSystem hides the held keepsake then). */
+export function isBloomFlowerActive(): boolean { return flowerParentEnt !== null }
+
 export function stopBloomFlower(): void {
   flowerGen++
   if (flowerParentEnt !== null) {
