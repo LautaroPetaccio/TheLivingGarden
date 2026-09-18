@@ -25,6 +25,7 @@ import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import { demoSeedlings, demoRevealedFlowers } from './boxSystem'
+import { vfxFlags, setVfxFlag } from './plantVfx'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -275,6 +276,20 @@ export function TestPanelUi() {
           onMouseDown={() => (getTestPotCount() > 0 ? removeTestPots() : spawnTestPots())}
         >
           <Label value={getTestPotCount() > 0 ? `Remove ${getTestPotCount()} test planters  (${getFps()} fps)` : `Spawn 100 test planters  (${getFps()} fps)`} fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Rarity VFX A/B — flip one family off, watch the fps above */}
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value="Rarity pulse (material)" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={vfxFlags.pulse} onChange={v => setVfxFlag('pulse', v)} />
+        </UiEntity>
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value="Rarity particles" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={vfxFlags.particles} onChange={v => setVfxFlag('particles', v)} />
+        </UiEntity>
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value="Rarity point lights" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={vfxFlags.lights} onChange={v => setVfxFlag('lights', v)} />
         </UiEntity>
 
         {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}

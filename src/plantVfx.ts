@@ -16,9 +16,13 @@
 // Unity explorer every material change restarts that material's (async, throttled) load,
 // so a continuous 12 Hz float never finished loading and no pulse was ever visible
 // (KJ 2026-09-18). A handful of repeating states become material-cache hits instead.
+// Each step is still a main-thread material rebuild, so the step count and period are the
+// perf knobs: 3 levels = 4 rebuilds per period (was 8 with 5 levels).
+// The Exotic sway is a renderer-side Tween (was a per-frame Transform write).
+// vfxFlags lets the dev test panel switch each effect off live for fps A/B checks.
 // =============================================================
 
-import { engine, Entity, Transform, GltfNodeModifiers, ParticleSystem, Material, MaterialTransparencyMode, LightSource } from '@dcl/sdk/ecs'
+import { engine, Entity, Transform, GltfNodeModifiers, ParticleSystem, Material, MaterialTransparencyMode, LightSource, Tween, TweenSequence } from '@dcl/sdk/ecs'
 import { Color4, Quaternion } from '@dcl/sdk/math'
 import { isMobile } from '@dcl/sdk/platform'
 import { SPARKLE_SRC } from './shared/config'
@@ -27,6 +31,8 @@ import { PLANT_MATERIALS, PlantNodeMaterial } from './plantMaterials'
 // const enums in @dcl/ecs internals, not re-exported (same as Clean The Club's stinkSystem)
 const PSB_ADD    = 1
 const PS_PLAYING = 0
+const EF_EASESINE = 6   // EasingFunction
+const TL_YOYO     = 1   // TweenLoop
 
 type RGB = { r: number; g: number; b: number }
 const GREEN       = { r: 0.204, g: 0.808, b: 0.463 }
@@ -47,20 +53,21 @@ interface TierVfx {
 }
 // TUNING — every number here. Each tier must read as clearly MORE than the one below.
 const TIER_VFX: Record<number, TierVfx> = {
-  2: { pulse: { colors: [GREEN], mode: 'solid', periodS: 2.2, peak: 3 }, particles: null, light: 0, tween: false },
+  2: { pulse: { colors: [GREEN], mode: 'solid', periodS: 3.0, peak: 3 }, particles: null, light: 0, tween: false },
   3: { pulse: null, particles: { colors: [BLUE, ICE], rate: 30, max: 90, size: [0.05, 0.11] }, light: 0, tween: false },
-  4: { pulse: { colors: [DEEP_PURPLE, LAVENDER], mode: 'tonal', periodS: 1.8, peak: 5 }, particles: { colors: [PURPLE, LAVENDER], rate: 45, max: 120, size: [0.06, 0.13] }, light: 3_000, tween: false },
-  5: { pulse: { colors: [LIME, RED], mode: 'alternate', periodS: 1.4, peak: 7 }, particles: { colors: [LIME, RED], rate: 65, max: 170, size: [0.06, 0.15] }, light: 4_500, tween: true },
+  4: { pulse: { colors: [DEEP_PURPLE, LAVENDER], mode: 'tonal', periodS: 2.6, peak: 5 }, particles: { colors: [PURPLE, LAVENDER], rate: 45, max: 120, size: [0.06, 0.13] }, light: 3_000, tween: false },
+  5: { pulse: { colors: [LIME, RED], mode: 'alternate', periodS: 2.2, peak: 7 }, particles: { colors: [LIME, RED], rate: 65, max: 170, size: [0.06, 0.15] }, light: 4_500, tween: true },
 }
 
-const PULSE_LEVELS    = 5      // cached material states per colour (0 = no emissive)
+const PULSE_LEVELS    = 3      // cached material states per colour (0 = no emissive) — each step = one material rebuild
 const SPARKLE_RADIUS  = 0.38   // m — emitter sphere around the plant
 const SPARKLE_Y       = 0.30   // m above the soil — roughly the middle of a 0.55 m plant
 const LIGHT_Y         = 0.45   // m above the soil
 const TWEEN_YAW_DEG   = 18     // Exotic: sway, not a spin (off-centre model origins would orbit)
 const TWEEN_YAW_S     = 6
-const TWEEN_SCALE     = 0.09
-const TWEEN_SCALE_S   = 4
+
+/** Dev A/B switches (test panel). Runtime only; production keeps everything on. */
+export const vfxFlags = { pulse: true, particles: true, lights: true }
 
 interface Active {
   plant:     Entity
@@ -68,7 +75,6 @@ interface Active {
   def:       TierVfx
   emitter:   Entity | null
   light:     Entity | null
-  baseScale: number
   phase:     number
   sentKey:   string   // last pulse state sent — re-send only when it changes
 }
@@ -93,7 +99,7 @@ export function attachPlantVfx(key: string, plant: Entity, speciesId: string, ti
       initialColor: { start: Color4.create(a.r, a.g, a.b, 1), end: Color4.create(b.r, b.g, b.b, 1) },
       colorOverTime: { start: Color4.create(1, 1, 1, 1), end: Color4.create(1, 1, 1, 0) },
       texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ADD,
-      loop: true, prewarm: true, active: true, playbackState: PS_PLAYING,
+      loop: true, prewarm: false, active: vfxFlags.particles, playbackState: PS_PLAYING,   // prewarm simulated a full lifetime on the spawn frame
     })
   }
   // Real light is desktop-only for the same reason as the moonlight: godot-explorer's
@@ -103,15 +109,36 @@ export function attachPlantVfx(key: string, plant: Entity, speciesId: string, ti
     light = engine.addEntity()
     Transform.create(light, { position: { x: soil.x, y: soil.y + LIGHT_Y, z: soil.z } })
     const c = def.pulse?.colors[0] ?? { r: 1, g: 1, b: 1 }
-    LightSource.create(light, { active: true, color: c, intensity: 0, shadow: false, type: { $case: 'point', point: {} } })
+    LightSource.create(light, { active: vfxFlags.lights, color: c, intensity: 0, shadow: false, type: { $case: 'point', point: {} } })
   }
   active.set(key, {
     plant, emitter, light, def,
     mats: PLANT_MATERIALS[speciesId] ?? [],
-    baseScale: Transform.get(plant).scale.x,
     phase: Math.random() * 10,
     sentKey: '',
   })
+  if (def.tween) {
+    // Sway −yaw → +yaw → back, sine-eased, looping in the renderer
+    const half = TWEEN_YAW_S * 500
+    const base = Transform.get(plant).rotation
+    const l = Quaternion.multiply(base, Quaternion.fromEulerDegrees(0, -TWEEN_YAW_DEG, 0))
+    const r = Quaternion.multiply(base, Quaternion.fromEulerDegrees(0, TWEEN_YAW_DEG, 0))
+    Tween.createOrReplace(plant, { duration: half, easingFunction: EF_EASESINE, mode: { $case: 'rotate', rotate: { start: l, end: r } } })
+    TweenSequence.createOrReplace(plant, { sequence: [], loop: TL_YOYO })
+  }
+}
+
+/** Test panel: switch one effect family on/off on every live flower. */
+export function setVfxFlag(name: keyof typeof vfxFlags, on: boolean): void {
+  vfxFlags[name] = on
+  for (const a of active.values()) {
+    if (name === 'particles' && a.emitter !== null) ParticleSystem.getMutable(a.emitter).active = on
+    if (name === 'lights' && a.light !== null) LightSource.getMutable(a.light).active = on
+    if (name === 'pulse') {
+      a.sentKey = ''
+      if (!on && GltfNodeModifiers.has(a.plant)) GltfNodeModifiers.deleteFrom(a.plant)
+    }
+  }
 }
 
 /** Remove particles + light; the caller owns the plant entity (its override goes with it). */
@@ -129,7 +156,7 @@ function lerp(a: RGB, b: RGB, t: number): RGB {
 
 function applyPulse(a: Active, now: number): void {
   const p = a.def.pulse
-  if (!p) return
+  if (!p || !vfxFlags.pulse) return
   const t = (now + a.phase) / p.periodS
   const cycle = Math.floor(t)
   const level = Math.round(Math.sin(Math.PI * (t - cycle)) * (PULSE_LEVELS - 1))   // 0 → top → 0; colour swaps at 0
@@ -168,15 +195,7 @@ function applyPulse(a: Active, now: number): void {
 function plantVfxSystem(): void {
   if (active.size === 0) return
   const now = Date.now() / 1000
-  for (const a of active.values()) {
-    applyPulse(a, now)
-    if (a.def.tween) {
-      const tr = Transform.getMutable(a.plant)
-      const k = a.baseScale * (1 + TWEEN_SCALE * Math.sin((now + a.phase) / TWEEN_SCALE_S * Math.PI * 2))
-      tr.scale = { x: k, y: k, z: k }
-      tr.rotation = Quaternion.fromEulerDegrees(0, TWEEN_YAW_DEG * Math.sin((now + a.phase) / TWEEN_YAW_S * Math.PI * 2), 0)
-    }
-  }
+  for (const a of active.values()) applyPulse(a, now)
 }
 
 let started = false
