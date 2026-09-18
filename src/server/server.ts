@@ -41,6 +41,8 @@ import {
   seedSpawnCount,
   seedRareChance,
   rollSeedTier,
+  rollTierAtLeast,
+  GUARANTEED_RARE_AT_CONTRIBUTORS,
   rollPlantSpecies,
   RARITY_TIERS,
   SEED_LIFETIME_MS,
@@ -72,6 +74,7 @@ let   countdownPaused  = false
 let   bloomScale       = 1                    // bloomScaleFor(gardeners) of the active bloom
 let   bloomVariant     = 'classic'            // BLOOM_VARIANTS id of the active bloom (Phase 6)
 let   bloomDuration    = BLOOM_RESET_DELAY_MS // ms length of the active bloom (bloomDurationMs)
+let   bloomSeedContributors = 1               // contributors at fire time — seed count + rarity
 /** Players who watered since the last reset — the bloom's length scales with them. */
 const cycleContributors = new Set<string>()
 
@@ -478,7 +481,9 @@ function triggerBloom(forcedVariant = ''): void {
   const variant  = forcedVariant ? bloomVariantById(forcedVariant) : rollBloomVariant(bloomScale)
   bloomVariant   = variant.id
   // Forced (test-panel) blooms are full-scale, so full length too
-  bloomDuration  = forcedVariant ? BLOOM_RESET_DELAY_MS : bloomDurationMs(cycleContributors.size)
+  // Forced (test-panel) blooms count as a full 6-contributor bloom
+  bloomSeedContributors = forcedVariant ? 6 : Math.max(1, cycleContributors.size)
+  bloomDuration  = forcedVariant ? BLOOM_RESET_DELAY_MS : bloomDurationMs(bloomSeedContributors)
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name}, ${cycleContributors.size} contributor(s) → ${bloomDuration / 60_000} min)`)
   room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration })
   scheduleSeedWaves()
@@ -515,13 +520,13 @@ const seedWaveTimers: Array<ReturnType<typeof setTimeout>> = []
 
 function scheduleSeedWaves(): void {
   cancelSeedWaves()
-  const total  = seedSpawnCount(bloomScale)
+  const total  = seedSpawnCount(bloomSeedContributors)
   const window = Math.max(0, bloomDuration - SEED_LAST_WAVE_BEFORE_END_MS)
   const waves  = Math.max(1, Math.min(total, Math.floor(window / SEED_WAVE_GAP_MS) + 1))
   const gap    = waves > 1 ? window / (waves - 1) : 0
   for (let w = 0; w < waves; w++) {
     const n = Math.floor(total / waves) + (w < total % waves ? 1 : 0)
-    if (w === 0) { spawnBloomSeeds(n); continue }
+    if (w === 0) { spawnBloomSeeds(n, bloomSeedContributors >= GUARANTEED_RARE_AT_CONTRIBUTORS); continue }
     seedWaveTimers.push(setTimeout(() => executeTask(async () => { if (bloomActive) spawnBloomSeeds(n) }), Math.round(gap * w)))
   }
   console.log(`[Server] Seed trickle: ${total} seeds in ${waves} wave(s) over ${Math.round(window / 1000)}s`)
@@ -532,8 +537,9 @@ function cancelSeedWaves(): void {
   seedWaveTimers.length = 0
 }
 
-/** Roll and broadcast one wave of seeds — rarity scales with bloom size. */
-function spawnBloomSeeds(count: number): void {
+/** Roll and broadcast one wave of seeds — rarity scales with contributors.
+ *  `guaranteeRare`: this wave's first seed is Rare or better (4+ contributors). */
+function spawnBloomSeeds(count: number, guaranteeRare = false): void {
   const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult
   const now          = Date.now()
   const batch: SeedRecord[] = []
@@ -542,7 +548,7 @@ function spawnBloomSeeds(count: number): void {
       id:         `seed_${now}_${seedCounter++}`,
       x:          GARDEN_BOUNDS.xMin + Math.random() * (GARDEN_BOUNDS.xMax - GARDEN_BOUNDS.xMin),
       z:          GARDEN_BOUNDS.zMin + Math.random() * (GARDEN_BOUNDS.zMax - GARDEN_BOUNDS.zMin),
-      rarityTier: rollSeedTier(bloomScale, rareSeedMult),
+      rarityTier: guaranteeRare && i === 0 ? rollTierAtLeast(2) : rollSeedTier(bloomSeedContributors, rareSeedMult),
       spawnedAt:  now,
       gatheredBy: new Set(),
     }
@@ -552,7 +558,7 @@ function spawnBloomSeeds(count: number): void {
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
     sendSeed(seed)
   }
-  console.log(`[Server] Seed wave: ${count} seeds (${batch.filter(s => s.rarityTier > 0).length} above Common, scale ${bloomScale.toFixed(2)})`)
+  console.log(`[Server] Seed wave: ${count} seeds (${batch.filter(s => s.rarityTier > 0).length} above Common, ${bloomSeedContributors} contributor(s)${guaranteeRare ? ', 1 guaranteed Rare+' : ''})`)
 }
 
 /** Seeds this player can still collect — for joins/resyncs mid-bloom. */

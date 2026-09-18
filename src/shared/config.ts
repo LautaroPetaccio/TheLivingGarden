@@ -36,32 +36,33 @@ export function bloomScaleFor(gardeners: number): number {
 // ── v2: bloom seeds (GDD §3 step 3, §6 walk-through gathering) ──
 // Seeds are a SHARED spectacle with PER-PLAYER pickup: every player sees the same
 // rain and may collect each seed once — nobody takes a seed from anyone else.
-// Yield and rarity scale with BLOOM SIZE (GDD: "more gardeners means bigger,
-// rarer blooms"), not with head-count, since everyone gets the whole drop.
-export const SEEDS_AT_SOLO      = 4         // TUNING — quiet solo bloom (scale ≈0.32)
-export const SEEDS_AT_FULL      = 8         // TUNING — full-garden bloom (scale 1)
+// Yield and rarity scale with CONTRIBUTORS — players who watered this cycle (KJ
+// 2026-09-18), same count as the bloom's length. Since everyone collects every seed,
+// count is capped (~×2.5) and the group reward goes into RARITY instead (~×3), plus a
+// guaranteed Rare-or-better seed when enough gardeners bloom together.
+const SEEDS_BY_CONTRIBUTORS     = [4, 5, 6, 7, 8, 10]            // TUNING — 1..6+
+const RARE_MULT_BY_CONTRIBUTORS = [1, 1.4, 1.8, 2.2, 2.6, 3]     // TUNING — × SEED_RARE_AT_SOLO
 export const SEED_RARE_AT_SOLO  = 0.10      // TUNING — "mostly normal, occasionally rare"
-export const SEED_RARE_AT_FULL  = 0.20      // TUNING — full blooms roll rarer
+export const GUARANTEED_RARE_AT_CONTRIBUTORS = 4   // TUNING — one seed of tier ≥ Rare from here
 export const SEED_FALL_MS       = 5_000     // drift-down duration from spawn height to ground
 export const SEED_LIFETIME_MS   = 120_000   // ungathered seeds fade after 2 min (the trickle's last wave lands 1 min before the end)
 export const SEED_GATHER_RADIUS = 2.0       // m — walking this close starts the drift toward you
 export const SEED_COLLECT_RADIUS = 0.7      // m — seed this close is gathered (client sends request)
 export const SEED_SPAWN_HEIGHT  = 7         // m — seeds fall from the bloom canopy
 
-/** Seeds dropped by a bloom of `bloomScale` (thresholdAtFire / full, 0–1]. */
-export function seedSpawnCount(bloomScale: number): number {
-  const s = Math.max(0, Math.min(1, bloomScale))
-  return Math.round(SEEDS_AT_SOLO + (SEEDS_AT_FULL - SEEDS_AT_SOLO) * s)
+const byContributors = <T>(table: ReadonlyArray<T>, contributors: number): T =>
+  table[Math.max(1, Math.min(table.length, contributors)) - 1]
+
+/** Seeds a bloom drops in total (across all its trickle waves). */
+export function seedSpawnCount(contributors: number): number {
+  return byContributors(SEEDS_BY_CONTRIBUTORS, contributors)
 }
 
-/** Chance a seed rolls ABOVE Common, for a bloom of `bloomScale` — same meaning as
- *  before the 8-tier expansion (2026-09-18), just no longer a flat rare/not-rare
- *  split; see rollSeedTier below for what it rolls into. `rareSeedMult` is
- *  BLOOM_VARIANTS' per-variant boost (moonlit blooms roll rarer). */
-export function seedRareChance(bloomScale: number, rareSeedMult = 1): number {
-  const s = Math.max(0, Math.min(1, bloomScale))
-  const base = SEED_RARE_AT_SOLO + (SEED_RARE_AT_FULL - SEED_RARE_AT_SOLO) * s
-  return Math.min(1, base * rareSeedMult)
+/** Chance a seed rolls ABOVE Common: 10% solo → 30% at 6+ contributors. `rareSeedMult`
+ *  is BLOOM_VARIANTS' per-variant boost (moonlit blooms roll rarer); capped at 1. See
+ *  rollSeedTier for what "above Common" rolls into. */
+export function seedRareChance(contributors: number, rareSeedMult = 1): number {
+  return Math.min(1, SEED_RARE_AT_SOLO * byContributors(RARE_MULT_BY_CONTRIBUTORS, contributors) * rareSeedMult)
 }
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */
@@ -403,15 +404,21 @@ const TIER_ROLL_WEIGHTS: ReadonlyArray<number> = [55, 30, 10, 4, 1]   // tier 1.
 
 /** Rolls a rarity tier for a newly-spawned seed: seedRareChance(...) decides whether
  *  it beats Common at all, then this weights which of Uncommon..Exotic it lands on. */
-export function rollSeedTier(bloomScale: number, rareSeedMult = 1): number {
-  if (Math.random() >= seedRareChance(bloomScale, rareSeedMult)) return 0   // Common
-  const total = TIER_ROLL_WEIGHTS.reduce((a, b) => a + b, 0)
-  let r = Math.random() * total
-  for (let i = 0; i < TIER_ROLL_WEIGHTS.length; i++) {
-    r -= TIER_ROLL_WEIGHTS[i]
-    if (r <= 0) return i + 1
+export function rollSeedTier(contributors: number, rareSeedMult = 1): number {
+  if (Math.random() >= seedRareChance(contributors, rareSeedMult)) return 0   // Common
+  return rollTierAtLeast(1)
+}
+
+/** A tier ≥ `minTier` (1..5) by TIER_ROLL_WEIGHTS — the guaranteed Rare+ seed uses 2. */
+export function rollTierAtLeast(minTier: number): number {
+  const from    = Math.max(1, Math.min(TIER_ROLL_WEIGHTS.length, minTier))
+  const weights = TIER_ROLL_WEIGHTS.slice(from - 1)
+  let r = Math.random() * weights.reduce((a, b) => a + b, 0)
+  for (let i = 0; i < weights.length; i++) {
+    r -= weights[i]
+    if (r <= 0) return from + i
   }
-  return 1
+  return from
 }
 
 /** Rolls a species for a revealed plant — uniform across the committed catalog for now
