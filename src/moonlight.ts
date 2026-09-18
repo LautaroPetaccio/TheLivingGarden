@@ -19,6 +19,7 @@ import {
   engine, Entity, Transform, MeshRenderer, Material, MaterialTransparencyMode,
   Billboard, BillboardMode, SkyboxTime, TransitionMode, LightSource,
 } from '@dcl/sdk/ecs'
+import { isMobile } from '@dcl/sdk/platform'
 import { GARDEN_BOUNDS, BLOOM_CENTER, SPARKLE_SRC } from './shared/config'
 
 const NIGHT_TIME_S   = 0        // seconds since 00:00 — midnight
@@ -38,14 +39,27 @@ const GLOW_Y         = BLOOM_CENTER.y + 2.4
 const GLOW_SIZE_MIN  = 3.2
 const GLOW_SIZE_MAX  = 3.9
 const GLOW_BREATHE_S = 4.5
+// Mobile has no real LightSource (see below) — the glow sprite carries the whole
+// effect there, so it runs noticeably bigger to compensate.
+const GLOW_MOBILE_MULT = 1.45
 
 // A real dynamic light alongside the glow sprite — the sprite is self-illuminating and
 // doesn't tint anything around it; this actually casts moon-blue light onto the garden.
-// KJ 2026-09-17: "would be awesome to add a blue tinted light over the bloom".
+// KJ 2026-09-17: "would be awesome to add a blue tinted light over the bloom". First
+// version (intensity 30k, forced range 22m) was too dim to notice — per the SDK docs,
+// intensity 160k is what gives ~20m of real visibility; range is left auto (intensity^0.25)
+// rather than forced, matching the documented pattern.
+// DESKTOP ONLY (isMobile() check in startMoonlight): KJ reported flicker + a "following"
+// look on mobile — that matches a known godot-explorer bug where LightSource causes
+// visible artifacts at Medium/High graphics quality (github.com/decentraland/
+// godot-explorer#2868). It's a client bug, not fixable from scene code, so mobile skips
+// the real light entirely and leans on the boosted glow sprite instead. Also bumped
+// intensity further for desktop, where KJ still found it weak even at High quality.
+// NOTE FOR KJ: dynamic lights are capped per graphics-quality preset and fully OFF at
+// Very Low — a client setting, not something the scene can override.
 const LIGHT_Y         = BLOOM_CENTER.y + 3.5
 const LIGHT_COLOR     = { r: 0.55, g: 0.72, b: 1.0 }
-const LIGHT_INTENSITY = 30_000
-const LIGHT_RANGE     = 22   // metres — reaches across the whole garden from the center
+const LIGHT_INTENSITY = 260_000
 
 interface Wisp {
   entity: Entity
@@ -84,7 +98,7 @@ function createLight(): void {
   const entity = engine.addEntity()
   Transform.create(entity, { position: { x: BLOOM_CENTER.x, y: LIGHT_Y, z: BLOOM_CENTER.z } })
   LightSource.create(entity, {
-    active: false, color: LIGHT_COLOR, intensity: LIGHT_INTENSITY, range: LIGHT_RANGE,
+    active: false, color: LIGHT_COLOR, intensity: LIGHT_INTENSITY,
     shadow: false, type: { $case: 'point', point: {} },
   })
   lightEntity = entity
@@ -126,7 +140,8 @@ function wispSystem(dt: number): void {
   if (glowEntity !== null) {
     glowT += dt
     const breathe = (Math.sin((glowT / GLOW_BREATHE_S) * Math.PI * 2) + 1) / 2   // 0..1
-    const k = (GLOW_SIZE_MIN + breathe * (GLOW_SIZE_MAX - GLOW_SIZE_MIN)) * ramp
+    const mult = isMobile() ? GLOW_MOBILE_MULT : 1
+    const k = (GLOW_SIZE_MIN + breathe * (GLOW_SIZE_MAX - GLOW_SIZE_MIN)) * ramp * mult
     Transform.getMutable(glowEntity).scale = { x: k, y: k, z: k }
   }
   for (const w of wisps) {
@@ -151,8 +166,12 @@ export function startMoonlight(): void {
   glowT  = 0
   if (wisps.length === 0) createWisps()
   if (glowEntity === null) createGlow()
-  if (lightEntity === null) createLight()
-  if (lightEntity !== null) LightSource.getMutable(lightEntity).active = true
+  // Desktop (Unity) only — the real point light triggers a known godot-explorer
+  // artifact on mobile (flicker); mobile relies on the boosted glow sprite instead.
+  if (!isMobile()) {
+    if (lightEntity === null) createLight()
+    if (lightEntity !== null) LightSource.getMutable(lightEntity).active = true
+  }
   engine.addSystem(wispSystem, undefined, SYSTEM_NAME)
   console.log('[Moonlight] night falls')
 }

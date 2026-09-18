@@ -54,10 +54,14 @@ export function seedSpawnCount(bloomScale: number): number {
   return Math.round(SEEDS_AT_SOLO + (SEEDS_AT_FULL - SEEDS_AT_SOLO) * s)
 }
 
-/** Per-seed rare probability for a bloom of `bloomScale`. */
-export function seedRareChance(bloomScale: number): number {
+/** Chance a seed rolls ABOVE Common, for a bloom of `bloomScale` — same meaning as
+ *  before the 8-tier expansion (2026-09-18), just no longer a flat rare/not-rare
+ *  split; see rollSeedTier below for what it rolls into. `rareSeedMult` is
+ *  BLOOM_VARIANTS' per-variant boost (moonlit blooms roll rarer). */
+export function seedRareChance(bloomScale: number, rareSeedMult = 1): number {
   const s = Math.max(0, Math.min(1, bloomScale))
-  return SEED_RARE_AT_SOLO + (SEED_RARE_AT_FULL - SEED_RARE_AT_SOLO) * s
+  const base = SEED_RARE_AT_SOLO + (SEED_RARE_AT_FULL - SEED_RARE_AT_SOLO) * s
+  return Math.min(1, base * rareSeedMult)
 }
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */
@@ -132,18 +136,185 @@ export const BOX_MODEL_RIM_Y = 1.1 * BOX_MODEL_SCALE   // where the soil surface
  *  cluster — both are played simultaneously since it isn't confirmed which drives what. */
 export const BALLOON_MODEL_SRC   = 'assets/scene/Models/planterBalloon/planterBalloon.glb'
 export const BALLOON_ANIM_CLIPS  = ['balloons', 'balloons.001'] as const
-/** KJ's seedling model (2026-09-17) — one untextured plane, no material of its own.
- *  Stands in for the greybox sprout sphere while a box's seed is growing (unopened),
- *  tinted per rarity in code so it reads as a hint before the flower is revealed. */
-export const SEEDLING_MODEL_SRC = 'assets/scene/Models/seedling/seedling.glb'
+/** KJ's seedling model (2026-09-17), stands in for the greybox sprout sphere while a
+ *  box's seed is growing (unopened). The source file ships with no material — a
+ *  `Material` component on the GltfContainer entity does NOT retint an imported mesh
+ *  (that's not a thing GltfContainer supports; confirmed 2026-09-17 after the first
+ *  attempt showed no visible difference between rarities). The two rarity colors are
+ *  baked directly into two exported variants instead. */
+export const SEEDLING_MODEL_SRC_NORMAL = 'assets/scene/Models/seedling/seedling_normal.glb'
+export const SEEDLING_MODEL_SRC_RARE   = 'assets/scene/Models/seedling/seedling_rare.glb'
 /** TUNING — GDD: overnight scale, "an evening plant opens by next morning" (~10 h).
  *  Set to 2 minutes for the greybox playtest so the whole loop fits one session. */
 export const BOX_GROW_MS = 2 * 60_000
-/** Mystery-seed catalog: identity is rolled when the box opens. */
-export const FLOWERS = {
-  normal: ['Daisy', 'Tulip', 'Poppy'],
-  rare:   ['Moonbloom', 'Sunflare'],
-} as const
+
+// ── Rarity + plant species catalog (2026-09-18) ──────────────────────────────
+// KJ's expansion plan: 78 base models (77 from the original inventory + Void Tulip, a
+// bonus find kept 2026-09-18) from Foundation's public asset-packs (Pirates,
+// Genesis City, Fantasy, Halloween, Voxels, Western) x 6 procedural rarity tiers
+// (Common..Exotic) = 468 look combinations via color/VFX layering, no new art per
+// combination. Mythic and Unique are reserved for bespoke custom models (TBD),
+// outside this generic tier system. Foundation asset-packs GLBs carry no explicit
+// license — treat as CC BY-NC (non-commercial) pending KJ's conversation with
+// Foundation (in progress 2026-09-18).
+//
+// WIRED UP 2026-09-18 (Phase 2): messages.ts, server.ts, boxSystem.ts, seedSystem.ts,
+// playerInventory.ts, seedMenu.tsx, giftSystem.ts, ui.tsx, testPanel.tsx all roll and
+// carry rarityTier/species now — the old rare:boolean is gone. Not yet done: real
+// per-species flower/seedling models (still greybox spheres + a 2-color seedling GLB
+// tinted by tier bucket, not per-species) and the actual pulse/particle VFX layer
+// KJ's tier table calls for (only the seed/flower base COLOR is wired so far).
+
+export interface PlantSpecies {
+  id:          string   // stable id — also the asset folder name (disambiguated where
+                         // two packs happened to reuse the same one, e.g. 'cactus')
+  name:        string   // display name
+  pack:        string   // source Foundation asset pack, kept for licensing/attribution tracking
+  modelSrc:    string   // GLB path
+  // Every model was authored at its own scale/origin/up-axis. These are computed from
+  // each GLB's world-space bounds (accessor bounds pushed through the node hierarchy's
+  // rotation/scale/translation — raw accessor bounds alone mis-sized 29 of 78, e.g.
+  // Z-up voxel models and cm-authored meshes) so the largest dimension is ~0.55 m, the
+  // lowest point sits at y=0 and the footprint is centred on the box.
+  scale:       number
+  baseYOffset: number
+  offsetX:     number   // DCL metres; assumes explorers mirror glTF X (glTF +X = DCL -X)
+  offsetZ:     number
+}
+/** The 78 committed base models. */
+export const PLANT_SPECIES: ReadonlyArray<PlantSpecies> = [
+  { id: 'curly_magic_bean_sprout', name: 'Curly Magic Bean Sprout', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/curly_magic_bean_sprout/curly_magic_bean_sprout.glb', scale: 0.4318, baseYOffset: 0.0057, offsetX: -0.0123, offsetZ: 0.0605 },
+  { id: 'dracaena', name: 'Dracaena', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/dracaena/dracaena.glb', scale: 0.4089, baseYOffset: 0.0031, offsetX: -0.0081, offsetZ: 0.0017 },
+  { id: 'large_light_green_grass_mound', name: 'Large Light Green Grass Mound', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/large_light_green_grass_mound/large_light_green_grass_mound.glb', scale: 0.0847, baseYOffset: 0.0188, offsetX: -0.0104, offsetZ: -0.0209 },
+  { id: 'large_yellow-green_grass_mound', name: 'Large Yellow-Green Grass Mound', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/large_yellow-green_grass_mound/large_yellow-green_grass_mound.glb', scale: 0.0845, baseYOffset: 0.0015, offsetX: -0.0001, offsetZ: -0.0111 },
+  { id: 'magic_bean_sprout', name: 'Magic Bean Sprout', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/magic_bean_sprout/magic_bean_sprout.glb', scale: 0.4877, baseYOffset: 0.0013, offsetX: -0.0461, offsetZ: 0.0504 },
+  { id: 'mountain_ragweed', name: 'Mountain Ragweed', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/mountain_ragweed/mountain_ragweed.glb', scale: 0.4273, baseYOffset: 0.0125, offsetX: 0.1083, offsetZ: 0.0064 },
+  { id: 'nutsedge', name: 'Nutsedge', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/nutsedge/nutsedge.glb', scale: 0.6076, baseYOffset: 0.0037, offsetX: 0.009, offsetZ: 0.002 },
+  { id: 'purple_heart_plant', name: 'Purple Heart Plant', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/purple_heart_plant/purple_heart_plant.glb', scale: 0.4619, baseYOffset: -0.0, offsetX: 0.0052, offsetZ: 0.0775 },
+  { id: 'purple_oyster_plant', name: 'Purple Oyster Plant', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/purple_oyster_plant/purple_oyster_plant.glb', scale: 0.497, baseYOffset: -0.0005, offsetX: 0.0102, offsetZ: 0.0371 },
+  { id: 'shreed_plant', name: 'Shreed Plant', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/shreed_plant/shreed_plant.glb', scale: 0.3774, baseYOffset: 0.006, offsetX: -0.0243, offsetZ: 0.0951 },
+  { id: 'single_magic_bean_sprout', name: 'Single Magic Bean Sprout', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/single_magic_bean_sprout/single_magic_bean_sprout.glb', scale: 0.6086, baseYOffset: 0.0014, offsetX: 0.0188, offsetZ: -0.0 },
+  { id: 'small_green_grass_mound', name: 'Small Green Grass Mound', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/small_green_grass_mound/small_green_grass_mound.glb', scale: 0.168, baseYOffset: 0.0038, offsetX: 0.0137, offsetZ: -0.0067 },
+  { id: 'small_lighter_green_grass_mound', name: 'Small Lighter Green Grass Mound', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/small_lighter_green_grass_mound/small_lighter_green_grass_mound.glb', scale: 0.1771, baseYOffset: 0.0041, offsetX: 0.0092, offsetZ: -0.0133 },
+  { id: 'swamp_lily_pad', name: 'Swamp Lily Pad', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/swamp_lily_pad/swamp_lily_pad.glb', scale: 1.1633, baseYOffset: -0.019, offsetX: -0.0, offsetZ: 0.0035 },
+  { id: 'swamp_red_cactus', name: 'Swamp Red Cactus', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/swamp_red_cactus/swamp_red_cactus.glb', scale: 0.2731, baseYOffset: 0.0, offsetX: 0.0003, offsetZ: 0.0085 },
+  { id: 'sweet_geranium', name: 'Sweet Geranium', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/sweet_geranium/sweet_geranium.glb', scale: 0.3617, baseYOffset: 0.0082, offsetX: 0.0043, offsetZ: -0.0124 },
+  { id: 'three-spiked_grass', name: 'Three-Spiked Grass', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/three-spiked_grass/three-spiked_grass.glb', scale: 1.1145, baseYOffset: 0.0188, offsetX: 0.0047, offsetZ: 0.0876 },
+  { id: 'wild_chives', name: 'Wild Chives', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/wild_chives/wild_chives.glb', scale: 0.2772, baseYOffset: 0.0058, offsetX: 0.0036, offsetZ: 0.0558 },
+  { id: 'wild_long_mushrooms', name: 'Wild Long Mushrooms', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/wild_long_mushrooms/wild_long_mushrooms.glb', scale: 0.7344, baseYOffset: 0.006, offsetX: 0.0036, offsetZ: 0.0325 },
+  { id: 'yellow_croton_plant', name: 'Yellow Croton Plant', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/yellow_croton_plant/yellow_croton_plant.glb', scale: 0.3957, baseYOffset: -0.0072, offsetX: -0.0049, offsetZ: 0.0316 },
+  { id: 'balsam_flower', name: 'Balsam Flower', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/balsam_flower/balsam_flower.glb', scale: 0.4457, baseYOffset: 0.0006, offsetX: -0.0048, offsetZ: -0.0058 },
+  { id: 'birds_nest_fern', name: 'Birds Nest Fern', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/birds_nest_fern/birds_nest_fern.glb', scale: 0.5157, baseYOffset: -0.0124, offsetX: 0.0005, offsetZ: 0.0045 },
+  { id: 'genesis_cactus', name: 'Cactus', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/cactus/cactus.glb', scale: 0.3071, baseYOffset: 0.0122, offsetX: 0.0, offsetZ: 0.0178 },
+  { id: 'dandelion', name: 'Dandelion', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/dandelion/dandelion.glb', scale: 0.7793, baseYOffset: 0.0003, offsetX: 0.0093, offsetZ: 0.0684 },
+  { id: 'flower_sprouts', name: 'Flower Sprouts', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/flower_sprouts/flower_sprouts.glb', scale: 0.7001, baseYOffset: 0.0104, offsetX: 0.0528, offsetZ: 0.0429 },
+  { id: 'grass_sprout', name: 'Grass Sprout', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/grass_sprout/grass_sprout.glb', scale: 0.7863, baseYOffset: 0.0298, offsetX: -0.0244, offsetZ: 0.0011 },
+  { id: 'gypsy_mushroom', name: 'Gypsy Mushroom', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/gypsy_mushroom/gypsy_mushroom.glb', scale: 1.6652, baseYOffset: -0.0, offsetX: 0.0002, offsetZ: 0.0 },
+  { id: 'java_fern', name: 'Java Fern', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/java_fern/java_fern.glb', scale: 1.0099, baseYOffset: 0.0035, offsetX: 0.0208, offsetZ: -0.0132 },
+  { id: 'kangaroo_paws', name: 'Kangaroo Paws', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/kangaroo_paws/kangaroo_paws.glb', scale: 0.3869, baseYOffset: 0.0063, offsetX: 0.0188, offsetZ: -0.0399 },
+  { id: 'magenta_mushroom', name: 'Magenta Mushroom', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/magenta_mushroom/magenta_mushroom.glb', scale: 2.5405, baseYOffset: 0.0636, offsetX: -0.0893, offsetZ: 0.054 },
+  { id: 'maidenhair_fern', name: 'Maidenhair Fern', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/maidenhair_fern/maidenhair_fern.glb', scale: 0.63, baseYOffset: 0.0069, offsetX: -0.0293, offsetZ: -0.0516 },
+  { id: 'moss_rose', name: 'Moss Rose', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/moss_rose/moss_rose.glb', scale: 0.8545, baseYOffset: -0.0099, offsetX: 0.0096, offsetZ: -0.0164 },
+  { id: 'ostrich_ferns', name: 'Ostrich Ferns', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/ostrich_ferns/ostrich_ferns.glb', scale: 0.9194, baseYOffset: 0.0061, offsetX: 0.0101, offsetZ: -0.0243 },
+  { id: 'rose', name: 'Rose', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/rose/rose.glb', scale: 0.5522, baseYOffset: 0.0136, offsetX: 0.0124, offsetZ: -0.0188 },
+  { id: 'rose_head', name: 'Rose Head', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/rose_head/rose_head.glb', scale: 0.8369, baseYOffset: 0.0193, offsetX: 0.0476, offsetZ: -0.0017 },
+  { id: 'sunflower', name: 'Sunflower', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/sunflower/sunflower.glb', scale: 1.1275, baseYOffset: 0.0236, offsetX: -0.0568, offsetZ: -0.0829 },
+  { id: 'sunflower_head', name: 'Sunflower Head', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/sunflower_head/sunflower_head.glb', scale: 0.815, baseYOffset: 0.0018, offsetX: -0.0, offsetZ: -0.005 },
+  { id: 'sweet_pea', name: 'Sweet Pea', pack: 'genesis_city', modelSrc: 'assets/scene/Models/plants/genesis_city/sweet_pea/sweet_pea.glb', scale: 0.3951, baseYOffset: 0.0075, offsetX: 0.0437, offsetZ: -0.0355 },
+  { id: 'flower_01', name: 'Flower 01', pack: 'halloween', modelSrc: 'assets/scene/Models/plants/halloween/flower_01/flower_01.glb', scale: 2.0068, baseYOffset: 0.0041, offsetX: -0.0039, offsetZ: -0.0338 },
+  { id: 'flower_02', name: 'Flower 02', pack: 'halloween', modelSrc: 'assets/scene/Models/plants/halloween/flower_02/flower_02.glb', scale: 1.8143, baseYOffset: 0.0025, offsetX: -0.0053, offsetZ: -0.006 },
+  { id: 'pumpkin_leaf', name: 'Pumpkin Leaf', pack: 'halloween', modelSrc: 'assets/scene/Models/plants/halloween/pumpkin_leaf/pumpkin_leaf.glb', scale: 1.1499, baseYOffset: 0.0122, offsetX: -0.1067, offsetZ: -0.037 },
+  { id: 'pumpkin_leaf__2', name: 'Pumpkin Leaf  2', pack: 'halloween', modelSrc: 'assets/scene/Models/plants/halloween/pumpkin_leaf__2/pumpkin_leaf__2.glb', scale: 1.5643, baseYOffset: 0.0182, offsetX: -0.2681, offsetZ: 0.0482 },
+  { id: 'areca_palm', name: 'Areca Palm', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/areca_palm/areca_palm.glb', scale: 0.2141, baseYOffset: 0.0, offsetX: -0.0175, offsetZ: -0.0032 },
+  { id: 'bamboo', name: 'Bamboo', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/bamboo/bamboo.glb', scale: 0.1581, baseYOffset: 0.0002, offsetX: -0.0039, offsetZ: -0.0265 },
+  { id: 'bamboo_culms', name: 'Bamboo Culms', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/bamboo_culms/bamboo_culms.glb', scale: 0.1483, baseYOffset: -0.0009, offsetX: 0.0, offsetZ: -0.0039 },
+  { id: 'beach_fern', name: 'Beach Fern', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/beach_fern/beach_fern.glb', scale: 1.9661, baseYOffset: 0.0071, offsetX: 0.0341, offsetZ: 0.0015 },
+  { id: 'beachgrass', name: 'Beachgrass', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/beachgrass/beachgrass.glb', scale: 0.4657, baseYOffset: 0.012, offsetX: 0.0186, offsetZ: -0.0222 },
+  { id: 'beachgrass_fern', name: 'Beachgrass Fern', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/beachgrass_fern/beachgrass_fern.glb', scale: 0.4151, baseYOffset: -0.0023, offsetX: 0.0005, offsetZ: -0.0001 },
+  { id: 'bird_of_paradise', name: 'Bird Of Paradise', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/bird_of_paradise/bird_of_paradise.glb', scale: 1.4774, baseYOffset: -0.0187, offsetX: -0.0445, offsetZ: 0.1149 },
+  { id: 'blue_star_fern', name: 'Blue Star Fern', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/blue_star_fern/blue_star_fern.glb', scale: 1.0695, baseYOffset: 0.0092, offsetX: 0.0464, offsetZ: -0.0619 },
+  { id: 'cretan_brake_fern', name: 'Cretan Brake Fern', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/cretan_brake_fern/cretan_brake_fern.glb', scale: 1.0517, baseYOffset: -0.0005, offsetX: 0.047, offsetZ: -0.0248 },
+  { id: 'jungle_fern', name: 'Jungle Fern', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/jungle_fern/jungle_fern.glb', scale: 0.3237, baseYOffset: 0.001, offsetX: -0.0214, offsetZ: 0.0102 },
+  { id: 'lilypad', name: 'Lilypad', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/lilypad/lilypad.glb', scale: 0.6986, baseYOffset: 0.0005, offsetX: 0.0, offsetZ: -0.0294 },
+  { id: 'monstera_deliciosa', name: 'Monstera Deliciosa', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/monstera_deliciosa/monstera_deliciosa.glb', scale: 0.3209, baseYOffset: -0.0026, offsetX: 0.0288, offsetZ: 0.058 },
+  { id: 'musa_acuminata', name: 'Musa Acuminata', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/musa_acuminata/musa_acuminata.glb', scale: 0.2669, baseYOffset: -0.0028, offsetX: 0.038, offsetZ: 0.07 },
+  { id: 'plumeria', name: 'Plumeria', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/plumeria/plumeria.glb', scale: 0.5215, baseYOffset: -0.0068, offsetX: -0.0401, offsetZ: -0.003 },
+  { id: 'sand_reed', name: 'Sand Reed', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/sand_reed/sand_reed.glb', scale: 0.3378, baseYOffset: 0.0045, offsetX: -0.0167, offsetZ: -0.0143 },
+  { id: 'sand_weeds', name: 'Sand Weeds', pack: 'pirates', modelSrc: 'assets/scene/Models/plants/pirates/sand_weeds/sand_weeds.glb', scale: 0.4861, baseYOffset: 0.0127, offsetX: 0.0055, offsetZ: 0.0088 },
+  { id: 'voxels_cactus', name: 'Cactus', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/cactus/cactus.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: 0.0 },
+  { id: 'flower_red', name: 'Flower Red', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/flower_red/flower_red.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
+  { id: 'flower_yellow', name: 'Flower Yellow', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/flower_yellow/flower_yellow.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
+  { id: 'grass_long', name: 'Grass Long', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/grass_long/grass_long.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
+  { id: 'grass_long_2', name: 'Grass Long 2', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/grass_long_2/grass_long_2.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
+  { id: 'grass_medium', name: 'Grass Medium', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/grass_medium/grass_medium.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
+  { id: 'mushroom_brown', name: 'Mushroom Brown', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/mushroom_brown/mushroom_brown.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
+  { id: 'vegetation_flowers', name: 'Vegetation Flowers', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/vegetation_flowers/vegetation_flowers.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: 0.0 },
+  { id: 'cactus_1', name: 'Cactus 1', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_1/cactus_1.glb', scale: 0.1296, baseYOffset: 0.0077, offsetX: -0.0201, offsetZ: -0.0142 },
+  { id: 'cactus_2', name: 'Cactus 2', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_2/cactus_2.glb', scale: 0.1566, baseYOffset: 0.0111, offsetX: 0.0058, offsetZ: -0.0061 },
+  { id: 'cactus_3', name: 'Cactus 3', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_3/cactus_3.glb', scale: 0.1234, baseYOffset: 0.0046, offsetX: 0.009, offsetZ: -0.0022 },
+  { id: 'cactus_4', name: 'Cactus 4', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_4/cactus_4.glb', scale: 0.2242, baseYOffset: 0.0115, offsetX: 0.0351, offsetZ: -0.0407 },
+  { id: 'cactus_5', name: 'Cactus 5', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_5/cactus_5.glb', scale: 0.1271, baseYOffset: 0.0057, offsetX: -0.0444, offsetZ: -0.0112 },
+  { id: 'cactus_6', name: 'Cactus 6', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_6/cactus_6.glb', scale: 0.2062, baseYOffset: 0.0202, offsetX: 0.0158, offsetZ: -0.0173 },
+  { id: 'cactus_7', name: 'Cactus 7', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_7/cactus_7.glb', scale: 0.1734, baseYOffset: 0.0058, offsetX: 0.0215, offsetZ: -0.0214 },
+  { id: 'cactus_8', name: 'Cactus 8', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_8/cactus_8.glb', scale: 0.1699, baseYOffset: 0.0082, offsetX: -0.0016, offsetZ: 0.0078 },
+  { id: 'cactus_9', name: 'Cactus 9', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_9/cactus_9.glb', scale: 0.2829, baseYOffset: 0.0181, offsetX: 0.028, offsetZ: -0.0049 },
+  { id: 'plant_1', name: 'Plant 1', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/plant_1/plant_1.glb', scale: 0.2579, baseYOffset: 0.0467, offsetX: 0.0087, offsetZ: -0.0074 },
+  { id: 'plant_2', name: 'Plant 2', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/plant_2/plant_2.glb', scale: 0.1765, baseYOffset: 0.009, offsetX: 0.0166, offsetZ: -0.0153 },
+  // Bonus find, kept by KJ 2026-09-18 — not in the original 77-item list, but a real,
+  // on-theme flower.
+  { id: 'void_tulip', name: 'Void Tulip', pack: 'fantasy', modelSrc: 'assets/scene/Models/plants/fantasy/void_tulip/void_tulip.glb', scale: 0.3216, baseYOffset: 0.0046, offsetX: 0.0095, offsetZ: 0.0217 },
+]
+
+export interface RarityTierDef {
+  id:        number   // 0 = Common .. 7 = Unique
+  name:      string
+  seedColor: { r: number; g: number; b: number }
+  seedVfx:   string    // KJ's spec, in prose — translated into engine params when the VFX system is built
+  plantVfx:  string
+  custom:    boolean   // true for Mythic/Unique — bespoke, outside the generic tier engine
+}
+/** KJ's rarity spec (2026-09-18), following DCL wearable rarity conventions. */
+export const RARITY_TIERS: ReadonlyArray<RarityTierDef> = [
+  { id: 0, name: 'Common',    seedColor: { r: 0.451, g: 0.827, b: 0.827 }, seedVfx: 'None',  plantVfx: 'None', custom: false },
+  { id: 1, name: 'Uncommon',  seedColor: { r: 1.000, g: 0.514, b: 0.384 }, seedVfx: 'None',  plantVfx: 'None', custom: false },
+  { id: 2, name: 'Rare',      seedColor: { r: 0.204, g: 0.808, b: 0.463 }, seedVfx: 'Green pulse',  plantVfx: 'Green pulse', custom: false },
+  { id: 3, name: 'Epic',      seedColor: { r: 0.263, g: 0.561, b: 1.000 }, seedVfx: 'Blue pulse',   plantVfx: 'Blue particles', custom: false },
+  { id: 4, name: 'Legendary', seedColor: { r: 0.631, g: 0.294, b: 0.953 }, seedVfx: 'Purple pulse', plantVfx: 'Tonal purple pulse and particles', custom: false },
+  { id: 5, name: 'Exotic',    seedColor: { r: 0.608, g: 0.820, b: 0.255 }, seedVfx: 'Red pulse',    plantVfx: 'Alternating colour pulse, particles, slow scale/rotation tween', custom: false },
+  { id: 6, name: 'Mythic',    seedColor: { r: 1.000, g: 0.294, b: 0.929 }, seedVfx: 'Pink pulse',   plantVfx: 'Custom', custom: true },
+  { id: 7, name: 'Unique',    seedColor: { r: 0.996, g: 0.635, b: 0.090 }, seedVfx: 'Gold pulse',   plantVfx: 'Custom', custom: true },
+]
+export function rarityTierById(id: number): RarityTierDef {
+  return RARITY_TIERS[id] ?? RARITY_TIERS[0]
+}
+
+/** Relative odds among Uncommon..Exotic (tiers 1-5) once a seed rolls "above Common" —
+ *  see seedRareChance. Mythic/Unique (6, 7) are `custom` — no art yet, excluded from
+ *  general rolling until they have models. */
+const TIER_ROLL_WEIGHTS: ReadonlyArray<number> = [55, 30, 10, 4, 1]   // tier 1..5
+
+/** Rolls a rarity tier for a newly-spawned seed: seedRareChance(...) decides whether
+ *  it beats Common at all, then this weights which of Uncommon..Exotic it lands on. */
+export function rollSeedTier(bloomScale: number, rareSeedMult = 1): number {
+  if (Math.random() >= seedRareChance(bloomScale, rareSeedMult)) return 0   // Common
+  const total = TIER_ROLL_WEIGHTS.reduce((a, b) => a + b, 0)
+  let r = Math.random() * total
+  for (let i = 0; i < TIER_ROLL_WEIGHTS.length; i++) {
+    r -= TIER_ROLL_WEIGHTS[i]
+    if (r <= 0) return i + 1
+  }
+  return 1
+}
+
+/** Rolls a species for a revealed plant — uniform across the committed catalog for now
+ *  (all 78 equally likely); rarity tier is a fully separate axis, rolled independently
+ *  at the seed stage via rollSeedTier. */
+export function rollPlantSpecies(): string {
+  return PLANT_SPECIES[Math.floor(Math.random() * PLANT_SPECIES.length)].id
+}
+export function plantSpeciesById(id: string): PlantSpecies | null {
+  return PLANT_SPECIES.find(s => s.id === id) ?? null
+}
 
 // ── Test tooling ─────────────────────────────────────────────
 /** Wallets allowed to use test handlers that write PERMANENT data (lifetime board /

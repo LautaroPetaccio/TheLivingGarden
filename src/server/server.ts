@@ -37,11 +37,13 @@ import {
   ADMIN_ADDRESSES,
   seedSpawnCount,
   seedRareChance,
+  rollSeedTier,
+  rollPlantSpecies,
+  RARITY_TIERS,
   SEED_LIFETIME_MS,
   GARDEN_BOUNDS,
   BOX_POSITIONS,
   BOX_GROW_MS,
-  FLOWERS,
   BOX_CAP_DEFAULT,
   FLOWER_COLLECTION_CAP,
   BOX_WATER_SHAVE_MS,
@@ -480,7 +482,7 @@ interface SeedRecord {
   id:         string
   x:          number
   z:          number
-  rare:       boolean
+  rarityTier: number
   spawnedAt:  number
   gatheredBy: Set<string>   // addresses that already collected this seed (per-player pickup)
 }
@@ -490,22 +492,22 @@ let   seedCounter = 0
 
 /** Broadcast one seed (or send it to a specific joining player). */
 function sendSeed(seed: SeedRecord, to?: string[]): void {
-  const payload = { id: seed.id, x: seed.x, z: seed.z, rare: seed.rare, spawnedAt: seed.spawnedAt }
+  const payload = { id: seed.id, x: seed.x, z: seed.z, rarityTier: seed.rarityTier, spawnedAt: seed.spawnedAt }
   room.send('seedSpawned', payload, to ? { to } : undefined)
 }
 
 /** Roll and broadcast this bloom's seed drop — yield and rarity scale with bloom size. */
 function spawnBloomSeeds(): void {
-  const count      = seedSpawnCount(bloomScale)
-  const rareChance = Math.min(1, seedRareChance(bloomScale) * bloomVariantById(bloomVariant).rareSeedMult)
-  const now        = Date.now()
+  const count        = seedSpawnCount(bloomScale)
+  const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult
+  const now          = Date.now()
   const batch: SeedRecord[] = []
   for (let i = 0; i < count; i++) {
     const seed: SeedRecord = {
       id:         `seed_${now}_${seedCounter++}`,
       x:          GARDEN_BOUNDS.xMin + Math.random() * (GARDEN_BOUNDS.xMax - GARDEN_BOUNDS.xMin),
       z:          GARDEN_BOUNDS.zMin + Math.random() * (GARDEN_BOUNDS.zMax - GARDEN_BOUNDS.zMin),
-      rare:       Math.random() < rareChance,
+      rarityTier: rollSeedTier(bloomScale, rareSeedMult),
       spawnedAt:  now,
       gatheredBy: new Set(),
     }
@@ -515,7 +517,7 @@ function spawnBloomSeeds(): void {
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
     sendSeed(seed)
   }
-  console.log(`[Server] Spawned ${count} bloom seeds (${batch.filter(s => s.rare).length} rare, scale ${bloomScale.toFixed(2)})`)
+  console.log(`[Server] Spawned ${count} bloom seeds (${batch.filter(s => s.rarityTier > 0).length} above Common, scale ${bloomScale.toFixed(2)})`)
 }
 
 /** Seeds this player can still collect — for joins/resyncs mid-bloom. */
@@ -524,7 +526,9 @@ function remainingSeeds(address: string): SeedRecord[] {
   return [...activeSeeds.values()].filter(s => s.spawnedAt > cutoff && !s.gatheredBy.has(address))
 }
 
-interface SeedPouch { normal: number; rare: number }
+/** Seed counts per rarity tier, index = tier id (0 = Common .. RARITY_TIERS.length-1). */
+type SeedPouch = number[]
+function emptyPouch(): SeedPouch { return new Array(RARITY_TIERS.length).fill(0) }
 
 // In-memory pouch per player is the source of truth for the session; Storage is
 // write-through. Without this, concurrent gathers each read→modified→wrote the
@@ -535,10 +539,21 @@ const pouchWrites = new Map<string, Promise<void>>()      // address → last qu
 async function loadPouch(address: string): Promise<SeedPouch> {
   const live = pouches.get(address)
   if (live) return live
-  let pouch: SeedPouch = { normal: 0, rare: 0 }
+  let pouch: SeedPouch = emptyPouch()
   try {
     const raw = await Storage.player.get<string>(address, 'seeds')
-    if (raw) pouch = JSON.parse(raw)
+    if (raw) {
+      const parsed = JSON.parse(raw)
+      if (Array.isArray(parsed)) {
+        pouch = emptyPouch().map((_, i) => Number(parsed[i]) || 0)
+      } else if (parsed && typeof parsed === 'object') {
+        // Pre-2026-09-18 shape { normal, rare } — migrate onto the new tier array
+        // (Common ← normal, Uncommon ← rare) so nobody's existing seeds vanish.
+        pouch = emptyPouch()
+        pouch[0] = Number(parsed.normal) || 0
+        pouch[1] = Number(parsed.rare) || 0
+      }
+    }
   } catch { /* fall through to empty pouch */ }
   // Another handler may have loaded it while we awaited — keep the first object
   const raced = pouches.get(address)
@@ -563,7 +578,7 @@ function savePouch(address: string): Promise<void> {
 
 function sendPouch(address: string): void {
   const p = pouches.get(address)
-  if (p) room.send('pouchUpdate', { normal: p.normal, rare: p.rare }, { to: [address] })
+  if (p) room.send('pouchUpdate', { countsJson: JSON.stringify(p) }, { to: [address] })
 }
 
 // ---------------------------------------------------------------
@@ -575,11 +590,11 @@ interface BoxRecord {
   boxId:       string
   owner:       string   // address; '' = empty
   ownerName:   string
-  rare:        boolean
+  rarityTier:  number
   plantedAt:   number
   opensAt:     number
   opened:      boolean
-  flower:      string   // '' until opened
+  flower:      string   // '' until opened — a PLANT_SPECIES id once opened
   waters:      number   // Phase 4: how many visitors have watered this growing seed
   waterers:    string[] // their addresses (one water each) — server-only, not on the wire
   lastWaterer: string   // display name shown on the label
@@ -589,12 +604,12 @@ const boxes     = new Map<string, BoxRecord>()                       // boxId �
 const boxTimers = new Map<string, ReturnType<typeof setTimeout>>()  // boxId → open timer
 
 function emptyBox(boxId: string): BoxRecord {
-  return { boxId, owner: '', ownerName: '', rare: false, plantedAt: 0, opensAt: 0, opened: false, flower: '', waters: 0, waterers: [], lastWaterer: '' }
+  return { boxId, owner: '', ownerName: '', rarityTier: 0, plantedAt: 0, opensAt: 0, opened: false, flower: '', waters: 0, waterers: [], lastWaterer: '' }
 }
 
 function sendBox(b: BoxRecord, to?: string[]): void {
   const payload = {
-    boxId: b.boxId, owner: b.owner, ownerName: b.ownerName, rare: b.rare,
+    boxId: b.boxId, owner: b.owner, ownerName: b.ownerName, rarityTier: b.rarityTier,
     plantedAt: b.plantedAt, opensAt: b.opensAt, serverNow: Date.now(),
     opened: b.opened, flower: b.flower, waters: b.waters, lastWaterer: b.lastWaterer,
   }
@@ -609,7 +624,7 @@ function boxesOwnedBy(address: string): number {
 
 // ── Per-player JSON records (collection, box cap) — same cache + serialized
 // write-through pattern as the pouch, so concurrent handlers can't lose updates.
-interface FlowerKeepsake { flower: string; rare: boolean; at: number; from?: string }
+interface FlowerKeepsake { flower: string; rarityTier: number; at: number; from?: string }
 const playerJson       = new Map<string, unknown>()          // `${address}:${key}` → live object
 const playerJsonWrites = new Map<string, Promise<void>>()
 
@@ -667,19 +682,15 @@ async function saveBoxes(): Promise<void> {
   }
 }
 
-function rollFlower(rare: boolean): string {
-  const pool = rare ? FLOWERS.rare : FLOWERS.normal
-  return pool[Math.floor(Math.random() * pool.length)]
-}
-
-/** The box's timer elapsed: reveal the flower, persist, tell everyone. */
+/** The box's timer elapsed: reveal the species, persist, tell everyone. Rarity tier
+ *  was already fixed when the seed was planted — only the species is the mystery. */
 function openBox(boxId: string): void {
   const b = boxes.get(boxId)
   if (!b || !b.owner || b.opened) return
   boxTimers.delete(boxId)
   b.opened = true
-  b.flower = rollFlower(b.rare)
-  console.log(`[Server] ${b.boxId} opened for ${b.ownerName}: ${b.flower}${b.rare ? ' (RARE)' : ''}`)
+  b.flower = rollPlantSpecies()
+  console.log(`[Server] ${b.boxId} opened for ${b.ownerName}: ${b.flower} (tier ${b.rarityTier})`)
   sendBox(b)
   void saveBoxes()
 }
@@ -700,6 +711,10 @@ async function loadBoxes(): Promise<void> {
     const records: Array<Partial<BoxRecord> & { boxId: string }> = JSON.parse(raw)
     // Records saved before Phase 4 lack the watering fields; an undefined string
     // makes every boxState send throw in the event bus, so backfill on load.
+    // Records saved before 2026-09-18 have `rare: boolean` instead of `rarityTier` —
+    // that field is simply dropped by the spread below and emptyBox's rarityTier:0
+    // (Common) default takes over. Fine for pre-production test data; a live-player
+    // migration would need to map old rare:true → rarityTier:1 explicitly.
     for (const r of records) {
       if (!boxes.has(r.boxId)) continue
       boxes.set(r.boxId, { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '' })
@@ -1018,18 +1033,17 @@ export async function server(): Promise<void> {
 
     const displayName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
     const pouch = await loadPouch(playerAddress)
-    if (seed.rare) pouch.rare += 1     // synchronous on the shared live object
-    else pouch.normal += 1
+    pouch[seed.rarityTier] = (pouch[seed.rarityTier] ?? 0) + 1     // synchronous on the shared live object
     void savePouch(playerAddress)      // serialized write-through, fail-open
-    console.log(`[Server] ${displayName} gathered ${seed.rare ? 'RARE ' : ''}seed ${seed.id} (pouch ${pouch.normal}+${pouch.rare}r)`)
+    console.log(`[Server] ${displayName} gathered tier-${seed.rarityTier} seed ${seed.id} (pouch: ${pouch.join(',')})`)
     sendPouch(playerAddress)
     // Targeted, not broadcast — only the gatherer's client despawns it
-    room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rare: seed.rare }, { to: [playerAddress] })
+    room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rarityTier: seed.rarityTier }, { to: [playerAddress] })
   })
 
   // ── Message: adminSpawnSeed (test panel) ────────────────────
-  onRoomMessage<{ x: number; z: number; rare: boolean }>('adminSpawnSeed', async (data, address) => {
-    const seed: SeedRecord = { id: `admin_${Date.now()}`, x: data.x, z: data.z, rare: data.rare, spawnedAt: Date.now(), gatheredBy: new Set() }
+  onRoomMessage<{ x: number; z: number; rarityTier: number }>('adminSpawnSeed', async (data, address) => {
+    const seed: SeedRecord = { id: `admin_${Date.now()}`, x: data.x, z: data.z, rarityTier: data.rarityTier, spawnedAt: Date.now(), gatheredBy: new Set() }
     activeSeeds.set(seed.id, seed)
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
     sendSeed(seed)
@@ -1037,7 +1051,7 @@ export async function server(): Promise<void> {
   })
 
   // ── Message: plantSeed (v2) ─────────────────────────────────
-  onRoomMessage<{ boxId: string; rare: boolean }>('plantSeed', async (data, playerAddress) => {
+  onRoomMessage<{ boxId: string; rarityTier: number }>('plantSeed', async (data, playerAddress) => {
     const b = boxes.get(data.boxId)
     if (!b) return
     if (b.owner) { sendBox(b, [playerAddress]); return }          // taken — resync the tapper
@@ -1048,14 +1062,13 @@ export async function server(): Promise<void> {
       sendNotice(playerAddress, cap === 1 ? 'You already have a box — harvest it when it opens' : `You already have ${cap} boxes`)
       return
     }
-    if (data.rare ? pouch.rare <= 0 : pouch.normal <= 0) { sendPouch(playerAddress); sendNotice(playerAddress, 'No seeds — catch some from a bloom'); return }
+    if ((pouch[data.rarityTier] ?? 0) <= 0) { sendPouch(playerAddress); sendNotice(playerAddress, 'No seeds — catch some from a bloom'); return }
     // Consume the seed and claim the box synchronously — no await between check and claim
-    if (data.rare) pouch.rare -= 1
-    else pouch.normal -= 1
+    pouch[data.rarityTier] -= 1
     const now = Date.now()
     b.owner     = playerAddress
     b.ownerName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
-    b.rare      = data.rare
+    b.rarityTier = data.rarityTier
     b.plantedAt = now
     b.opensAt   = now + BOX_GROW_MS
     b.opened    = false
@@ -1064,7 +1077,7 @@ export async function server(): Promise<void> {
     b.waterers  = []
     b.lastWaterer = ''
     scheduleOpen(b)
-    console.log(`[Server] ${b.ownerName} planted a ${data.rare ? 'RARE ' : ''}seed in ${b.boxId} (opens in ${Math.round(BOX_GROW_MS / 60_000)} min)`)
+    console.log(`[Server] ${b.ownerName} planted a tier-${data.rarityTier} seed in ${b.boxId} (opens in ${Math.round(BOX_GROW_MS / 60_000)} min)`)
     sendBox(b)
     sendPouch(playerAddress)
     void savePouch(playerAddress)
@@ -1079,11 +1092,11 @@ export async function server(): Promise<void> {
     const flowers = await loadFlowers(playerAddress)
     if (!b.opened || b.owner !== playerAddress) return           // re-check after the await
     if (flowers.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, 'Your collection is full — gift a flower first'); return }
-    const keepsake: FlowerKeepsake = { flower: b.flower, rare: b.rare, at: Date.now() }
+    const keepsake: FlowerKeepsake = { flower: b.flower, rarityTier: b.rarityTier, at: Date.now() }
     flowers.push(keepsake)
     const name = b.ownerName
     boxes.set(b.boxId, emptyBox(b.boxId))                        // frees the box
-    console.log(`[Server] ${name} harvested ${keepsake.flower}${keepsake.rare ? ' (RARE)' : ''} from ${b.boxId} (collection ${flowers.length})`)
+    console.log(`[Server] ${name} harvested ${keepsake.flower} (tier ${keepsake.rarityTier}) from ${b.boxId} (collection ${flowers.length})`)
     sendBox(boxes.get(b.boxId)!)
     void saveBoxes()
     void savePlayerJson(playerAddress, 'flowers')
@@ -1127,18 +1140,29 @@ export async function server(): Promise<void> {
     const toName   = leaderboard.get(to)?.displayName ?? to.slice(0, 8) + '…'
     const [gift] = mine.splice(idx, 1)
     theirs.push({ ...gift, from: fromName, at: Date.now() })
-    console.log(`[Server] ${fromName} gifted ${gift.flower}${gift.rare ? ' (RARE)' : ''} to ${toName}`)
+    console.log(`[Server] ${fromName} gifted ${gift.flower} (tier ${gift.rarityTier}) to ${toName}`)
     void savePlayerJson(playerAddress, 'flowers')
     void savePlayerJson(to, 'flowers')
     void sendCollection(playerAddress)
     void sendCollection(to)
-    room.send('giftReceived', { from: fromName, flower: gift.flower, rare: gift.rare }, { to: [to] })
+    room.send('giftReceived', { from: fromName, flower: gift.flower, rarityTier: gift.rarityTier }, { to: [to] })
     sendNotice(playerAddress, `You gave your ${gift.flower} to ${toName}`)
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
   onRoomMessage<{ variant: string }>('forceBloom', async (data, _address) => {
     triggerBloom(data?.variant || '')
+  })
+
+  // ── Message: adminResetBloom (test panel) — stop-bloom / reset button. Cancels any
+  // sustain hold (covers the "stuck at Hold 80% for 0s" case) and ends an active bloom
+  // the same way a normal bloomReset does. Idempotent either way.
+  onRoomMessage<Record<string, never>>('adminResetBloom', async (_data, address) => {
+    if (!ADMIN_ADDRESSES.includes(address.toLowerCase())) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    cancelBloomSustain()
+    if (bloomActive) await resetGarden()
+    sendThreshold([address])
+    console.log(`[Server] Admin reset bloom/sustain (requested by ${address})`)
   })
 
   // ── Message: adminGrantWaters (test panel) — exercise flair tiers + tribute grant ──

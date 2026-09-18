@@ -12,6 +12,7 @@ import {
   getUseClickbox,
   resetAllPlants,
   forceTriggerBloom,
+  forceResetBloom,
   adminGrantWaters,
   forceWaterToThreshold,
   forceStartPlayerTrail,
@@ -23,7 +24,7 @@ import {
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
-import { demoSeedlings } from './boxSystem'
+import { demoSeedlings, demoRevealedFlowers } from './boxSystem'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -57,7 +58,7 @@ const PANEL_W      = 390
 const PANEL_LEFT   = 24
 const PANEL_TOP    = 20
 const HEADER_H     = 46
-const PANEL_H_OPEN = 940
+const PANEL_H_OPEN = 1020
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
@@ -127,7 +128,7 @@ export function TestPanelUi() {
     <UiEntity
       uiTransform={{
         positionType: 'absolute',
-        position:     { left: PANEL_LEFT, top: '26%' },
+        position:     { left: PANEL_LEFT, top: PANEL_TOP },
         width:        PANEL_W,
         height:       pnH,
         flexDirection: 'column',
@@ -242,6 +243,15 @@ export function TestPanelUi() {
           <Label value="Force Bloom Now" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
+        {/* Stop bloom / reset — cancels a stuck sustain hold too, not just an active bloom */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_DANGER }}
+          onMouseDown={forceResetBloom}
+        >
+          <Label value="Stop Bloom / Reset Sustain" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
         <UiEntity
           uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
           uiBackground={{ color: BTN_BLOOM }}
@@ -267,13 +277,22 @@ export function TestPanelUi() {
           <Label value={getTestPotCount() > 0 ? `Remove ${getTestPotCount()} test planters  (${getFps()} fps)` : `Spawn 100 test planters  (${getFps()} fps)`} fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
-        {/* Seedling rarity tint demo — box_1 = normal, box_2 = rare, clears on the next real update */}
+        {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}
         <UiEntity
           uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
           uiBackground={{ color: BTN_OFF }}
           onMouseDown={demoSeedlings}
         >
-          <Label value="Demo seedling tints (box_1 normal / box_2 rare)" fontSize={12} color={WHITE} textAlign="middle-center" />
+          <Label value="Demo seedling tints (box_1 Common / box_2 Epic)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Revealed-flower demo — one box per rarity effect tier, box_5..8 */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_OFF }}
+          onMouseDown={demoRevealedFlowers}
+        >
+          <Label value="Demo rarity VFX (Rare / Epic / Legendary / Exotic)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Divider */}
@@ -283,9 +302,9 @@ export function TestPanelUi() {
         <Label value={`SEEDS  ·  live: ${getSeedCount()}`} fontSize={10} color={MUTED} uiTransform={{ margin: { bottom: 6 } }} />
 
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
-          <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(false)} />
-          <SeedBtn label="LOCAL rare"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(true)} />
-          <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(false)} last />
+          <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(0)} />
+          <SeedBtn label="LOCAL Epic"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(3)} />
+          <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(0)} last />
         </UiEntity>
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
           <SeedBtn label="Size ×2"  color={BTN_OFF} onClick={() => adminScaleSeeds(2)} />

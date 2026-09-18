@@ -297,8 +297,8 @@ function uiComponent() {
   const rightPct   = Math.max(0, sa.right - hIns) + (mobile ? 0.012 : 0.035)   // desktop: clear the client's edge icons
   const frame      = ringIndex()
   const pouch      = getPouch()
-  const seedCount  = pouch.normal + pouch.rare
-  const seedRare   = pouch.rare
+  const seedCount  = pouch.reduce((a, b) => a + b, 0)
+  const seedRare   = seedCount - (pouch[0] ?? 0)   // anything above Common
   const isBloom    = bannerState === 'bloom'
   const isCount    = bannerState === 'countdown'
   const bannerH    = px(isBloom ? 96 : 122)

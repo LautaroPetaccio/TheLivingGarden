@@ -38,15 +38,18 @@ export function createSign(
   facingDeg: number,
   size: { w: number; h: number },
   fontSize: number,
+  withPanel = true,   // false = text only, for signs that sit on a model's own board
 ): Sign {
   const root = engine.addEntity()
   Transform.create(root, { position: pos, rotation: Quaternion.fromEulerDegrees(0, facingDeg, 0), scale: { x: 0, y: 0, z: 0 } })
 
-  // Backing sits BEHIND the text as seen by the reader (reader is on local −Z)
-  const panel = engine.addEntity()
-  Transform.create(panel, { position: { x: 0, y: 0, z: PANEL_DEPTH }, scale: { x: size.w, y: size.h, z: PANEL_DEPTH }, parent: root })
-  MeshRenderer.setBox(panel)
-  Material.setPbrMaterial(panel, { albedoColor: PANEL_COLOR, metallic: 0, roughness: 1 })
+  if (withPanel) {
+    // Backing sits BEHIND the text as seen by the reader (reader is on local −Z)
+    const panel = engine.addEntity()
+    Transform.create(panel, { position: { x: 0, y: 0, z: PANEL_DEPTH }, scale: { x: size.w, y: size.h, z: PANEL_DEPTH }, parent: root })
+    MeshRenderer.setBox(panel)
+    Material.setPbrMaterial(panel, { albedoColor: PANEL_COLOR, metallic: 0, roughness: 1 })
+  }
 
   const text = engine.addEntity()
   Transform.create(text, { parent: root })
@@ -54,6 +57,8 @@ export function createSign(
     text: '', fontSize, textColor: TEXT_COLOR,
     textAlign: TextAlignMode.TAM_MIDDLE_CENTER,
     textWrapping: true, width: size.w * 0.92, height: size.h * 0.9,
+    // No dark panel behind it: an outline keeps it legible on light wood by day and at night
+    ...(withPanel ? {} : { outlineWidth: 0.2, outlineColor: { r: 0.16, g: 0.09, b: 0.04 } }),
   })
 
   signs.push({ root, x: pos.x, z: pos.z, shown: false, k: 0 })

@@ -1681,6 +1681,12 @@ export function adminGrantWaters(amount: number): void {
 }
 
 /** @param variant '' = normal roll; a BLOOM_VARIANTS id forces it at full scale (test panel) */
+/** Test-panel stop-bloom / reset button — cancels a stuck sustain hold or ends an
+ *  active bloom, whichever applies. Server-side; no-op if nothing is active. */
+export function forceResetBloom(): void {
+  if (room.isReady()) room.send('adminResetBloom', {})
+}
+
 export function forceTriggerBloom(variant = ''): void {
   if (isBloomActive()) return
   if (room.isReady()) {

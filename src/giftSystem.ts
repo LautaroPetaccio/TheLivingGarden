@@ -8,7 +8,7 @@
 // Server communication:
 //   send    →  giftFlower       { toAddress, flowerIndex }
 //   receive ←  collectionUpdate { flowersJson, boxCap }   (mine, after harvest/gift/join)
-//   receive ←  giftReceived     { from, flower, rare }
+//   receive ←  giftReceived     { from, flower, rarityTier }
 //   receive ←  notice           { text }                  (server feedback toasts)
 //
 // Tap target: an invisible pointer-only collider attached to each remote
@@ -33,6 +33,7 @@ import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
 import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
+import { rarityTierById } from './shared/config'
 
 // ---------------------------------------------------------------
 // Config
@@ -125,7 +126,8 @@ export function setupGiftSystem(): void {
   })
 
   room.onMessage('giftReceived', (data) => {
-    showToast(`${data.from} gave you a ${data.flower}${data.rare ? ' — a rare one!' : ''}`, TOAST_MS, false)
+    const tierName = rarityTierById(data.rarityTier).name
+    showToast(`${data.from} gave you a ${data.flower}${data.rarityTier > 0 ? ` — a ${tierName} one!` : ''}`, TOAST_MS, false)
   })
 
   room.onMessage('notice', (data) => {

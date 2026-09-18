@@ -250,10 +250,20 @@ function createPool(
 
 let bloomPool:   BloomSparkleState[] = []
 
-/** Phase 6b — retint the bloom sparkle pool for the active bloom variant.
+/** Phase 6b — retint EVERY sparkle pool for the active bloom variant, not just the
+ *  bloom-moment one. Found 2026-09-17: burstPool (the per-watering burst) and
+ *  tributePool (the per-watering "travel to centre" effect) both stayed warm-gold
+ *  through a moonlit bloom because this only covered bloomPool — the KJ-reported
+ *  "yellow orb" during a moonlit bloom was one of those two, not a firefly.
  *  Call before triggerBloomSparkles; the pooled materials are mutated in place. */
 export function setBloomSparklePalette(p: { albedo: { r: number; g: number; b: number }; emissive: { r: number; g: number; b: number } }): void {
-  for (const s of bloomPool) {
+  for (const s of [...bloomPool, ...tributePool]) {
+    const m = Material.getMutableOrNull(s.entity)?.material
+    if (!m || m.$case !== 'pbr') continue
+    m.pbr.albedoColor   = { ...p.albedo, a: m.pbr.albedoColor?.a ?? 1 }
+    m.pbr.emissiveColor = { ...p.emissive }
+  }
+  for (const s of burstPool) {
     const m = Material.getMutableOrNull(s.entity)?.material
     if (!m || m.$case !== 'pbr') continue
     m.pbr.albedoColor   = { ...p.albedo, a: m.pbr.albedoColor?.a ?? 1 }

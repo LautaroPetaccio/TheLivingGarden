@@ -19,22 +19,31 @@ import { registerMessages } from '@dcl/sdk/network'
 
 export const room = registerMessages({
   // ── v2: bloom seeds ──────────────────────────────────────
-  seedSpawned:      Schemas.Map({ id: Schemas.String, x: Schemas.Number, z: Schemas.Number, rare: Schemas.Boolean, spawnedAt: Schemas.Int64 }),
-  seedGathered:     Schemas.Map({ seedId: Schemas.String, by: Schemas.String, byAddress: Schemas.String, rare: Schemas.Boolean }),
+  // rarityTier (0=Common..7=Unique, RARITY_TIERS in shared/config) replaced the old
+  // rare:boolean 2026-09-18 — KJ's 8-tier expansion, following DCL wearable rarity
+  // conventions. Species stays the harvest-time mystery (unknown until a box opens),
+  // same as before — a seed/pouch entry only ever carries its rarity tier, never a
+  // species id. NOT the same "tier" as plantStateUpdate's tier below (that one is the
+  // lifetime-waters flair tier) — kept the distinct name on purpose to avoid confusion.
+  seedSpawned:      Schemas.Map({ id: Schemas.String, x: Schemas.Number, z: Schemas.Number, rarityTier: Schemas.Number, spawnedAt: Schemas.Int64 }),
+  seedGathered:     Schemas.Map({ seedId: Schemas.String, by: Schemas.String, byAddress: Schemas.String, rarityTier: Schemas.Number }),
   gatherSeed:       Schemas.Map({ seedId: Schemas.String }),
   /** Test-panel only: spawn one seed near x,z through the real seedSpawned path. */
-  adminSpawnSeed:   Schemas.Map({ x: Schemas.Number, z: Schemas.Number, rare: Schemas.Boolean }),
-  /** Server → gatherer: the player's live seed pouch (after each gather, and on join). */
-  pouchUpdate:      Schemas.Map({ normal: Schemas.Number, rare: Schemas.Number }),
+  adminSpawnSeed:   Schemas.Map({ x: Schemas.Number, z: Schemas.Number, rarityTier: Schemas.Number }),
+  /** Server → gatherer: the player's live seed pouch (after each gather, and on join).
+   *  countsJson = JSON number[8], one count per rarity tier (index = tier id). */
+  pouchUpdate:      Schemas.Map({ countsJson: Schemas.String }),
 
   // ── v2: seed boxes ───────────────────────────────────────
-  /** Player taps an empty box to plant a seed from their pouch (rare = which kind). */
-  plantSeed:        Schemas.Map({ boxId: Schemas.String, rare: Schemas.Boolean }),
+  /** Player taps an empty box to plant a seed from their pouch (rarityTier = which one). */
+  plantSeed:        Schemas.Map({ boxId: Schemas.String, rarityTier: Schemas.Number }),
   /** One box's state — broadcast on change, sent per box to a joining/resyncing player.
    *  serverNow lets the client derive the countdown without trusting clockSync.
-   *  owner '' = empty box. flower '' = not opened yet. Timestamps are epoch ms (Int64). */
+   *  owner '' = empty box. flower '' = species not yet revealed (box unopened) — the
+   *  field name is unchanged but now holds a PLANT_SPECIES id, not a flat name.
+   *  Timestamps are epoch ms (Int64). */
   boxState:         Schemas.Map({
-    boxId: Schemas.String, owner: Schemas.String, ownerName: Schemas.String, rare: Schemas.Boolean,
+    boxId: Schemas.String, owner: Schemas.String, ownerName: Schemas.String, rarityTier: Schemas.Number,
     plantedAt: Schemas.Int64, opensAt: Schemas.Int64, serverNow: Schemas.Int64,
     opened: Schemas.Boolean, flower: Schemas.String,
     waters: Schemas.Number, lastWaterer: Schemas.String,
@@ -50,7 +59,7 @@ export const room = registerMessages({
   /** Server → player: their keepsake collection + box cap (after harvest/gift, and on join). */
   collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
   /** Server → receiver of a gift. */
-  giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rare: Schemas.Boolean }),
+  giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
   /** Server → player: short feedback toast (rejections and confirmations). Broadcast when untargeted. */
   notice:           Schemas.Map({ text: Schemas.String }),
   /** Server → all / joining player: every tribute plant (Phase 5b). json = TributeRecord[]. */
@@ -111,4 +120,7 @@ export const room = registerMessages({
   adminGrantWaters: Schemas.Map({ amount: Schemas.Number }),
   /** Test-panel only — waters exactly enough plants to reach the 80% bloom threshold. */
   forceWater80:     Schemas.Map({}),
+  /** Test-panel only — cancels any bloom-sustain hold and ends an active bloom immediately,
+   *  same as a normal bloomReset. Idempotent: a no-op if nothing is active/holding. */
+  adminResetBloom:  Schemas.Map({}),
 })
