@@ -334,7 +334,7 @@ export function TestPanelUi() {
           uiBackground={{ color: BTN_OFF }}
           onMouseDown={demoSeedlings}
         >
-          <Label value="Demo seedling tints (box_1 Common / box_2 Epic)" fontSize={12} color={WHITE} textAlign="middle-center" />
+          <Label value="Demo seedlings (box_1-6: Common, Rare, Epic, Legendary, Exotic, Unique)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Revealed-flower demo — one box per rarity effect tier, box_5..8 */}

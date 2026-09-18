@@ -48,7 +48,7 @@ import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
 import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById } from './shared/config'
 import { showToast } from './notifications'
-import { attachPlantVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
+import { attachPlantVfx, attachSeedlingVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
 import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
 import { createSign, moveSign, setupSignSystem, Sign } from './signs'
@@ -194,6 +194,7 @@ function setPlantVisual(v: BoxView, pos: PlanterPos): void {
     Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k, z: pos.z }, rotation: planterRotation(pos), scale: { x: k, y: k, z: k } })
     const src = v.rarityTier > 0 ? SEEDLING_MODEL_SRC_RARE : SEEDLING_MODEL_SRC_NORMAL
     GltfContainer.create(e, { src, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+    attachSeedlingVfx(v.boxId, e, v.rarityTier)   // tier pulse while growing (Rare and up)
     v.plant = e
     return
   }
@@ -444,9 +445,9 @@ export function demoSeedlings(): void {
     v.opensLocalAt = Date.now() + 3_600_000
     refresh(v)
   }
-  demo('box_1', 0)
-  demo('box_2', 3)
-  console.log('[Boxes] demo seedlings: box_1 = Common, box_2 = Epic — the next real box update clears it')
+  // One per seedling effect in KJ's table (Common = none); box_1..6 are a row in the current layout
+  demo('box_1', 0); demo('box_2', 2); demo('box_3', 3); demo('box_4', 4); demo('box_5', 5); demo('box_6', 7)
+  console.log('[Boxes] demo seedlings: box_1 Common, 2 Rare, 3 Epic, 4 Legendary, 5 Exotic, 6 Unique — the next real box update clears it')
 }
 
 /** Test-panel only: force four OTHER boxes into the opened/revealed state, one per

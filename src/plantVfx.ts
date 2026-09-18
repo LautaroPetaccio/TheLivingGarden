@@ -59,6 +59,19 @@ const TIER_VFX: Record<number, TierVfx> = {
   5: { pulse: { colors: [LIME, RED], mode: 'alternate', periodS: 2.2, peak: 7 }, particles: { colors: [LIME, RED], rate: 65, max: 170, size: [0.06, 0.15] }, light: 4_500, tween: true },
 }
 
+// ── Seedlings (growing stage) — KJ's table, seedling column (RARITY_TIERS.seedVfx):
+// Rare green · Epic blue · Legendary purple · Exotic RED · Mythic pink · Unique gold pulse;
+// Common/Uncommon none. The seedling GLB's one node 'Seedling' has an UNTEXTURED
+// material, so each pulse step is a colour-only rebuild (no texture reload).
+const PINK = { r: 1.000, g: 0.294, b: 0.929 }
+const GOLD = { r: 0.996, g: 0.635, b: 0.090 }
+const SEEDLING_PULSE: Record<number, RGB> = { 2: GREEN, 3: BLUE, 4: PURPLE, 5: RED, 6: PINK, 7: GOLD }
+const SEEDLING_PERIOD_S = 2.6   // TUNING — gentler than the opened flowers
+const SEEDLING_PEAK     = 2.5   // TUNING
+// Base colours baked into seedling_normal.glb / seedling_rare.glb (boxSystem picks rare for tier > 0)
+const SEEDLING_BASE_NORMAL: [number, number, number, number] = [0.55, 0.85, 0.55, 1]
+const SEEDLING_BASE_RARE:   [number, number, number, number] = [1.0, 0.88, 0.45, 1]
+
 const PULSE_LEVELS    = 3      // cached material states per colour (0 = no emissive) — each step = one material rebuild
 const SPARKLE_RADIUS  = 0.38   // m — emitter sphere around the plant
 const SPARKLE_Y       = 0.30   // m above the soil — roughly the middle of a 0.55 m plant
@@ -139,6 +152,20 @@ export function setVfxFlag(name: keyof typeof vfxFlags, on: boolean): void {
       if (!on && GltfNodeModifiers.has(a.plant)) GltfNodeModifiers.deleteFrom(a.plant)
     }
   }
+}
+
+/** Growing seedling: its tier's pulse, no particles/light (seedling column of KJ's table). */
+export function attachSeedlingVfx(key: string, seedling: Entity, tier: number): void {
+  detachPlantVfx(key)
+  const color = SEEDLING_PULSE[tier]
+  if (!color) return
+  active.set(key, {
+    plant: seedling, emitter: null, light: null,
+    def: { pulse: { colors: [color], mode: 'solid', periodS: SEEDLING_PERIOD_S, peak: SEEDLING_PEAK }, particles: null, light: 0, tween: false },
+    mats: [{ path: 'Seedling', color: tier > 0 ? SEEDLING_BASE_RARE : SEEDLING_BASE_NORMAL, blend: false, metallic: 0, roughness: 0.9 }],
+    phase: Math.random() * 10,
+    sentKey: '',
+  })
 }
 
 /** Remove particles + light; the caller owns the plant entity (its override goes with it). */
