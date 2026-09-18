@@ -1308,6 +1308,27 @@ export async function server(): Promise<void> {
     await tidyPlanter(b)
   })
 
+  // ── Message: adminPlanterDraft (planter layout tool) — save / load the draft layout ──
+  // Baked into BOX_POSITIONS by hand afterwards; this Storage copy only survives restarts.
+  onRoomMessage<{ json: string }>('adminPlanterDraft', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (!data.json) {
+      let saved = ''
+      try { saved = (await Storage.get<string>('planterDraft')) ?? '' } catch { /* none yet */ }
+      room.send('planterDraft', { json: saved }, { to: [address] })
+      return
+    }
+    try {
+      const list = JSON.parse(data.json)
+      if (!Array.isArray(list) || list.length > 300) throw new Error('not a list of ≤ 300 planters')
+      await setWorld('planterDraft', data.json)
+      console.log(`[Server] Planter draft saved: ${list.length} planters`)
+    } catch (err) {
+      sendNotice(address, 'Planter draft not saved — bad data')
+      console.error('[Server] adminPlanterDraft rejected:', err)
+    }
+  })
+
   // ── Message: adminGrantWaters (test panel) — exercise flair tiers + tribute grant ──
   onRoomMessage<{ amount: number }>('adminGrantWaters', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }

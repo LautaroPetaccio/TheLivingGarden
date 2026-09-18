@@ -130,4 +130,9 @@ export const room = registerMessages({
   /** Test-panel only — tidy up the longest-away owner's planter now (crowding rule,
    *  GDD §3.1), ignoring the reserve, the minimum-away time and whether they're here. */
   adminTidyPlanter: Schemas.Map({}),
+  /** Planter layout tool (test panel, admin): save the draft layout (JSON array of
+   *  { x, z, rot }) to world Storage 'planterDraft'; json '' = ask for the saved draft. */
+  adminPlanterDraft: Schemas.Map({ json: Schemas.String }),
+  /** Server → admin: the saved planter draft ('' = none yet). */
+  planterDraft:      Schemas.Map({ json: Schemas.String }),
 })

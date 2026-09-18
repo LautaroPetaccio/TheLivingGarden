@@ -26,6 +26,7 @@ import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter } from './boxSystem'
 import { vfxFlags, setVfxFlag } from './plantVfx'
+import { isLayoutToolOn, setLayoutTool, layoutDraftCount, layoutPlaceHere, layoutUndo, layoutRemoveNearest, layoutRotateNearest, layoutExport } from './planterLayoutTool'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -289,6 +290,21 @@ export function TestPanelUi() {
           <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 0 } }} uiBackground={{ color: vfxFlags.lights ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('lights', !vfxFlags.lights)}>
             <Label value={`Lights ${vfxFlags.lights ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
           </UiEntity>
+        </UiEntity>
+
+        {/* Planter layout tool — walk the garden, drop draft planters, then bake (GDD §3.1) */}
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value={isLayoutToolOn() ? `Planter layout  (${layoutDraftCount()} placed)` : 'Planter layout tool'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={isLayoutToolOn()} onChange={setLayoutTool} />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Place here" color={BTN_ON} onClick={layoutPlaceHere} />
+          <SeedBtn label="Undo" color={BTN_OFF} onClick={layoutUndo} />
+          <SeedBtn label="Rotate near" color={BTN_OFF} onClick={layoutRotateNearest} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <SeedBtn label="Remove near" color={BTN_OFF} onClick={layoutRemoveNearest} />
+          <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={layoutExport} last />
         </UiEntity>
 
         {/* Crowding rule (GDD §3.1) — tidy the longest-away owner's planter now */}
