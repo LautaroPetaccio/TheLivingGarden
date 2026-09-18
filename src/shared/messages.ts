@@ -127,4 +127,7 @@ export const room = registerMessages({
   /** Test-panel only — cancels any bloom-sustain hold and ends an active bloom immediately,
    *  same as a normal bloomReset. Idempotent: a no-op if nothing is active/holding. */
   adminResetBloom:  Schemas.Map({}),
+  /** Test-panel only — tidy up the longest-away owner's planter now (crowding rule,
+   *  GDD §3.1), ignoring the reserve, the minimum-away time and whether they're here. */
+  adminTidyPlanter: Schemas.Map({}),
 })

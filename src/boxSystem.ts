@@ -147,7 +147,7 @@ function balloonTextFor(v: BoxView, now: number): string {
 /** Hover prompt for the one tap the box currently offers. */
 function hoverFor(v: BoxView): string {
   if (!v.owner) return 'Plant seed'
-  if (isMine(v)) return v.opened ? 'Harvest' : 'Growing…'
+  if (isMine(v)) return v.opened ? 'Harvest (or leave it on show)' : 'Growing…'
   if (v.opened) return `${v.ownerName}'s flower`
   return v.waters >= BOX_WATER_MAX ? 'Fully watered' : 'Water'
 }
@@ -277,7 +277,7 @@ function refresh(v: BoxView): void {
 function tryPlant(v: BoxView): void {
   if (v.owner) return
   if (myBoxCount() >= getBoxCap()) {
-    showToast(getBoxCap() === 1 ? 'You already have a box — harvest it when it opens' : `You already have ${getBoxCap()} boxes`, TOAST_MS, false)
+    showToast(`You're using all ${getBoxCap()} of your planters — harvest one to plant again`, TOAST_MS, false)
     return
   }
   const tier = nextSeedTier()
@@ -298,7 +298,7 @@ function onTap(v: BoxView): void {
     showToast(`Still growing — ready in ${countdown(v, Date.now())}`, TOAST_MS, false)
     return
   }
-  if (v.opened) { showToast(`${v.ownerName}'s ${flowerName(v)} — they'll harvest it`, TOAST_MS, false); return }
+  if (v.opened) { showToast(`${v.ownerName}'s ${flowerName(v)}, on show`, TOAST_MS, false); return }
   if (v.waters >= BOX_WATER_MAX) { showToast(`${v.ownerName}'s seed has had all the water it can take`, TOAST_MS, false); return }
   console.log(`[Boxes] watering ${v.ownerName}'s ${v.boxId}`)
   room.send('waterBox', { boxId: v.boxId })
@@ -329,6 +329,9 @@ function createBox(p: { id: string; x: number; z: number }): BoxView {
 /** Test-panel only: force two boxes into the growing state so the rarity-tinted
  *  seedling colors can be compared side by side without waiting on real timers.
  *  Client-only, cosmetic — the next boxState broadcast (or a rejoin) overwrites it. */
+/** Test panel: run the crowding rule once now (server picks the longest-away owner's planter). */
+export function adminTidyPlanter(): void { room.send('adminTidyPlanter', {}) }
+
 export function demoSeedlings(): void {
   const demo = (boxId: string, rarityTier: number) => {
     const v = views.get(boxId)
@@ -430,7 +433,7 @@ export function setupBoxSystem(): void {
     refresh(v)
     if (!wasOpened && v.opened && isMine(v)) {
       const tierName = rarityTierById(v.rarityTier).name
-      showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` A ${tierName} one!` : ''} Tap the box to harvest it.`, TOAST_MS, false)
+      showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` A ${tierName} one!` : ''} Harvest it, or leave it on show.`, TOAST_MS, false)
     } else if (!wasMine && isMine(v) && !v.opened) {
       showToast('Seed planted — come back when it opens', TOAST_MS, false)
     }

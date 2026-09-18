@@ -407,9 +407,15 @@ export const TRIBUTE_MODEL_FOUNDING = ''   // e.g. 'assets/scene/Models/tribute/
 export const TRIBUTE_MODEL_STANDARD = ''
 
 // ── v2 Phase 4: harvest, gift, box-watering (GDD §3 step 5, §5 social loop) ──
-/** Boxes a player may hold at once. KJ decision 2026-09-16: 1 — stored per player
- *  (`boxCap` in player storage) so purchasable extra boxes can raise it later. */
-export const BOX_CAP_DEFAULT       = 1
+/** Planters a player may hold at once — growing AND displaying (GDD §3.1, 2026-09-18:
+ *  displaying = leaving an opened flower in its planter). Stored per player (`boxCap`)
+ *  so purchasable extra planters can raise it; the effective cap is max(stored, this). */
+export const BOX_CAP_DEFAULT       = 2   // TUNING
+/** Crowding rule (GDD §3.1): keep this many planters free. When fewer are free, the
+ *  planter of the owner away longest (not connected, away ≥ PLANTER_TIDY_MIN_AWAY_MS) is
+ *  tidied up — opened flower → their My flowers, growing seed → back to their pouch. */
+export const PLANTER_RESERVE_FREE    = 2                     // TUNING — ~5 at 100 planters
+export const PLANTER_TIDY_MIN_AWAY_MS = 24 * 60 * 60 * 1000  // TUNING
 /** Keepsake collection size backstop (harvested + gifted flowers a player holds). */
 export const FLOWER_COLLECTION_CAP = 20
 /** Another player watering your growing box shaves this off its timer… */

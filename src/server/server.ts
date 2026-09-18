@@ -45,6 +45,8 @@ import {
   BOX_POSITIONS,
   BOX_GROW_MS,
   BOX_CAP_DEFAULT,
+  PLANTER_RESERVE_FREE,
+  PLANTER_TIDY_MIN_AWAY_MS,
   FLOWER_COLLECTION_CAP,
   BOX_WATER_SHAVE_MS,
   BOX_WATER_MAX,
@@ -659,11 +661,13 @@ function savePlayerJson(address: string, key: string): Promise<void> {
 
 const loadFlowers = (a: string) => loadPlayerJson<FlowerKeepsake[]>(a, 'flowers', () => [])
 const loadBoxCap  = (a: string) => loadPlayerJson<{ cap: number }>(a, 'boxCap', () => ({ cap: BOX_CAP_DEFAULT }))
+/** Effective planter cap: a stored cap (e.g. bought planters) never drops below the default. */
+async function planterCap(address: string): Promise<number> { return Math.max((await loadBoxCap(address)).cap, BOX_CAP_DEFAULT) }
 
 async function sendCollection(address: string): Promise<void> {
   const flowers = await loadFlowers(address)
-  const cap     = await loadBoxCap(address)
-  room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap.cap }, { to: [address] })
+  const cap     = await planterCap(address)
+  room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap }, { to: [address] })
 }
 
 // ── v2: held flower — one keepsake per gardener, shown in their hand to everyone.
@@ -738,6 +742,95 @@ async function loadBoxes(): Promise<void> {
   let growing = 0
   for (const b of boxes.values()) if (b.owner && !b.opened) { scheduleOpen(b); growing++ }
   console.log(`[Server] Boxes: ${boxes.size} total, ${[...boxes.values()].filter(b => b.owner).length} planted, ${growing} growing (timers rescheduled)`)
+}
+
+// ── Crowding rule (GDD §3.1) ─────────────────────────────────
+// Keep PLANTER_RESERVE_FREE planters free so a newcomer always has one to tap. When fewer
+// are free, tidy up the planter of the owner away longest (not connected, away at least
+// PLANTER_TIDY_MIN_AWAY_MS): an opened flower goes to their My flowers, a growing seed back
+// to their pouch — never lost — and they're told on their next visit.
+const lastSeen = new Map<string, number>()   // lowercase address → ms of last join/leave
+
+async function loadLastSeen(): Promise<void> {
+  try {
+    const raw = await Storage.get<string>('lastSeen')
+    if (raw) for (const [a, t] of Object.entries(JSON.parse(raw) as Record<string, number>)) lastSeen.set(a, Number(t) || 0)
+  } catch (err) { console.error('[Server] loadLastSeen failed:', err) }
+}
+function markSeen(address: string): void {
+  lastSeen.set(address.toLowerCase(), Date.now())
+  void setWorld('lastSeen', JSON.stringify(Object.fromEntries(lastSeen)))
+}
+const loadKeptSafe = (a: string) => loadPlayerJson<string[]>(a, 'keptSafe', () => [])
+
+/** Tidy one planter: its contents go back to the owner, the planter is freed. */
+async function tidyPlanter(b: BoxRecord): Promise<void> {
+  const owner = b.owner, tier = b.rarityTier, opened = b.opened, flower = b.flower
+  if (!owner) return
+  const timer = boxTimers.get(b.boxId)
+  if (timer) { clearTimeout(timer); boxTimers.delete(b.boxId) }
+  boxes.set(b.boxId, emptyBox(b.boxId))                       // free it before any await
+  sendBox(boxes.get(b.boxId)!)
+  void saveBoxes()
+  let note: string
+  if (opened) {
+    const flowers = await loadFlowers(owner)                   // past FLOWER_COLLECTION_CAP on purpose: never lost
+    flowers.push({ flower, rarityTier: tier, at: Date.now() })
+    void savePlayerJson(owner, 'flowers')
+    note = `The garden got busy while you were away — your ${plantSpeciesById(flower)?.name ?? flower} was kept safe in My flowers`
+  } else {
+    const pouch = await loadPouch(owner)
+    pouch[tier] = (pouch[tier] ?? 0) + 1
+    void savePouch(owner)
+    note = 'The garden got busy while you were away — your seed is back in your pouch'
+  }
+  console.log(`[Server] Tidied ${b.boxId} (owner ${owner.slice(0, 8)}…, ${opened ? `opened ${flower}` : 'growing'}, last seen ${lastSeen.get(owner.toLowerCase()) ? new Date(lastSeen.get(owner.toLowerCase())!).toISOString() : 'never'})`)
+  if (isConnected(owner)) {                                    // only via the admin test path
+    sendNotice(owner, note)
+    void sendCollection(owner)
+    sendPouch(owner)
+  } else {
+    (await loadKeptSafe(owner)).push(note)
+    void savePlayerJson(owner, 'keptSafe')
+  }
+}
+
+/** Longest-away owner's planter, or null. `force` (admin test) ignores presence + min-away. */
+function tidyCandidate(force: boolean): BoxRecord | null {
+  const now = Date.now()
+  let best: BoxRecord | null = null, bestSeen = Infinity
+  for (const b of boxes.values()) {
+    if (!b.owner) continue
+    if (!force && isConnected(b.owner)) continue
+    const seen = lastSeen.get(b.owner.toLowerCase()) ?? 0      // never recorded = oldest
+    if (!force && now - seen < PLANTER_TIDY_MIN_AWAY_MS) continue
+    if (seen < bestSeen) { bestSeen = seen; best = b }
+  }
+  return best
+}
+
+let ensuringFree = false
+async function ensureFreePlanters(): Promise<void> {
+  if (ensuringFree) return
+  ensuringFree = true
+  try {
+    let free = [...boxes.values()].filter(b => !b.owner).length
+    while (free < PLANTER_RESERVE_FREE) {
+      const b = tidyCandidate(false)
+      if (!b) break
+      await tidyPlanter(b)
+      free++
+    }
+  } finally { ensuringFree = false }
+}
+
+/** Joining owner: deliver any "kept safe" notes from while they were away. */
+async function deliverKeptSafe(address: string): Promise<void> {
+  const notes = await loadKeptSafe(address)
+  if (notes.length === 0) return
+  for (const n of notes) sendNotice(address, n)
+  notes.length = 0
+  void savePlayerJson(address, 'keptSafe')
 }
 
 async function resetGarden(): Promise<void> {
@@ -864,6 +957,8 @@ function playerJoinSystem(): void {
       if (address) {
         syncRateLimits.delete(address)
         testOverrides.delete(address)
+        markSeen(address)
+        void ensureFreePlanters()
         clearHeld(address.toLowerCase())
         console.log(`[Server] Player disconnected: ${address}`)
       }
@@ -897,6 +992,8 @@ function playerJoinSystem(): void {
       await sendCollection(address)
       sendTributes([address])
       sendAllHeld([address])
+      markSeen(address)
+      await deliverKeptSafe(address)
       console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
@@ -958,6 +1055,9 @@ export async function server(): Promise<void> {
     console.error('[Server] loadBoxes failed — starting with empty boxes:', err)
     for (const p of BOX_POSITIONS) if (!boxes.has(p.id)) boxes.set(p.id, emptyBox(p.id))
   }
+  await loadLastSeen()
+  await ensureFreePlanters()
+  setInterval(() => executeTask(ensureFreePlanters), 60 * 60 * 1000)   // owners age past the min-away while nobody joins
   const restoredCount = getWateredCount()
   console.log(`[Server] ${restoredCount} plants currently watered`)
 
@@ -1074,10 +1174,10 @@ export async function server(): Promise<void> {
     if (!b) return
     if (b.owner) { sendBox(b, [playerAddress]); return }          // taken — resync the tapper
     const pouch = await loadPouch(playerAddress)
-    const cap   = (await loadBoxCap(playerAddress)).cap
+    const cap   = await planterCap(playerAddress)
     if (b.owner) { sendBox(b, [playerAddress]); return }          // re-check after the awaits
     if (boxesOwnedBy(playerAddress) >= cap) {
-      sendNotice(playerAddress, cap === 1 ? 'You already have a box — harvest it when it opens' : `You already have ${cap} boxes`)
+      sendNotice(playerAddress, `You're using all ${cap} of your planters — harvest one to plant again`)
       return
     }
     if ((pouch[data.rarityTier] ?? 0) <= 0) { sendPouch(playerAddress); sendNotice(playerAddress, 'No seeds — catch some from a bloom'); return }
@@ -1100,6 +1200,7 @@ export async function server(): Promise<void> {
     sendPouch(playerAddress)
     void savePouch(playerAddress)
     void saveBoxes()
+    void ensureFreePlanters()   // this planting may have used up the reserve
   })
 
   // ── Message: harvestBox (Phase 4) ───────────────────────────
@@ -1119,7 +1220,7 @@ export async function server(): Promise<void> {
     void saveBoxes()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
-    sendNotice(playerAddress, `Harvested your ${keepsake.flower} — box is free again`)
+    sendNotice(playerAddress, `Harvested your ${plantSpeciesById(keepsake.flower)?.name ?? keepsake.flower} — your planter is free again`)
   })
 
   // ── Message: waterBox (Phase 4 — the quiet social loop) ─────
@@ -1197,6 +1298,14 @@ export async function server(): Promise<void> {
     if (bloomActive) await resetGarden()
     sendThreshold([address])
     console.log(`[Server] Admin reset bloom/sustain (requested by ${address})`)
+  })
+
+  // ── Message: adminTidyPlanter (test panel) — run the crowding rule once, now ──
+  onRoomMessage<Record<string, never>>('adminTidyPlanter', async (_data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    const b = tidyCandidate(true)
+    if (!b) { sendNotice(address, 'No planted planters to tidy'); return }
+    await tidyPlanter(b)
   })
 
   // ── Message: adminGrantWaters (test panel) — exercise flair tiers + tribute grant ──

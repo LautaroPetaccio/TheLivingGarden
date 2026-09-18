@@ -24,7 +24,7 @@ import {
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
-import { demoSeedlings, demoRevealedFlowers } from './boxSystem'
+import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter } from './boxSystem'
 import { vfxFlags, setVfxFlag } from './plantVfx'
 import {
   adminSpawnLocalSeed,
@@ -289,6 +289,15 @@ export function TestPanelUi() {
           <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 0 } }} uiBackground={{ color: vfxFlags.lights ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('lights', !vfxFlags.lights)}>
             <Label value={`Lights ${vfxFlags.lights ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
           </UiEntity>
+        </UiEntity>
+
+        {/* Crowding rule (GDD §3.1) — tidy the longest-away owner's planter now */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_OFF }}
+          onMouseDown={adminTidyPlanter}
+        >
+          <Label value="Tidy longest-away planter (crowding rule)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}
