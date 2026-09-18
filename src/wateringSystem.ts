@@ -34,6 +34,7 @@ import {
   TweenSequence,
   TweenLoop,
   timers,
+  GltfContainerLoadingState,
   PlayerIdentityData,
   MaterialTransparencyMode,
 } from '@dcl/sdk/ecs'
@@ -101,7 +102,8 @@ const ANIM_CLOSE_PLAY_SPEED = 0.25         // playback speed — slow wilt
 const ANIM_TRANSITION_MS    = 6_000        // ms — duration of Play clip
 const ANIM_CLOSE_PLAY_MS    = Math.round(6_033 / ANIM_CLOSE_PLAY_SPEED)  // 24 132 ms at 0.25×
 const WILT_SOUND_DELAY_MS   = 5_000        // ms after ClosePlay starts before wilt sound plays
-const ANIMATOR_INIT_DELAY_MS = 1000     // ms — defer Animator.create until GLBs load
+// LoadingState values (const enum in @dcl/ecs internals, not re-exported — same as boxSystem)
+const LS_NOT_FOUND = 2, LS_FINISHED_WITH_ERROR = 3, LS_FINISHED = 4
 
 // ── Unhealthy Rose (shown while plant is not watered) ─────────
 const UNHEALTHY_ROSE_SRC  = 'assets/scene/Models/UnhealthyRose/UnhealthyRose.glb'
@@ -284,6 +286,51 @@ const entityPlantId     = new Map<Entity, string>()   // entity → plantId (for
 
 /** plant entity → its UnhealthyRose entity */
 const roseMap = new Map<Entity, Entity>()
+
+// ── Plant / rose animators: created when each GLB reports loaded ──────────────
+const pendingPlantAnimators = new Set<Entity>()
+const pendingRoseAnimators  = new Set<Entity>()
+
+/** LS_FINISHED → true; error/not-found → dropped (logged); still loading → false. */
+function glbReady(e: Entity, pending: Set<Entity>): boolean {
+  const st = GltfContainerLoadingState.getOrNull(e)?.currentState
+  if (st === LS_NOT_FOUND || st === LS_FINISHED_WITH_ERROR) {
+    pending.delete(e)
+    console.log(`[WateringSystem] GLB failed to load for entity ${e} — no animator`)
+    return false
+  }
+  return st === LS_FINISHED
+}
+
+function plantAnimatorInitSystem(): void {
+  for (const entity of [...pendingPlantAnimators]) {
+    if (!glbReady(entity, pendingPlantAnimators)) continue
+    pendingPlantAnimators.delete(entity)
+    Animator.createOrReplace(entity, {
+      states: [
+        { clip: ANIM_DROOPY_STATE,  playing: false, loop: true  },
+        { clip: ANIM_TO_HEALTHY,    playing: false, loop: false },
+        { clip: ANIM_HEALTHY_STATE, playing: false, loop: true  },
+        { clip: ANIM_CLOSE_PLAY,    playing: false, loop: false, speed: ANIM_CLOSE_PLAY_SPEED },
+      ],
+    })
+    // The state as of NOW: watered, or held healthy by a bloom (bloomTriggered snaps
+    // unwatered plants to healthy; its playSingleAnimation was a no-op before this existed).
+    const healthy = (PlantData.getOrNull(entity)?.isWatered ?? false) || isBloomActive() || bloomActive
+    Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
+  }
+  for (const rose of [...pendingRoseAnimators]) {
+    if (!glbReady(rose, pendingRoseAnimators)) continue
+    pendingRoseAnimators.delete(rose)
+    Animator.createOrReplace(rose, {
+      states: [
+        { clip: ANIM_UNHEALTHY_IDLE, playing: false, loop: true  },
+        { clip: ANIM_CLOSE_PLAY,     playing: false, loop: false },
+      ],
+    })
+    Animator.playSingleAnimation(rose, ANIM_UNHEALTHY_IDLE, true)
+  }
+}
 
 function showRose(entity: Entity)  {
   const r = roseMap.get(entity); if (r) VisibilityComponent.createOrReplace(r, { visible: true  })
@@ -1195,51 +1242,20 @@ export function setupWateringSystem(): void {
   for (const name of PLANT_NAMES) setupPlant(name)
   resizeClickboxes()
 
-  // Deferred animator setup — ensures GltfContainers have loaded
-  timers.setTimeout(() => {
-    for (const name of PLANT_NAMES) {
-      try {
-      const entity = engine.getEntityOrNullByName(name)
-      if (!entity) continue
-      const isWatered = PlantData.getOrNull(entity)?.isWatered ?? false
-
-      // demoPlant animator
-      Animator.createOrReplace(entity, {
-        states: [
-          { clip: ANIM_DROOPY_STATE,  playing: false, loop: true  },
-          { clip: ANIM_TO_HEALTHY,    playing: false, loop: false },
-          { clip: ANIM_HEALTHY_STATE, playing: false, loop: true  },
-          { clip: ANIM_CLOSE_PLAY,    playing: false, loop: false, speed: ANIM_CLOSE_PLAY_SPEED },
-        ],
-      })
-      Animator.playSingleAnimation(entity, isWatered ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
-
-      // UnhealthyRose animator
-      const roseEntity = roseMap.get(entity)
-      if (roseEntity) {
-        Animator.createOrReplace(roseEntity, {
-          states: [
-            { clip: ANIM_UNHEALTHY_IDLE, playing: false, loop: true  },
-            { clip: ANIM_CLOSE_PLAY,     playing: false, loop: false },
-          ],
-        })
-        Animator.playSingleAnimation(roseEntity, ANIM_UNHEALTHY_IDLE, true)
-      }
-
-      // Set correct initial visibility
-      if (isWatered) {
-        showPlant(entity)
-        hideRose(entity)
-      } else {
-        hidePlant(entity)
-        showRose(entity)
-      }
-      } catch (err) {
-        // One plant failing (e.g. GLB not loaded yet) must not abort init for the rest
-        console.log(`[WateringSystem] Deferred init failed for ${name}:`, err)
-      }
-    }
-  }, ANIMATOR_INIT_DELAY_MS)
+  // Starting look now (no GLB needed for visibility); animators once each GLB has loaded.
+  // Was one 1 s timer doing both: on a slow/late-joining client it fired before the GLBs
+  // loaded, and when the join sync (incl. an active bloom) arrived first it reset
+  // bloom-healthy plants back to droopy. Server state updates visibility from here on.
+  for (const name of PLANT_NAMES) {
+    const entity = engine.getEntityOrNullByName(name)
+    if (!entity) continue
+    hidePlant(entity)
+    showRose(entity)
+    pendingPlantAnimators.add(entity)
+    const rose = roseMap.get(entity)
+    if (rose) pendingRoseAnimators.add(rose)
+  }
+  engine.addSystem(plantAnimatorInitSystem)
 
   setupPetalSystem()
   setupSparkleSystem()
