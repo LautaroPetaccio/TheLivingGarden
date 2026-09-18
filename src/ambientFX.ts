@@ -16,6 +16,10 @@ import {
   Transform,
   Billboard,
   BillboardMode,
+  Tween,
+  TweenSequence,
+  TweenLoop,
+  EasingFunction,
 } from '@dcl/sdk/ecs'
 import { Color4, Quaternion } from '@dcl/sdk/math'
 import { BLOOM_CENTER, SPARKLE_SRC, GARDEN_BOUNDS } from './shared/config'
@@ -30,27 +34,33 @@ const MOTE_COUNT  = 20
 const MOTE_Y_MIN  = 0.3
 const MOTE_Y_MAX  = 3.5
 
-interface Mote {
-  entity:     Entity
-  baseX:      number
-  z:          number
-  y:          number
-  speed:      number
-  swayPhase:  number
-  swayFreq:   number
-  swayAmp:    number
-}
-
-const motes: Mote[] = []
-
+// Motion is renderer-side (was a per-frame Transform write on every mote): a parent 'sway'
+// entity yoyos along X (sine), the mote child rises MIN→MAX and restarts at the bottom.
+// currentTime spreads the loops so they don't move in step.
 function setupMotes() {
   for (let i = 0; i < MOTE_COUNT; i++) {
-    const ent   = engine.addEntity()
     const baseX = rnd(GARDEN_BOUNDS.xMin, GARDEN_BOUNDS.xMax)
     const z     = rnd(GARDEN_BOUNDS.zMin, GARDEN_BOUNDS.zMax)
     const y     = rnd(MOTE_Y_MIN, MOTE_Y_MAX)
     const sc    = rnd(0.04, 0.10)
-    Transform.create(ent, { position: { x: baseX, y, z }, scale: { x: sc, y: sc, z: sc } })
+    const speed = rnd(0.03, 0.12), swayFreq = rnd(0.3, 0.8), swayAmp = rnd(0.1, 0.30)
+
+    const sway = engine.addEntity()
+    Transform.create(sway, { position: { x: baseX, y: 0, z } })
+    Tween.create(sway, {
+      duration: Math.round(Math.PI / swayFreq * 1000), easingFunction: EasingFunction.EF_EASESINE, currentTime: Math.random(),
+      mode: { $case: 'move', move: { start: { x: baseX - swayAmp, y: 0, z }, end: { x: baseX + swayAmp, y: 0, z } } },
+    })
+    TweenSequence.create(sway, { sequence: [], loop: TweenLoop.TL_YOYO })
+
+    const ent = engine.addEntity()
+    Transform.create(ent, { parent: sway, position: { x: 0, y, z: 0 }, scale: { x: sc, y: sc, z: sc } })
+    Tween.create(ent, {
+      duration: Math.round((MOTE_Y_MAX - MOTE_Y_MIN) / speed * 1000), easingFunction: EasingFunction.EF_LINEAR,
+      currentTime: (y - MOTE_Y_MIN) / (MOTE_Y_MAX - MOTE_Y_MIN),
+      mode: { $case: 'move', move: { start: { x: 0, y: MOTE_Y_MIN, z: 0 }, end: { x: 0, y: MOTE_Y_MAX, z: 0 } } },
+    })
+    TweenSequence.create(ent, { sequence: [], loop: TweenLoop.TL_RESTART })
     MeshRenderer.setPlane(ent)
     Material.setPbrMaterial(ent, {
       texture:           Material.Texture.Common({ src: SPARKLE_SRC }),
@@ -61,8 +71,6 @@ function setupMotes() {
       emissiveIntensity: 0.8,
     })
     Billboard.create(ent, { billboardMode: BillboardMode.BM_ALL })
-    motes.push({ entity: ent, baseX, z, y, speed: rnd(0.03, 0.12),
-      swayPhase: rnd(0, Math.PI * 2), swayFreq: rnd(0.3, 0.8), swayAmp: rnd(0.1, 0.30) })
   }
 }
 
@@ -288,13 +296,7 @@ export function setupAmbientFX(): void {
 // =============================================================
 
 export function ambientFXSystem(dt: number): void {
-  // ── Dust motes ──────────────────────────────────────────────
-  for (const m of motes) {
-    m.y += m.speed * dt
-    if (m.y > MOTE_Y_MAX) m.y = MOTE_Y_MIN
-    m.swayPhase += m.swayFreq * dt
-    Transform.getMutable(m.entity).position = { x: m.baseX + Math.sin(m.swayPhase) * m.swayAmp, y: m.y, z: m.z }
-  }
+  // (Dust motes move renderer-side — see setupMotes.)
 
   // ── Bloom shockwave rings ────────────────────────────────────
   for (const ring of shockRings) {

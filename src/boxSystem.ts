@@ -91,6 +91,7 @@ interface BoxView {
   base:         Entity
   label:        Entity
   plant:        Entity | null   // sprout or flower entity while planted
+  plantKey:     string          // what `plant` currently shows — rebuilt only when this changes
   balloon:      Entity | null   // animated balloon while the box holds a seed or flower
   balloonText:  Entity | null   // countdown / "Ready to Harvest" on the balloon
   balloonMover: Entity | null   // text parent: replays Bone.003's position (Tween)
@@ -235,9 +236,33 @@ function createBalloon(v: BoxView, pos: { x: number; z: number }): void {
   v.balloonAnimPending = true
 }
 
+/** Everything setPlantVisual depends on. boxState arrives on every watering too, and the
+ *  plant (GLB + rarity VFX) used to be torn down and rebuilt each time. */
+function plantKeyFor(v: BoxView): string {
+  return v.owner ? `${v.owner}|${v.opened}|${v.flower}|${v.rarityTier}` : ''
+}
+
+/** Boxes whose plant must be (re)built. One per frame, nearest to the player first, so a
+ *  join sync (all 8 boxes in one tick) doesn't instantiate every GLB + emitter at once. */
+const pendingPlant = new Set<BoxView>()
+function plantRevealSystem(): void {
+  if (pendingPlant.size === 0) return
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  let best: BoxView | null = null, bestD = Infinity
+  for (const v of pendingPlant) {
+    const p = BOX_POSITIONS.find(b => b.id === v.boxId)!
+    const d = me ? (p.x - me.x) ** 2 + (p.z - me.z) ** 2 : 0
+    if (d < bestD) { bestD = d; best = v }
+  }
+  if (best === null) return
+  pendingPlant.delete(best)
+  setPlantVisual(best, BOX_POSITIONS.find(b => b.id === best!.boxId)!)
+  best.plantKey = plantKeyFor(best)
+}
+
 function refresh(v: BoxView): void {
   const pos = BOX_POSITIONS.find(p => p.id === v.boxId)!
-  setPlantVisual(v, pos)
+  if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
   setBalloonVisual(v, pos)
   if (v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, Date.now())
   TextShape.getMutable(v.label).text = labelFor(v)
@@ -293,7 +318,7 @@ function createBox(p: { id: string; x: number; z: number }): BoxView {
   const sign  = createSign({ x: p.x, y: PLAQUE_Y, z: p.z + PLAQUE_OFFSET_Z }, 180, PLAQUE_SIZE, PLAQUE_FONT, false)
   const label = sign.text
 
-  const v: BoxView = { boxId: p.id, base, label, plant: null, balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, label, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
     { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
@@ -423,5 +448,6 @@ export function setupBoxSystem(): void {
   setupPlantVfx()
   engine.addSystem(boxTickSystem)
   engine.addSystem(balloonStartSystem)
+  engine.addSystem(plantRevealSystem)
   console.log(`[Boxes] ${views.size} seed boxes ready · boxState listeners=${room.listenerCount('boxState')}`)
 }

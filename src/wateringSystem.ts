@@ -31,6 +31,8 @@ import {
   VisibilityComponent,
   Tween,
   EasingFunction,
+  TweenSequence,
+  TweenLoop,
   timers,
   PlayerIdentityData,
   MaterialTransparencyMode,
@@ -136,19 +138,9 @@ const waterDropMap = new Map<Entity, Entity>()
 // ── Droplet idle float animation ──────────────────────────────
 const DROP_ANIM_AMPLITUDE = 0.065   // metres (within 0.05–0.08)
 const DROP_ANIM_SPEED     = 1.1     // radians / second — slow, calm
-
-interface DropletAnim { entity: Entity; phase: number }
-const dropletAnims: DropletAnim[] = []
-let   dropletTime = 0
-
-function dropletIdleSystem(dt: number): void {
-  dropletTime += dt
-  for (const d of dropletAnims) {
-    const tf = Transform.getMutableOrNull(d.entity)
-    if (!tf) continue
-    tf.position.y = WATER_DROP_Y + Math.sin(dropletTime * DROP_ANIM_SPEED + d.phase) * DROP_ANIM_AMPLITUDE
-  }
-}
+// The bob is a renderer-side yoyo Tween on a parent 'bob' entity (the drop itself carries the
+// fade scale Tween — one Tween per entity). Was a per-frame Transform write on all 38 drops.
+const DROP_BOB_HALF_MS    = Math.round(Math.PI / DROP_ANIM_SPEED * 1000)
 
 // ── Sounds ────────────────────────────────────────────────────
 const SND_HOVER    = 'assets/scene/Sounds/hover.mp3'
@@ -256,6 +248,7 @@ let bloomActive           = false  // true from startBloomPhases() until end of 
 let emoteActive          = false
 let lastSyncRequestMs    = 0
 const SYNC_REQUEST_MIN_MS = 5_000   // don't flood server with requestFullSync on rapid reloads
+let lastDailyStateMs      = 0       // last playerDailyState (the head of every full sync) — see room.onReady
 
 const wateredByLabelMap = new Map<Entity, Entity>()
 // Flair icon above a "Watered by" label — created lazily (most waterers have no tier yet),
@@ -1061,12 +1054,18 @@ function setupPlant(plantName: string) {
   enablePlantClick(entity)
 
   // ── Water drop indicator ─────────────────────────────────────
+  const bobEnt = engine.addEntity()
+  Transform.create(bobEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, parent: anchor })
+  Tween.create(bobEnt, {
+    duration: DROP_BOB_HALF_MS, easingFunction: EasingFunction.EF_EASESINE, currentTime: Math.random(),
+    mode: { $case: 'move', move: { start: { x: 0, y: WATER_DROP_Y - DROP_ANIM_AMPLITUDE, z: 0 }, end: { x: 0, y: WATER_DROP_Y + DROP_ANIM_AMPLITUDE, z: 0 } } },
+  })
+  TweenSequence.create(bobEnt, { sequence: [], loop: TweenLoop.TL_YOYO })
   const dropEnt = engine.addEntity()
-  Transform.create(dropEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: anchor })
+  Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: bobEnt })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
   Billboard.create(dropEnt, { billboardMode: BillboardMode.BM_Y })
   waterDropMap.set(entity, dropEnt)
-  dropletAnims.push({ entity: dropEnt, phase: Math.random() * Math.PI * 2 })
 
   // "Watered by" label — hidden until plant is watered
   const wateredByLabel = engine.addEntity()
@@ -1255,7 +1254,6 @@ export function setupWateringSystem(): void {
 
   engine.addSystem(resetAnimSystem)
   engine.addSystem(emoteWatchSystem)
-  engine.addSystem(dropletIdleSystem)
   engine.addSystem(petalParticleSystem)
   engine.addSystem(sparkleSystem)
   engine.addSystem(bloomSparkleSystem)
@@ -1281,6 +1279,12 @@ export function setupWateringSystem(): void {
     const now = Date.now()
     if (now - lastSyncRequestMs < SYNC_REQUEST_MIN_MS) {
       console.log('[Client] requestFullSync skipped — rate limited')
+      return
+    }
+    // The server's join sync usually lands just before onReady; asking again re-applied the
+    // whole garden a second later (KJ log 2026-09-18 15:36:30/31) — double the join spike.
+    if (roomReady && now - lastDailyStateMs < SYNC_REQUEST_MIN_MS) {
+      console.log('[Client] requestFullSync skipped — join sync just arrived')
       return
     }
     lastSyncRequestMs = now
@@ -1309,6 +1313,7 @@ export function setupWateringSystem(): void {
   })
 
   room.onMessage('playerDailyState', (data) => {
+    lastDailyStateMs = Date.now()
     // Clock sync — keep offset calibrated on every server message
     if (data.sentAt)    clockSync.updateOffset(data.sentAt)
     // Store server-authoritative bloom time converted to local clock
