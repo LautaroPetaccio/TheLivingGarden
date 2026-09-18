@@ -4,7 +4,7 @@
   "description": "SDK7 Template scene",
   "scripts": {
     "prestart": "node patch-glbs.cjs",
-    "start": "sdk-commands start",
+    "start": "NODE_OPTIONS=\"$NODE_OPTIONS --import \\\"$PWD/server-watchdog.mjs\\\"\" sdk-commands start",
     "predeploy": "node patch-glbs.cjs && node check-glb.cjs",
     "deploy": "sdk-commands deploy",
     "build": "sdk-commands build",
