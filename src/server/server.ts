@@ -23,6 +23,9 @@ import {
   FAST_PLANT_EXPIRY_MS,
   FAST_PLANT_NAMES,
   BLOOM_RESET_DELAY_MS,
+  bloomDurationMs,
+  SEED_WAVE_GAP_MS,
+  SEED_LAST_WAVE_BEFORE_END_MS,
   bloomSustainMs,
   BLOOM_WINDOWS,
   plantDecayMs,
@@ -68,6 +71,9 @@ let   bloomStartedAt:  number | null = null   // ms timestamp when current bloom
 let   countdownPaused  = false
 let   bloomScale       = 1                    // bloomScaleFor(gardeners) of the active bloom
 let   bloomVariant     = 'classic'            // BLOOM_VARIANTS id of the active bloom (Phase 6)
+let   bloomDuration    = BLOOM_RESET_DELAY_MS // ms length of the active bloom (bloomDurationMs)
+/** Players who watered since the last reset — the bloom's length scales with them. */
+const cycleContributors = new Set<string>()
 
 
 // ── Storage write queue ──────────────────────────────────────
@@ -471,10 +477,12 @@ function triggerBloom(forcedVariant = ''): void {
   bloomScale     = forcedVariant ? 1 : bloomScaleFor(knownPlayers.size)
   const variant  = forcedVariant ? bloomVariantById(forcedVariant) : rollBloomVariant(bloomScale)
   bloomVariant   = variant.id
-  console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name})`)
-  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0 })
-  spawnBloomSeeds()
-  setTimeout(() => executeTask(resetGarden), BLOOM_RESET_DELAY_MS)
+  // Forced (test-panel) blooms are full-scale, so full length too
+  bloomDuration  = forcedVariant ? BLOOM_RESET_DELAY_MS : bloomDurationMs(cycleContributors.size)
+  console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name}, ${cycleContributors.size} contributor(s) → ${bloomDuration / 60_000} min)`)
+  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration })
+  scheduleSeedWaves()
+  setTimeout(() => executeTask(resetGarden), bloomDuration)
 }
 
 // ---------------------------------------------------------------
@@ -499,9 +507,33 @@ function sendSeed(seed: SeedRecord, to?: string[]): void {
   room.send('seedSpawned', payload, to ? { to } : undefined)
 }
 
-/** Roll and broadcast this bloom's seed drop — yield and rarity scale with bloom size. */
-function spawnBloomSeeds(): void {
-  const count        = seedSpawnCount(bloomScale)
+/** Seed trickle (KJ 2026-09-18): the bloom's seeds fall in waves across the bloom —
+ *  something to do the whole time, at any length. Waves are ≤ SEED_WAVE_GAP_MS apart, the
+ *  first at the start and the last SEED_LAST_WAVE_BEFORE_END_MS before the end; the
+ *  earliest waves take the leftovers. Total yield/rarity unchanged (bloom size). */
+const seedWaveTimers: Array<ReturnType<typeof setTimeout>> = []
+
+function scheduleSeedWaves(): void {
+  cancelSeedWaves()
+  const total  = seedSpawnCount(bloomScale)
+  const window = Math.max(0, bloomDuration - SEED_LAST_WAVE_BEFORE_END_MS)
+  const waves  = Math.max(1, Math.min(total, Math.floor(window / SEED_WAVE_GAP_MS) + 1))
+  const gap    = waves > 1 ? window / (waves - 1) : 0
+  for (let w = 0; w < waves; w++) {
+    const n = Math.floor(total / waves) + (w < total % waves ? 1 : 0)
+    if (w === 0) { spawnBloomSeeds(n); continue }
+    seedWaveTimers.push(setTimeout(() => executeTask(async () => { if (bloomActive) spawnBloomSeeds(n) }), Math.round(gap * w)))
+  }
+  console.log(`[Server] Seed trickle: ${total} seeds in ${waves} wave(s) over ${Math.round(window / 1000)}s`)
+}
+
+function cancelSeedWaves(): void {
+  for (const t of seedWaveTimers) clearTimeout(t)
+  seedWaveTimers.length = 0
+}
+
+/** Roll and broadcast one wave of seeds — rarity scales with bloom size. */
+function spawnBloomSeeds(count: number): void {
   const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult
   const now          = Date.now()
   const batch: SeedRecord[] = []
@@ -520,7 +552,7 @@ function spawnBloomSeeds(): void {
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
     sendSeed(seed)
   }
-  console.log(`[Server] Spawned ${count} bloom seeds (${batch.filter(s => s.rarityTier > 0).length} above Common, scale ${bloomScale.toFixed(2)})`)
+  console.log(`[Server] Seed wave: ${count} seeds (${batch.filter(s => s.rarityTier > 0).length} above Common, scale ${bloomScale.toFixed(2)})`)
 }
 
 /** Seeds this player can still collect — for joins/resyncs mid-bloom. */
@@ -847,6 +879,8 @@ async function resetGarden(): Promise<void> {
   if (!bloomActive) return
   console.log('[Server] Resetting garden...')
   cancelBloomSustain()
+  cancelSeedWaves()
+  cycleContributors.clear()   // the next bloom's length counts the next cycle's waterers
   bloomActive    = false
   bloomStartedAt = null
 
@@ -995,7 +1029,7 @@ function playerJoinSystem(): void {
       await loadPouch(address)
       sendPouch(address)
       // Re-send bloom state to players who join while it is already active
-      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0 }, { to: [address] })
+      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
@@ -1117,6 +1151,7 @@ export async function server(): Promise<void> {
 
       // Count on both boards: this week's (resets) and lifetime (flair source)
       const tierBefore = tierOf(playerAddress)
+      cycleContributors.add(playerAddress.toLowerCase())
       bumpWaterTotals(playerAddress)
       const tier = tierOf(playerAddress)
 
@@ -1406,7 +1441,7 @@ export async function server(): Promise<void> {
     sendThreshold([address])
     await loadPouch(address)
     sendPouch(address)
-    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0 }, { to: [address] })
+    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)

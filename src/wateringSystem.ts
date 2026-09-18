@@ -398,6 +398,7 @@ function setVisible(entity: Entity | null, visible: boolean) {
 // ── Bloom-reset countdown ticker ─────────────────────────────
 let bloomResetTickerGen  = 0
 let bloomResetStartMs: number | null = null
+let bloomDurationMs = BLOOM_RESET_DELAY_MS   // this bloom's length, from bloomTriggered (contributor-scaled)
 
 /** @param elapsedMs how far into the bloom we join (late joiners) — keeps every client's
  *  countdown and end-of-bloom moment aligned with the server's. */
@@ -412,12 +413,12 @@ function startBloomResetTicker(elapsedMs = 0): void {
   // against stale timers firing during a subsequent bloom cycle (test mode).
   timers.setTimeout(() => {
     if (isBloomActive()) startBloomClose()
-  }, Math.max(0, BLOOM_RESET_DELAY_MS - elapsedMs))
+  }, Math.max(0, bloomDurationMs - elapsedMs))
 
   function tick(): void {
     if (bloomResetTickerGen !== myGen) return
     const elapsed   = Date.now() - (bloomResetStartMs ?? Date.now())
-    const remaining = Math.max(0, BLOOM_RESET_DELAY_MS - elapsed)
+    const remaining = Math.max(0, bloomDurationMs - elapsed)
     const totalSecs = Math.ceil(remaining / 1_000)
     const m = Math.floor(totalSecs / 60)
     const s = totalSecs % 60
@@ -425,7 +426,7 @@ function startBloomResetTicker(elapsedMs = 0): void {
       ? (m > 0 ? `${m}m ${s}s` : `${s}s`)
       : '…'
     setBloomResetText(label)
-    updateBloomRemaining(totalSecs > 0 ? `${m}:${String(s).padStart(2, '0')}` : '', remaining)   // HUD ring shows time left
+    updateBloomRemaining(totalSecs > 0 ? `${m}:${String(s).padStart(2, '0')}` : '', remaining, bloomDurationMs)   // HUD ring shows time left
     if (remaining > 0) timers.setTimeout(tick, 1_000)
     // No startBloomClose() here — the dedicated timer above handles it
   }
@@ -1433,6 +1434,7 @@ export function setupWateringSystem(): void {
     resetClientSustain()   // sustain complete — bloom is firing
     showBannerBloom(bannerLabel)   // switch banner from countdown → bloom before visual effects ramp up
     for (const e of bloomCountdownLabels) TextShape.getMutable(e).text = ''  // clear countdown before reset ticker starts
+    bloomDurationMs = typeof data?.durationMs === 'number' && data.durationMs > 0 ? data.durationMs : BLOOM_RESET_DELAY_MS
     startBloomResetTicker(typeof data?.elapsedMs === 'number' && data.elapsedMs > 0 ? data.elapsedMs : 0)  // countdown to garden reset, aligned for late joiners
     if (!isBloomActive()) {
       triggerBloomEvent()

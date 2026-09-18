@@ -43,7 +43,7 @@ export const SEEDS_AT_FULL      = 8         // TUNING — full-garden bloom (sca
 export const SEED_RARE_AT_SOLO  = 0.10      // TUNING — "mostly normal, occasionally rare"
 export const SEED_RARE_AT_FULL  = 0.20      // TUNING — full blooms roll rarer
 export const SEED_FALL_MS       = 5_000     // drift-down duration from spawn height to ground
-export const SEED_LIFETIME_MS   = 120_000   // ungathered seeds fade before the 6-min bloom ends
+export const SEED_LIFETIME_MS   = 120_000   // ungathered seeds fade after 2 min (the trickle's last wave lands 1 min before the end)
 export const SEED_GATHER_RADIUS = 2.0       // m — walking this close starts the drift toward you
 export const SEED_COLLECT_RADIUS = 0.7      // m — seed this close is gathered (client sends request)
 export const SEED_SPAWN_HEIGHT  = 7         // m — seeds fall from the bloom canopy
@@ -76,7 +76,22 @@ export const DAILY_WATER_LIMIT  = 8
 export const WATERED_EXPIRY_MS  = 3 * 60 * 1000        // 3 minutes
 export const FAST_PLANT_EXPIRY_MS = 75_000               // 75 seconds
 /** How long after bloom triggers before the server resets all plants. */
-export const BLOOM_RESET_DELAY_MS = 6 * 60_000          // 6 minutes
+export const BLOOM_RESET_DELAY_MS = 6 * 60_000          // 6 minutes — the LONGEST bloom (see bloomDurationMs)
+
+/** Bloom length by CONTRIBUTORS this cycle (players who watered since the last reset —
+ *  not just present, so idlers can't stretch it). KJ 2026-09-18: solo 2 min … 6+ → 6 min.
+ *  Index = contributors − 1; beyond the table stays at the last value. */
+const BLOOM_MINUTES_BY_CONTRIBUTORS = [2, 3, 3.5, 4, 5, 6]   // TUNING
+export function bloomDurationMs(contributors: number): number {
+  const i = Math.max(1, Math.min(BLOOM_MINUTES_BY_CONTRIBUTORS.length, contributors)) - 1
+  return BLOOM_MINUTES_BY_CONTRIBUTORS[i] * 60_000
+}
+
+/** Seed trickle: the bloom's seeds fall in waves across the bloom instead of all at once.
+ *  Waves are SEED_WAVE_GAP_MS apart at most; the last one lands SEED_LAST_WAVE_BEFORE_END_MS
+ *  before the bloom ends so it can still be gathered in the bloom. */
+export const SEED_WAVE_GAP_MS             = 30_000   // TUNING
+export const SEED_LAST_WAVE_BEFORE_END_MS = 60_000   // TUNING
 
 // ── Scene-wide spatial / asset constants ─────────────────────
 /** World-space centre of the Bloom model — used for sound, sparkles, shockwaves. */

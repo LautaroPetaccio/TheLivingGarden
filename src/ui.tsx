@@ -125,9 +125,9 @@ export function updatePlayerCount(n: number): void {
 }
 
 /** During a bloom the ring shows time left (wateringSystem's reset ticker pushes it). */
-export function updateBloomRemaining(label: string, remainingMs: number): void {
+export function updateBloomRemaining(label: string, remainingMs: number, totalMs = BLOOM_RESET_DELAY_MS): void {
   bloomRemainingLabel = label
-  bloomRemainingFrac  = Math.max(0, Math.min(1, remainingMs / BLOOM_RESET_DELAY_MS))
+  bloomRemainingFrac  = Math.max(0, Math.min(1, remainingMs / totalMs))   // blooms vary in length (contributors)
 }
 
 // ---------------------------------------------------------------
