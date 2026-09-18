@@ -34,13 +34,27 @@ export function nextSeedTier(): number | null {
   return firstAvailable === -1 ? null : firstAvailable
 }
 
+/** The keepsake kind in my hand (server-confirmed via heldFlower), or null. */
+export interface HeldKind { flower: string; rarityTier: number }
+let held: HeldKind | null = null
+export function getHeld(): HeldKind | null { return held }
+export function setHeld(h: HeldKind | null): void { held = h }
+/** Collection index of a keepsake of the held kind (the newest), or null. */
+export function heldFlowerIndex(): number | null {
+  if (!held) return null
+  for (let i = flowers.length - 1; i >= 0; i--) if (flowers[i].flower === held.flower && flowers[i].rarityTier === held.rarityTier) return i
+  return null
+}
+
 export function getFlowers(): Keepsake[] { return flowers }
 export function setFlowers(list: Keepsake[]): void { flowers = list }
 export function getBoxCap(): number { return boxCap }
 export function setBoxCap(n: number): void { boxCap = n }
 
 // Gifting is owned by giftSystem; it registers itself here so the menu can use it.
-let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void } | null = null
+let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void; hold(flowerIndex: number): void } | null = null
 export function registerGiftApi(api: NonNullable<typeof giftApi>): void { giftApi = api }
 export function gardenersHere(): Gardener[] { return giftApi ? giftApi.gardenersHere() : [] }
 export function giveFlower(toAddress: string, flowerIndex: number): void { giftApi?.give(toAddress, flowerIndex) }
+/** Ask the server to put this keepsake in my hand (-1 = empty hand). One at a time. */
+export function holdFlower(flowerIndex: number): void { giftApi?.hold(flowerIndex) }

@@ -58,6 +58,10 @@ export const room = registerMessages({
   giftFlower:       Schemas.Map({ toAddress: Schemas.String, flowerIndex: Schemas.Number }),
   /** Server → player: their keepsake collection + box cap (after harvest/gift, and on join). */
   collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
+  /** Hold one keepsake in your hand (by collection index), or -1 to put it away. */
+  holdFlower:       Schemas.Map({ flowerIndex: Schemas.Number }),
+  /** Server → everyone: what a gardener holds (flower '' = empty hand). Also sent per holder on join. */
+  heldFlower:       Schemas.Map({ address: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
   /** Server → receiver of a gift. */
   giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
   /** Server → player: short feedback toast (rejections and confirmations). Broadcast when untargeted. */

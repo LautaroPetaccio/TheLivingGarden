@@ -48,6 +48,7 @@ import {
   FLOWER_COLLECTION_CAP,
   BOX_WATER_SHAVE_MS,
   BOX_WATER_MAX,
+  plantSpeciesById,
 } from '../shared/config'
 
 // ---------------------------------------------------------------
@@ -665,6 +666,17 @@ async function sendCollection(address: string): Promise<void> {
   room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap.cap }, { to: [address] })
 }
 
+// ── v2: held flower — one keepsake per gardener, shown in their hand to everyone.
+// In memory only: an empty hand on rejoin is fine; the flower itself stays in the collection.
+const heldFlowers = new Map<string, { flower: string; rarityTier: number }>()   // lowercase address →
+
+function sendHeld(address: string, to?: string[]): void {
+  const h = heldFlowers.get(address)
+  room.send('heldFlower', { address, flower: h?.flower ?? '', rarityTier: h?.rarityTier ?? 0 }, to ? { to } : undefined)
+}
+function sendAllHeld(to: string[]): void { for (const a of heldFlowers.keys()) sendHeld(a, to) }
+function clearHeld(address: string): void { if (heldFlowers.delete(address)) sendHeld(address) }
+
 function sendNotice(address: string, text: string): void {
   room.send('notice', { text }, { to: [address] })
 }
@@ -849,6 +861,7 @@ function playerJoinSystem(): void {
       if (address) {
         syncRateLimits.delete(address)
         testOverrides.delete(address)
+        clearHeld(address.toLowerCase())
         console.log(`[Server] Player disconnected: ${address}`)
       }
     }
@@ -880,6 +893,7 @@ function playerJoinSystem(): void {
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
       sendTributes([address])
+      sendAllHeld([address])
       console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
@@ -1139,6 +1153,10 @@ export async function server(): Promise<void> {
     const fromName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
     const toName   = leaderboard.get(to)?.displayName ?? to.slice(0, 8) + '…'
     const [gift] = mine.splice(idx, 1)
+    // Gave away the last one of the kind you're holding → empty hand
+    const held = heldFlowers.get(playerAddress.toLowerCase())
+    if (held && held.flower === gift.flower && held.rarityTier === gift.rarityTier
+        && !mine.some(f => f.flower === held.flower && f.rarityTier === held.rarityTier)) clearHeld(playerAddress.toLowerCase())
     theirs.push({ ...gift, from: fromName, at: Date.now() })
     console.log(`[Server] ${fromName} gifted ${gift.flower} (tier ${gift.rarityTier}) to ${toName}`)
     void savePlayerJson(playerAddress, 'flowers')
@@ -1146,7 +1164,18 @@ export async function server(): Promise<void> {
     void sendCollection(playerAddress)
     void sendCollection(to)
     room.send('giftReceived', { from: fromName, flower: gift.flower, rarityTier: gift.rarityTier }, { to: [to] })
-    sendNotice(playerAddress, `You gave your ${gift.flower} to ${toName}`)
+    sendNotice(playerAddress, `You gave your ${plantSpeciesById(gift.flower)?.name ?? gift.flower} to ${toName}`)
+  })
+
+  // ── Message: holdFlower — show one of your keepsakes in your hand (-1 = put away) ──
+  onRoomMessage<{ flowerIndex: number }>('holdFlower', async (data, playerAddress) => {
+    const a   = playerAddress.toLowerCase()
+    const idx = Math.floor(data.flowerIndex)
+    if (idx < 0) { clearHeld(a); return }
+    const f = (await loadFlowers(playerAddress))[idx]
+    if (!f) { sendNotice(playerAddress, 'You no longer have that flower'); return }
+    heldFlowers.set(a, { flower: f.flower, rarityTier: f.rarityTier })
+    sendHeld(a)
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
@@ -1235,6 +1264,7 @@ export async function server(): Promise<void> {
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)
     sendTributes([address])
+    sendAllHeld([address])
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 

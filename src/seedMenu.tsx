@@ -5,15 +5,20 @@
 //   Seeds       what you hold, grouped by rarity tier — tap a tile to choose which
 //               tier the next planting uses (replaced the old Normal/Rare two-button
 //               toggle 2026-09-18, when rarity grew from 2 tiers to 8)
-//   My flowers  your keepsakes (grouped), species collection progress, Gift
+//   My flowers  your keepsakes (grouped, species thumbnail + rarity dot), species
+//               collection progress, Hold (one flower in your hand, seen by all) and Gift
 // Phone: a centred sheet (both thumbs stay free). Desktop: docked under the
 // ring on the right, so the garden stays visible.
 // Reads playerInventory + the rarity/species tables — no gameplay imports.
 // =============================================================
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
-import { PLANT_SPECIES, rarityTierById } from './shared/config'
-import { getPouch, getPreferredTier, setPreferredTier, nextSeedTier, getFlowers, gardenersHere, giveFlower } from './playerInventory'
+import { PLANT_SPECIES, rarityTierById, plantSpeciesById } from './shared/config'
+import { setPreferredTier, nextSeedTier, getPouch, getFlowers, gardenersHere, giveFlower, getHeld, holdFlower } from './playerInventory'
+
+/** 128 px thumbnails made from each species' asset-pack thumbnail.png (assets/images/plantThumbs). */
+const thumbSrc = (flower: string) => `assets/images/plantThumbs/${flower}.png`
+const speciesName = (flower: string) => plantSpeciesById(flower)?.name ?? flower
 
 let open = false
 let selectedKey = ''      // `${flower}|${rarityTier}` of the tile picked in My flowers
@@ -71,6 +76,8 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const sel    = groups.find(g => g.key === selectedKey) ?? null
   const here   = giftMode ? gardenersHere() : []
   const tileW  = Math.floor((W - PAD * 2 - px(8) * 3) / 4)
+  const held   = getHeld()
+  const isHeld = (g: Group) => !!held && held.flower === g.flower && held.rarityTier === g.rarityTier
 
   /** One tile — reused for both the seed pouch (tap = choose what plants next) and
    *  the flower collection (tap = choose what to gift). Same visual language: a
@@ -85,6 +92,22 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
     >
       <UiEntity uiTransform={{ width: px(18), height: px(18), borderRadius: px(9), margin: { bottom: px(6) } }} uiBackground={{ color: { ...tierColor, a: 1 } }} />
       <Label value={label} fontSize={fs(13)} color={CREAM} textAlign="middle-center" uiTransform={{ width: '100%', height: fs(20) }} />
+    </UiEntity>
+  )
+
+  /** Flower tile: the species thumbnail, a rarity dot top-right, the name underneath
+   *  (wraps to two lines), and "in hand" when it's the kind you're holding. */
+  const flowerTile = (g: Group, i: number) => (
+    <UiEntity
+      key={g.key}
+      uiTransform={{ width: tileW, height: px(118), margin: { right: (i % 4) === 3 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(6) }, borderRadius: px(12) }}
+      uiBackground={{ color: g.key === selectedKey ? { ...MOSS, a: 0.55 } : RAISED }}
+      onMouseDown={() => { selectedKey = selectedKey === g.key ? '' : g.key; giftMode = false }}
+    >
+      <UiEntity uiTransform={{ width: px(60), height: px(60) }} uiBackground={{ textureMode: 'stretch', texture: { src: thumbSrc(g.flower) } }} />
+      <UiEntity uiTransform={{ positionType: 'absolute', position: { top: px(6), right: px(6) }, width: px(14), height: px(14), borderRadius: px(7) }} uiBackground={{ color: { ...rarityTierById(g.rarityTier).seedColor, a: 1 } }} />
+      <Label value={g.count > 1 ? `${speciesName(g.flower)} x${g.count}` : speciesName(g.flower)} fontSize={fs(12)} color={CREAM} textAlign="middle-center" textWrap="wrap" uiTransform={{ width: '100%', height: fs(34), padding: { left: px(4), right: px(4) } }} />
+      <Label value={isHeld(g) ? 'in hand' : ''} fontSize={fs(11)} color={{ ...MOSS, g: 0.8 }} textAlign="middle-center" uiTransform={{ width: '100%', height: fs(14) }} />
     </UiEntity>
   )
 
@@ -119,16 +142,16 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       <Label value="Harvest an opened planter, or receive a gift" fontSize={fs(14)} color={{ ...DIM, a: 0.7 }} textAlign="middle-left" uiTransform={{ display: groups.length === 0 ? 'flex' : 'none', width: '100%', height: fs(26), margin: { top: px(6) } }} />
 
       <UiEntity uiTransform={{ display: groups.length > 0 ? 'flex' : 'none', width: '100%', flexDirection: 'row', flexWrap: 'wrap', margin: { top: px(8) } }}>
-        {shown.map((g, i) => tile(
-          g.key, i, rarityTierById(g.rarityTier).seedColor, g.count > 1 ? `${g.flower} x${g.count}` : g.flower,
-          g.key === selectedKey, () => { selectedKey = selectedKey === g.key ? '' : g.key; giftMode = false },
-        ))}
+        {shown.map((g, i) => flowerTile(g, i))}
       </UiEntity>
       <Label value={`+${groups.length - MAX_TILES} more kinds`} fontSize={fs(13)} color={DIM} textAlign="middle-left" uiTransform={{ display: groups.length > MAX_TILES ? 'flex' : 'none', width: '100%', height: fs(22) }} />
 
       {/* selection → gift */}
       <UiEntity uiTransform={{ display: sel && !giftMode ? 'flex' : 'none', width: '100%', height: px(48), flexDirection: 'row', alignItems: 'center', margin: { top: px(6) } }}>
-        <Label value={sel ? `${sel.flower}${sel.rarityTier > 0 ? ` (${rarityTierById(sel.rarityTier).name})` : ''}` : ''} fontSize={fs(16)} color={CREAM} textAlign="middle-left" uiTransform={{ flexGrow: 1, height: '100%' }} />
+        <Label value={sel ? `${speciesName(sel.flower)}${sel.rarityTier > 0 ? ` (${rarityTierById(sel.rarityTier).name})` : ''}` : ''} fontSize={fs(16)} color={CREAM} textAlign="middle-left" uiTransform={{ flexGrow: 1, height: '100%' }} />
+        <UiEntity uiTransform={{ height: px(44), padding: { left: px(18), right: px(18) }, margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: RAISED }} onMouseDown={() => { if (sel) holdFlower(isHeld(sel) ? -1 : sel.lastIndex) }}>
+          <Label value={sel && isHeld(sel) ? 'Put away' : 'Hold'} fontSize={fs(17)} color={CREAM} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+        </UiEntity>
         <UiEntity uiTransform={{ height: px(44), padding: { left: px(22), right: px(22) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: MOSS }} onMouseDown={() => { giftMode = true }}>
           <Label value="Gift" fontSize={fs(17)} color={CREAM} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         </UiEntity>
@@ -136,7 +159,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
 
       {/* who to give it to */}
       <UiEntity uiTransform={{ display: sel && giftMode ? 'flex' : 'none', width: '100%', flexDirection: 'column', margin: { top: px(6) } }}>
-        <Label value={here.length > 0 ? `Give your ${sel ? sel.flower : ''} to` : 'No other gardeners here right now - you can also tap a gardener in the garden'} fontSize={fs(14)} color={DIM} textAlign="middle-left" uiTransform={{ width: '100%', height: fs(26) }} />
+        <Label value={here.length > 0 ? `Give your ${sel ? speciesName(sel.flower) : ''} to` : 'No other gardeners here right now - you can also tap a gardener in the garden'} fontSize={fs(14)} color={DIM} textAlign="middle-left" uiTransform={{ width: '100%', height: fs(26) }} />
         {here.slice(0, 5).map((g) => (
           <UiEntity
             key={g.address}

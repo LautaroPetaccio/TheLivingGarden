@@ -10,6 +10,12 @@
 //   receive ←  collectionUpdate { flowersJson, boxCap }   (mine, after harvest/gift/join)
 //   receive ←  giftReceived     { from, flower, rarityTier }
 //   receive ←  notice           { text }                  (server feedback toasts)
+//   send    →  holdFlower       { flowerIndex }           (-1 = put away)
+//   receive ←  heldFlower       { address, flower, rarityTier }   (anyone's hand, incl. mine)
+//
+// Held flower: one keepsake shown in a gardener's right hand, for everyone. Interlocks
+// with gifting — a world tap on a player with nothing picked in the menu gives the flower
+// you're holding; giving away the last one of that kind empties your hand (server).
 //
 // Tap target: an invisible pointer-only collider attached to each remote
 // avatar (AvatarAttach by avatarId, like the bloom hand-flower). Pointer
@@ -27,13 +33,15 @@ import {
   PlayerIdentityData,
   pointerEventsSystem,
   InputAction,
+  GltfContainer,
 } from '@dcl/sdk/ecs'
+import { Quaternion } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
-import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake } from './playerInventory'
+import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
-import { rarityTierById } from './shared/config'
+import { rarityTierById, plantSpeciesById } from './shared/config'
 
 // ---------------------------------------------------------------
 // Config
@@ -44,6 +52,11 @@ const TAG_OFFSET_Y  = 0.9                           // AAPT_POSITION anchors at 
 const GIFT_DISTANCE = 6     // m — mobile is third-person only
 const SCAN_MS       = 1_000
 const TOAST_MS      = 5_000
+// Held flower in the right hand — same anchor/offset/rotation as the bloom hand-flower
+// (bloomFlowerSystem), sized as a fraction of the species' planter-box size.
+const HAND_K        = 0.4
+const HAND_OFFSET   = { x: 0, y: 0.06, z: 0 }
+const HAND_ROTATION = Quaternion.fromEulerDegrees(90, 0, 0)
 
 // ---------------------------------------------------------------
 // State
@@ -51,6 +64,7 @@ const TOAST_MS      = 5_000
 
 let scanAccum = 0
 const tags = new Map<string, Entity>()   // remote address → AvatarAttach parent
+const hands = new Map<string, Entity>()  // address → held-flower AvatarAttach parent (mine included)
 
 
 
@@ -67,14 +81,41 @@ function tryGift(toAddress: string): void {
   // World-tap is a shortcut for "who" — "which flower" comes from the seed menu's own
   // picker (My flowers → tap a kind → Gift), so tapping a player sends THAT selection
   // instead of silently guessing the newest keepsake.
-  const flowerIndex = getSelectedGiftIndex()
+  const flowerIndex = getSelectedGiftIndex() ?? heldFlowerIndex()
   if (flowerIndex === null) {
-    showToast('Open your seed pouch and pick a flower to gift first', TOAST_MS, false)
+    showToast('Hold a flower, or pick one in your seed pouch, to gift it', TOAST_MS, false)
     openSeedMenu()
     return
   }
   console.log(`[Gift] offering ${flowers[flowerIndex]?.flower ?? '?'} to ${toAddress}`)
   room.send('giftFlower', { toAddress, flowerIndex })
+}
+
+function localAddress(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
+
+/** Show (or clear, flower '') what a gardener holds. Mine attaches to the local avatar. */
+function setHand(address: string, flower: string, rarityTier: number): void {
+  const old = hands.get(address)
+  if (old !== undefined) { engine.removeEntityWithChildren(old); hands.delete(address) }
+  const mine = address === localAddress()
+  if (mine) setHeld(flower ? { flower, rarityTier } : null)
+  const species = flower ? plantSpeciesById(flower) : null
+  if (!species) return
+  const parent = engine.addEntity()
+  AvatarAttach.create(parent, mine
+    ? { anchorPointId: AvatarAnchorPointType.AAPT_RIGHT_HAND }
+    : { avatarId: address, anchorPointId: AvatarAnchorPointType.AAPT_RIGHT_HAND })
+  const holder = engine.addEntity()
+  Transform.create(holder, { parent, position: HAND_OFFSET, rotation: HAND_ROTATION })
+  const model = engine.addEntity()
+  const k = species.scale * HAND_K
+  Transform.create(model, {
+    parent: holder,
+    position: { x: species.offsetX * HAND_K, y: species.baseYOffset * HAND_K, z: species.offsetZ * HAND_K },
+    scale: { x: k, y: k, z: k },
+  })
+  GltfContainer.create(model, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  hands.set(address, parent)
 }
 
 function createTag(address: string): Entity {
@@ -127,7 +168,11 @@ export function setupGiftSystem(): void {
 
   room.onMessage('giftReceived', (data) => {
     const tierName = rarityTierById(data.rarityTier).name
-    showToast(`${data.from} gave you a ${data.flower}${data.rarityTier > 0 ? ` — a ${tierName} one!` : ''}`, TOAST_MS, false)
+    showToast(`${data.from} gave you a ${plantSpeciesById(data.flower)?.name ?? data.flower}${data.rarityTier > 0 ? ` — a ${tierName} one!` : ''}`, TOAST_MS, false)
+  })
+
+  room.onMessage('heldFlower', (data) => {
+    setHand(data.address.toLowerCase(), data.flower, data.rarityTier)
   })
 
   room.onMessage('notice', (data) => {
@@ -139,6 +184,7 @@ export function setupGiftSystem(): void {
   registerGiftApi({
     gardenersHere: () => [...tags.keys()].map(address => ({ address, name: getPlayer({ userId: address })?.name || `${address.slice(0, 6)}...` })),
     give: (toAddress, flowerIndex) => { console.log(`[Gift] menu gift #${flowerIndex} to ${toAddress}`); room.send('giftFlower', { toAddress, flowerIndex }) },
+    hold: (flowerIndex) => { console.log(`[Gift] hold #${flowerIndex}`); room.send('holdFlower', { flowerIndex }) },
   })
   engine.addSystem(tagScanSystem)
   console.log(`[Gift] ready · notice listeners=${room.listenerCount('notice')}`)
