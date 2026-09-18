@@ -59,7 +59,6 @@ const PANEL_W      = 390
 const PANEL_LEFT   = 24
 const PANEL_TOP    = 20
 const HEADER_H     = 46
-const PANEL_H_OPEN = 1020
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
@@ -123,7 +122,6 @@ function SeedBtn({ label, color, onClick, last = false }: { label: string; color
 
 export function TestPanelUi() {
   const s   = getWateringStatus()
-  const pnH = panelOpen ? PANEL_H_OPEN : HEADER_H
 
   return (
     <UiEntity
@@ -131,7 +129,9 @@ export function TestPanelUi() {
         positionType: 'absolute',
         position:     { left: PANEL_LEFT, top: PANEL_TOP },
         width:        PANEL_W,
-        height:       pnH,
+        // Open = auto height. A fixed 1020 px box clipped the lower rows on the phone
+        // (Godot clips children to the parent box; Unity desktop lets them spill out).
+        height:       panelOpen ? undefined : HEADER_H,
         flexDirection: 'column',
       }}
       uiBackground={{ color: PANEL_BG }}
@@ -278,18 +278,17 @@ export function TestPanelUi() {
           <Label value={getTestPotCount() > 0 ? `Remove ${getTestPotCount()} test planters  (${getFps()} fps)` : `Spawn 100 test planters  (${getFps()} fps)`} fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
-        {/* Rarity VFX A/B — flip one family off, watch the fps above */}
-        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
-          <Label value="Rarity pulse (material)" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
-          <ToggleButton value={vfxFlags.pulse} onChange={v => setVfxFlag('pulse', v)} />
-        </UiEntity>
-        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
-          <Label value="Rarity particles" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
-          <ToggleButton value={vfxFlags.particles} onChange={v => setVfxFlag('particles', v)} />
-        </UiEntity>
-        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
-          <Label value="Rarity point lights" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
-          <ToggleButton value={vfxFlags.lights} onChange={v => setVfxFlag('lights', v)} />
+        {/* Rarity VFX A/B — flip one family off, watch the fps above (one row: the phone clips overflow) */}
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 4 } }} uiBackground={{ color: vfxFlags.pulse ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('pulse', !vfxFlags.pulse)}>
+            <Label value={`Pulse ${vfxFlags.pulse ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
+          <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 4 } }} uiBackground={{ color: vfxFlags.particles ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('particles', !vfxFlags.particles)}>
+            <Label value={`Particles ${vfxFlags.particles ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
+          <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 0 } }} uiBackground={{ color: vfxFlags.lights ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('lights', !vfxFlags.lights)}>
+            <Label value={`Lights ${vfxFlags.lights ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
         </UiEntity>
 
         {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}

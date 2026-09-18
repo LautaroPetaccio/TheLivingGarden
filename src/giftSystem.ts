@@ -13,7 +13,7 @@
 //   send    →  holdFlower       { flowerIndex }           (-1 = put away)
 //   receive ←  heldFlower       { address, flower, rarityTier }   (anyone's hand, incl. mine)
 //
-// Held flower: one keepsake shown in a gardener's right hand, for everyone. Interlocks
+// Held flower: one keepsake shown in a gardener's left hand, for everyone. Interlocks
 // with gifting — a world tap on a player with nothing picked in the menu gives the flower
 // you're holding; giving away the last one of that kind empties your hand (server).
 //
@@ -52,8 +52,9 @@ const TAG_OFFSET_Y  = 0.9                           // AAPT_POSITION anchors at 
 const GIFT_DISTANCE = 6     // m — mobile is third-person only
 const SCAN_MS       = 1_000
 const TOAST_MS      = 5_000
-// Held flower in the right hand — same anchor/offset/rotation as the bloom hand-flower
-// (bloomFlowerSystem), sized as a fraction of the species' planter-box size.
+// Held flower in the LEFT hand — the right hand belongs to the bloom contributor's
+// hand-flower (bloomFlowerSystem, 10 min after a bloom), so the two never overlap.
+// Offset/rotation copied from that one; size is a fraction of the species' planter size.
 const HAND_K        = 0.4
 const HAND_OFFSET   = { x: 0, y: 0.06, z: 0 }
 const HAND_ROTATION = Quaternion.fromEulerDegrees(90, 0, 0)
@@ -103,8 +104,8 @@ function setHand(address: string, flower: string, rarityTier: number): void {
   if (!species) return
   const parent = engine.addEntity()
   AvatarAttach.create(parent, mine
-    ? { anchorPointId: AvatarAnchorPointType.AAPT_RIGHT_HAND }
-    : { avatarId: address, anchorPointId: AvatarAnchorPointType.AAPT_RIGHT_HAND })
+    ? { anchorPointId: AvatarAnchorPointType.AAPT_LEFT_HAND }
+    : { avatarId: address, anchorPointId: AvatarAnchorPointType.AAPT_LEFT_HAND })
   const holder = engine.addEntity()
   Transform.create(holder, { parent, position: HAND_OFFSET, rotation: HAND_ROTATION })
   const model = engine.addEntity()

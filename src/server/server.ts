@@ -677,6 +677,9 @@ function sendHeld(address: string, to?: string[]): void {
 function sendAllHeld(to: string[]): void { for (const a of heldFlowers.keys()) sendHeld(a, to) }
 function clearHeld(address: string): void { if (heldFlowers.delete(address)) sendHeld(address) }
 
+/** Every test-panel handler is gated on this (pre-production gate, todo.md). */
+function isAdmin(address: string): boolean { return ADMIN_ADDRESSES.includes(address.toLowerCase()) }
+
 function sendNotice(address: string, text: string): void {
   room.send('notice', { text }, { to: [address] })
 }
@@ -1057,6 +1060,7 @@ export async function server(): Promise<void> {
 
   // ── Message: adminSpawnSeed (test panel) ────────────────────
   onRoomMessage<{ x: number; z: number; rarityTier: number }>('adminSpawnSeed', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const seed: SeedRecord = { id: `admin_${Date.now()}`, x: data.x, z: data.z, rarityTier: data.rarityTier, spawnedAt: Date.now(), gatheredBy: new Set() }
     activeSeeds.set(seed.id, seed)
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
@@ -1179,7 +1183,8 @@ export async function server(): Promise<void> {
   })
 
   // ── Message: forceBloom ─────────────────────────────────────
-  onRoomMessage<{ variant: string }>('forceBloom', async (data, _address) => {
+  onRoomMessage<{ variant: string }>('forceBloom', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     triggerBloom(data?.variant || '')
   })
 
@@ -1187,7 +1192,7 @@ export async function server(): Promise<void> {
   // sustain hold (covers the "stuck at Hold 80% for 0s" case) and ends an active bloom
   // the same way a normal bloomReset does. Idempotent either way.
   onRoomMessage<Record<string, never>>('adminResetBloom', async (_data, address) => {
-    if (!ADMIN_ADDRESSES.includes(address.toLowerCase())) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     cancelBloomSustain()
     if (bloomActive) await resetGarden()
     sendThreshold([address])
@@ -1196,7 +1201,7 @@ export async function server(): Promise<void> {
 
   // ── Message: adminGrantWaters (test panel) — exercise flair tiers + tribute grant ──
   onRoomMessage<{ amount: number }>('adminGrantWaters', async (data, address) => {
-    if (!ADMIN_ADDRESSES.includes(address.toLowerCase())) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const amount = Math.max(1, Math.min(1000, Math.floor(data?.amount ?? 0)))
     const tierBefore = tierOf(address)
     for (let i = 0; i < amount; i++) bumpWaterTotals(address)
@@ -1212,7 +1217,8 @@ export async function server(): Promise<void> {
   })
 
   // ── Message: forceWater80 (test panel) ──────────────────────
-  onRoomMessage<Record<string, never>>('forceWater80', async (_data, _address) => {
+  onRoomMessage<Record<string, never>>('forceWater80', async (_data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     if (bloomActive) return
     const needed = Math.max(0, currentBloomThreshold() - getWateredCount())
     if (needed === 0) {
@@ -1270,6 +1276,7 @@ export async function server(): Promise<void> {
 
   // ── Message: setTestOverride ─────────────────────────────────
   onRoomMessage<{ enabled: boolean }>('setTestOverride', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     if (data.enabled) {
       testOverrides.add(address)
       console.log(`[Server] Test override ENABLED for ${address}`)
