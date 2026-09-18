@@ -43,6 +43,8 @@ import {
   rollSeedTier,
   rollTierAtLeast,
   GUARANTEED_RARE_AT_CONTRIBUTORS,
+  GOLDEN_SEED_AT_FRACTION,
+  GOLDEN_SEED_MIN_TIER,
   rollPlantSpecies,
   RARITY_TIERS,
   SEED_LIFETIME_MS,
@@ -487,6 +489,7 @@ function triggerBloom(forcedVariant = ''): void {
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name}, ${cycleContributors.size} contributor(s) → ${bloomDuration / 60_000} min)`)
   room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration })
   scheduleSeedWaves()
+  scheduleGoldenSeed()
   setTimeout(() => executeTask(resetGarden), bloomDuration)
 }
 
@@ -530,6 +533,35 @@ function scheduleSeedWaves(): void {
     seedWaveTimers.push(setTimeout(() => executeTask(async () => { if (bloomActive) spawnBloomSeeds(n) }), Math.round(gap * w)))
   }
   console.log(`[Server] Seed trickle: ${total} seeds in ${waves} wave(s) over ${Math.round(window / 1000)}s`)
+}
+
+// ── Golden seed chase ─────────────────────────────────────────
+interface GoldenSeed { id: string; pathSeed: number; spawnedAt: number; endsAt: number; gatheredBy: Set<string> }
+let golden: GoldenSeed | null = null
+let goldenTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleGoldenSeed(): void {
+  cancelGoldenSeed()
+  const startedAt = bloomStartedAt ?? Date.now()
+  goldenTimer = setTimeout(() => executeTask(async () => {
+    goldenTimer = null
+    if (!bloomActive) return
+    golden = { id: `golden_${Date.now()}`, pathSeed: Math.random() * 1000, spawnedAt: Date.now(), endsAt: startedAt + bloomDuration, gatheredBy: new Set() }
+    console.log(`[Server] Golden seed ${golden.id} appears — ${Math.round((golden.endsAt - golden.spawnedAt) / 1000)}s to catch it`)
+    sendGolden()
+  }), Math.round(bloomDuration * GOLDEN_SEED_AT_FRACTION))
+}
+
+function cancelGoldenSeed(): void {
+  if (goldenTimer !== null) { clearTimeout(goldenTimer); goldenTimer = null }
+  golden = null   // clients despawn it at endsAt on their own
+}
+
+/** Broadcast (or send to a joiner) — only while it is still out. */
+function sendGolden(to?: string[]): void {
+  if (!golden || Date.now() >= golden.endsAt) return
+  const payload = { id: golden.id, pathSeed: golden.pathSeed, spawnedAt: golden.spawnedAt, endsAt: golden.endsAt, serverNow: Date.now() }
+  room.send('goldenSeed', payload, to ? { to } : undefined)
 }
 
 function cancelSeedWaves(): void {
@@ -886,6 +918,7 @@ async function resetGarden(): Promise<void> {
   console.log('[Server] Resetting garden...')
   cancelBloomSustain()
   cancelSeedWaves()
+  cancelGoldenSeed()
   cycleContributors.clear()   // the next bloom's length counts the next cycle's waterers
   bloomActive    = false
   bloomStartedAt = null
@@ -1037,6 +1070,7 @@ function playerJoinSystem(): void {
       // Re-send bloom state to players who join while it is already active
       if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
+    if (golden && !golden.gatheredBy.has(address)) sendGolden([address])
       for (const b of boxes.values()) sendBox(b, [address])
       await sendCollection(address)
       sendTributes([address])
@@ -1190,6 +1224,7 @@ export async function server(): Promise<void> {
 
   // ── Message: gatherSeed (v2) ────────────────────────────────
   onRoomMessage<{ seedId: string }>('gatherSeed', async (data, playerAddress) => {
+    if (data.seedId.startsWith('golden_')) { await catchGolden(data.seedId, playerAddress); return }
     const seed = activeSeeds.get(data.seedId)
     if (!seed) return   // expired or never existed — client despawns on its own lifetime timer
     // Per-player pickup: each player may collect each seed once; the seed stays for
@@ -1209,6 +1244,22 @@ export async function server(): Promise<void> {
     // Targeted, not broadcast — only the gatherer's client despawns it
     room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rarityTier: seed.rarityTier }, { to: [playerAddress] })
   })
+
+  /** Golden seed: each player may catch it once and rolls their own tier ≥ Epic. */
+  async function catchGolden(seedId: string, playerAddress: string): Promise<void> {
+    if (!golden || golden.id !== seedId || Date.now() >= golden.endsAt) return
+    if (golden.gatheredBy.has(playerAddress)) return
+    golden.gatheredBy.add(playerAddress)                       // before any await — no double award
+    const tier  = rollTierAtLeast(GOLDEN_SEED_MIN_TIER)
+    const name  = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
+    const pouch = await loadPouch(playerAddress)
+    pouch[tier] = (pouch[tier] ?? 0) + 1
+    void savePouch(playerAddress)
+    sendPouch(playerAddress)
+    console.log(`[Server] ${name} caught the golden seed → tier ${tier} (${golden.gatheredBy.size} caught so far)`)
+    room.send('seedGathered', { seedId, by: name, byAddress: playerAddress, rarityTier: tier }, { to: [playerAddress] })
+    room.send('notice', { text: `${name} caught the golden seed!` })   // everyone — a shared moment
+  }
 
   // ── Message: adminSpawnSeed (test panel) ────────────────────
   onRoomMessage<{ x: number; z: number; rarityTier: number }>('adminSpawnSeed', async (data, address) => {
@@ -1449,6 +1500,7 @@ export async function server(): Promise<void> {
     sendPouch(address)
     if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
+    if (golden && !golden.gatheredBy.has(address)) sendGolden([address])
     for (const b of boxes.values()) sendBox(b, [address])
     await sendCollection(address)
     sendTributes([address])

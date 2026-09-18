@@ -33,6 +33,10 @@ export const room = registerMessages({
   /** Server → gatherer: the player's live seed pouch (after each gather, and on join).
    *  countsJson = JSON number[8], one count per rarity tier (index = tier id). */
   pouchUpdate:      Schemas.Map({ countsJson: Schemas.String }),
+  /** Server → all (and joiners): this bloom's golden seed. Position is computed on each
+   *  client from goldenSeedPos((now − spawnedAt), pathSeed); caught via gatherSeed with
+   *  its id. Timestamps are Int64 — Schemas.Number corrupts 13-digit ms values. */
+  goldenSeed:       Schemas.Map({ id: Schemas.String, pathSeed: Schemas.Number, spawnedAt: Schemas.Int64, endsAt: Schemas.Int64, serverNow: Schemas.Int64 }),
 
   // ── v2: seed boxes ───────────────────────────────────────
   /** Player taps an empty box to plant a seed from their pouch (rarityTier = which one). */

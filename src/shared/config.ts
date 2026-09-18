@@ -102,6 +102,30 @@ export const SPARKLE_SRC  = 'assets/scene/Images/sparkle.png'
 /** Garden walkable area bounds — used for ambient FX spawning. */
 export const GARDEN_BOUNDS = { xMin: 3, xMax: 14, zMin: 3, zMax: 22 } as const
 
+// ── Golden seed chase (KJ 2026-09-18) ──
+// One per bloom: appears GOLDEN_SEED_AT_FRACTION into the bloom and wanders the garden
+// until it ends. Everyone may catch it once; each catcher rolls their own tier ≥
+// GOLDEN_SEED_MIN_TIER. The server sends only { spawnedAt, pathSeed } — every client
+// computes the same position from goldenSeedPos, so nothing streams per frame.
+export const GOLDEN_SEED_AT_FRACTION   = 0.3   // TUNING — late enough that bloom-arrivals see it
+export const GOLDEN_SEED_MIN_TIER      = 3     // TUNING — Epic or better
+export const GOLDEN_SEED_CATCH_RADIUS  = 1.3   // m, 3D from chest height — generous for mobile
+
+/** Where the golden seed is `tSec` after it appeared: a slow Lissajous wander inside
+ *  GARDEN_BOUNDS (top speed ≈ 1 m/s — a gentle chase, never a sprint). */
+export function goldenSeedPos(tSec: number, pathSeed: number): { x: number; y: number; z: number } {
+  const b  = GARDEN_BOUNDS, margin = 0.8
+  const cx = (b.xMin + b.xMax) / 2, ax = (b.xMax - b.xMin) / 2 - margin
+  const cz = (b.zMin + b.zMax) / 2, az = (b.zMax - b.zMin) / 2 - margin
+  const f  = (k: number) => (pathSeed * k) % 1                 // pathSeed-derived 0..1 values
+  const w1 = 0.08 + 0.04 * f(0.37), w2 = 0.05 + 0.03 * f(0.71)
+  return {
+    x: cx + ax * Math.sin(w1 * tSec + f(0.13) * Math.PI * 2),
+    y: 1.5 + 0.35 * Math.sin(0.9 * tSec + f(0.53) * Math.PI * 2),
+    z: cz + az * Math.sin(w2 * tSec + f(0.91) * Math.PI * 2),
+  }
+}
+
 export const PLANT_NAMES: string[] = [
   'Plant_1',  'Plant_2',  'Plant_3',  'Plant_4',
   'Plant_5',  'Plant_6',  'Plant_7',  'Plant_8',

@@ -38,6 +38,7 @@ import {
   rarityTierById,
 } from './shared/config'
 import { showToast } from './notifications'
+import { setupGoldenSeed } from './goldenSeed'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals — replaced in the FX phase)
@@ -287,5 +288,6 @@ export function setupSeedSystem(): void {
   })
 
   engine.addSystem(seedDriftSystem)
+  setupGoldenSeed()   // same post-room.clear() window
   console.log(`[Seeds] Seed system ready · seedSpawned listeners=${room.listenerCount('seedSpawned')}`)
 }
