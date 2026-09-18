@@ -47,7 +47,7 @@ import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSyst
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { flairIcon, bloomSustainMs, bloomVariantById, bloomFxLevel } from './shared/config'
+import { flairIcon, bloomSustainMs, bloomVariantById, bloomFxLevel, withArticle } from './shared/config'
 import { setBloomSparklePalette } from './sparkleSystem'
 import { setAmbientPalette } from './ambientFX'
 import { startMoonlight, stopMoonlight } from './moonlight'
@@ -1417,7 +1417,7 @@ export function setupWateringSystem(): void {
     currentBloomVariant = data?.variant || 'classic'
     const variant = bloomVariantById(currentBloomVariant)
     if (!isBloomActive() && variant.id !== 'classic') {
-      showToast(`A ${variant.name}! Rare seeds fall thicker tonight`, 6_000, false)
+      showToast(`${withArticle(variant.name, true)}! Rare seeds fall thicker tonight`, 6_000, false)
     }
     // The rare variant changes the light itself — also on a late joiner's re-send
     if (variant.id === 'moonlit') startMoonlight()
@@ -1425,7 +1425,7 @@ export function setupWateringSystem(): void {
     setBloomSparklePalette(variant.palette)
     setAmbientPalette(variant.palette)
     const fxLevel = bloomFxLevel(currentBloomScale)
-    const bannerLabel = variant.id !== 'classic' ? `A ${variant.name}!`
+    const bannerLabel = variant.id !== 'classic' ? `${withArticle(variant.name, true)}!`
                       : fxLevel === 0 ? 'A quiet bloom has woken'
                       : fxLevel === 1 ? 'The Garden is blooming'
                       : 'The Garden is in Full Bloom!'

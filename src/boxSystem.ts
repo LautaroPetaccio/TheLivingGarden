@@ -46,7 +46,7 @@ import {
 import { Quaternion } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById, withArticle } from './shared/config'
 import { showToast } from './notifications'
 import { attachPlantVfx, attachSeedlingVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
@@ -535,7 +535,7 @@ export function setupBoxSystem(): void {
     refresh(v)
     if (!wasOpened && v.opened && isMine(v)) {
       const tierName = rarityTierById(v.rarityTier).name
-      showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` A ${tierName} one!` : ''} Harvest it, or leave it on show.`, TOAST_MS, false)
+      showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` ${withArticle(tierName, true)} one!` : ''} Harvest it, or leave it on show.`, TOAST_MS, false)
     } else if (!wasMine && isMine(v) && !v.opened) {
       showToast('Seed planted — come back when it opens', TOAST_MS, false)
     }

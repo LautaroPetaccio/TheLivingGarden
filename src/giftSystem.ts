@@ -41,7 +41,7 @@ import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
 import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
-import { rarityTierById, plantSpeciesById } from './shared/config'
+import { rarityTierById, plantSpeciesById, withArticle } from './shared/config'
 import { isBloomFlowerActive } from './bloomFlowerSystem'
 
 // ---------------------------------------------------------------
@@ -183,7 +183,7 @@ export function setupGiftSystem(): void {
 
   room.onMessage('giftReceived', (data) => {
     const tierName = rarityTierById(data.rarityTier).name
-    showToast(`${data.from} gave you a ${plantSpeciesById(data.flower)?.name ?? data.flower}${data.rarityTier > 0 ? ` — a ${tierName} one!` : ''}`, TOAST_MS, false)
+    showToast(`${data.from} gave you ${withArticle(plantSpeciesById(data.flower)?.name ?? data.flower)}${data.rarityTier > 0 ? ` — ${withArticle(tierName)} one!` : ''}`, TOAST_MS, false)
   })
 
   room.onMessage('heldFlower', (data) => {

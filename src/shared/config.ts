@@ -417,6 +417,14 @@ export const RARITY_TIERS: ReadonlyArray<RarityTierDef> = [
   { id: 6, name: 'Mythic',    seedColor: { r: 1.000, g: 0.294, b: 0.929 }, seedVfx: 'Pink pulse',   plantVfx: 'Custom', custom: true },
   { id: 7, name: 'Unique',    seedColor: { r: 0.996, g: 0.635, b: 0.090 }, seedVfx: 'Gold pulse',   plantVfx: 'Custom', custom: true },
 ]
+/** "a Rare" / "an Uncommon" (capital: "An Uncommon") for generated messages. Goes by sound:
+ *  "Unique" and "Uni…"/"Use…"/"Eu…"/"One…" words take "a". */
+export function withArticle(word: string, capital = false): string {
+  const vowelSound = /^[aeiou]/i.test(word) && !/^(uni|use|usu|eu|one)/i.test(word)
+  const art = vowelSound ? 'an' : 'a'
+  return `${capital ? art[0].toUpperCase() + art.slice(1) : art} ${word}`
+}
+
 export function rarityTierById(id: number): RarityTierDef {
   return RARITY_TIERS[id] ?? RARITY_TIERS[0]
 }

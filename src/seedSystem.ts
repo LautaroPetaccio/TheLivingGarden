@@ -36,6 +36,7 @@ import {
   SEED_COLLECT_RADIUS,
   SEED_SPAWN_HEIGHT,
   rarityTierById,
+  withArticle,
 } from './shared/config'
 import { showToast } from './notifications'
 import { setupGoldenSeed } from './goldenSeed'
@@ -283,7 +284,7 @@ export function setupSeedSystem(): void {
     if (localId && data.byAddress.toLowerCase() === localId.toLowerCase()) {
       // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)
       const tierName = rarityTierById(data.rarityTier).name
-      showToast(data.rarityTier > 0 ? `You caught a ${tierName} seed!` : 'Seed gathered', TOAST_GATHER_MS, false)
+      showToast(data.rarityTier > 0 ? `You caught ${withArticle(tierName)} seed!` : 'Seed gathered', TOAST_GATHER_MS, false)
     }
   })
 

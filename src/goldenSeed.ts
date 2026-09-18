@@ -13,7 +13,7 @@ import { engine, Entity, Transform, MeshRenderer, Material, ParticleSystem, Audi
 import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { goldenSeedPos, GOLDEN_SEED_CATCH_RADIUS, SPARKLE_SRC, rarityTierById } from './shared/config'
+import { goldenSeedPos, GOLDEN_SEED_CATCH_RADIUS, SPARKLE_SRC, rarityTierById, withArticle } from './shared/config'
 import { showToast } from './notifications'
 
 // const enums in @dcl/ecs internals, not re-exported (same as plantVfx)
@@ -102,7 +102,7 @@ export function setupGoldenSeed(): void {
     if (!mine) return
     despawn()
     playChime()
-    showToast(`You caught the golden seed — a ${rarityTierById(data.rarityTier).name} seed!`, TOAST_MS, false)
+    showToast(`You caught the golden seed — ${withArticle(rarityTierById(data.rarityTier).name)} seed!`, TOAST_MS, false)
   })
   engine.addSystem(goldenSystem)
 }

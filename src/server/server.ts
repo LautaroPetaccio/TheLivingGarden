@@ -1361,10 +1361,12 @@ export async function server(): Promise<void> {
     const fromName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
     const toName   = leaderboard.get(to)?.displayName ?? to.slice(0, 8) + '…'
     const [gift] = mine.splice(idx, 1)
-    // Gave away the last one of the kind you're holding → empty hand
+    // Hand to hand (KJ 2026-09-18): gifting the kind you're holding empties your hand, and
+    // the receiver now holds the gift — everyone sees it change hands.
     const held = heldFlowers.get(playerAddress.toLowerCase())
-    if (held && held.flower === gift.flower && held.rarityTier === gift.rarityTier
-        && !mine.some(f => f.flower === held.flower && f.rarityTier === held.rarityTier)) clearHeld(playerAddress.toLowerCase())
+    if (held && held.flower === gift.flower && held.rarityTier === gift.rarityTier) clearHeld(playerAddress.toLowerCase())
+    heldFlowers.set(to, { flower: gift.flower, rarityTier: gift.rarityTier })
+    sendHeld(to)
     theirs.push({ ...gift, from: fromName, at: Date.now() })
     console.log(`[Server] ${fromName} gifted ${gift.flower} (tier ${gift.rarityTier}) to ${toName}`)
     void savePlayerJson(playerAddress, 'flowers')
