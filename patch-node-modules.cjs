@@ -44,7 +44,10 @@ function patchDir(dir) {
   }
 }
 
-if (fs.existsSync(hamDir)) {
+// EXPERIMENT (exp/hammurabi-upgrade): stock SDK flow — no pinned hammurabi, no preloader swap.
+const LEGACY_HAMMURABI = false
+
+if (LEGACY_HAMMURABI && fs.existsSync(hamDir)) {
   console.log('[postinstall] Patching @dcl/hammurabi-server ...')
   patchDir(hamDir)
 
@@ -103,7 +106,7 @@ const sdkCmdFile = path.join(
   'node_modules/@dcl/sdk-commands/dist/commands/start/hammurabi-server.js'
 )
 
-if (fs.existsSync(sdkCmdFile)) {
+if (LEGACY_HAMMURABI && fs.existsSync(sdkCmdFile)) {
   console.log('[postinstall] Patching @dcl/sdk-commands ...')
   let src = fs.readFileSync(sdkCmdFile, 'utf8')
 
