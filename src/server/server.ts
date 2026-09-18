@@ -723,6 +723,9 @@ function scheduleOpen(b: BoxRecord): void {
   boxTimers.set(b.boxId, setTimeout(() => executeTask(async () => openBox(b.boxId)), delay))
 }
 
+/** Planted records whose planter is no longer in BOX_POSITIONS — handed back at startup. */
+const orphanedBoxes: BoxRecord[] = []
+
 async function loadBoxes(): Promise<void> {
   for (const p of BOX_POSITIONS) boxes.set(p.id, emptyBox(p.id))
   const raw = await Storage.get<string>('boxes')
@@ -735,7 +738,11 @@ async function loadBoxes(): Promise<void> {
     // (Common) default takes over. Fine for pre-production test data; a live-player
     // migration would need to map old rare:true → rarityTier:1 explicitly.
     for (const r of records) {
-      if (!boxes.has(r.boxId)) continue
+      if (!boxes.has(r.boxId)) {
+        // Planter removed from the layout (planter editor bake) — contents go back to the owner
+        if (r.owner) orphanedBoxes.push({ ...emptyBox(r.boxId), ...r, waterers: r.waterers ?? [] })
+        continue
+      }
       boxes.set(r.boxId, { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '' })
     }
   }
@@ -769,9 +776,11 @@ async function tidyPlanter(b: BoxRecord): Promise<void> {
   if (!owner) return
   const timer = boxTimers.get(b.boxId)
   if (timer) { clearTimeout(timer); boxTimers.delete(b.boxId) }
-  boxes.set(b.boxId, emptyBox(b.boxId))                       // free it before any await
-  sendBox(boxes.get(b.boxId)!)
-  void saveBoxes()
+  if (boxes.get(b.boxId) === b) {                             // not for a planter the layout dropped
+    boxes.set(b.boxId, emptyBox(b.boxId))                     // free it before any await
+    sendBox(boxes.get(b.boxId)!)
+    void saveBoxes()
+  }
   let note: string
   if (opened) {
     const flowers = await loadFlowers(owner)                   // past FLOWER_COLLECTION_CAP on purpose: never lost
@@ -1056,6 +1065,8 @@ export async function server(): Promise<void> {
     for (const p of BOX_POSITIONS) if (!boxes.has(p.id)) boxes.set(p.id, emptyBox(p.id))
   }
   await loadLastSeen()
+  for (const r of orphanedBoxes) await tidyPlanter(r)   // owners get a 'kept safe' note next visit
+  if (orphanedBoxes.length > 0) { console.log(`[Server] ${orphanedBoxes.length} planted planter(s) left the layout — contents returned`); void saveBoxes() }
   await ensureFreePlanters()
   setInterval(() => executeTask(ensureFreePlanters), 60 * 60 * 1000)   // owners age past the min-away while nobody joins
   const restoredCount = getWateredCount()

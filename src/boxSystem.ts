@@ -51,7 +51,7 @@ import { showToast } from './notifications'
 import { attachPlantVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
 import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
-import { createSign, setupSignSystem } from './signs'
+import { createSign, moveSign, setupSignSystem, Sign } from './signs'
 import { BALLOON_TEXT_TRACK } from './balloonTextTrack'
 
 // ---------------------------------------------------------------
@@ -90,6 +90,7 @@ interface BoxView {
   boxId:        string
   base:         Entity
   label:        Entity
+  sign:         Sign            // the plaque (root + text) — moved by the layout editor
   plant:        Entity | null   // sprout or flower entity while planted
   plantKey:     string          // what `plant` currently shows — rebuilt only when this changes
   balloon:      Entity | null   // animated balloon while the box holds a seed or flower
@@ -108,6 +109,11 @@ interface BoxView {
 }
 
 const views  = new Map<string, BoxView>()
+/** Live planter layout: BOX_POSITIONS, as edited in preview by the planter editor
+ *  (planterLayoutTool). Everything positions planters from HERE, never BOX_POSITIONS. */
+const layout   = new Map<string, PlanterPos>()
+const deleted  = new Set<string>()   // removed in the editor (hidden until the next bake)
+const carrying = new Set<string>()   // being carried by the editor — plant rebuilt on drop
 let   pouch: number[] = []   // counts per rarity tier, from pouchUpdate
 let   tickAccum = 0
 
@@ -261,18 +267,20 @@ function plantRevealSystem(): void {
   const me = Transform.getOrNull(engine.PlayerEntity)?.position
   let best: BoxView | null = null, bestD = Infinity
   for (const v of pendingPlant) {
-    const p = BOX_POSITIONS.find(b => b.id === v.boxId)!
+    if (carrying.has(v.boxId)) continue
+    const p = layout.get(v.boxId)!
     const d = me ? (p.x - me.x) ** 2 + (p.z - me.z) ** 2 : 0
     if (d < bestD) { bestD = d; best = v }
   }
   if (best === null) return
   pendingPlant.delete(best)
-  setPlantVisual(best, BOX_POSITIONS.find(b => b.id === best!.boxId)!)
+  setPlantVisual(best, layout.get(best.boxId)!)
   best.plantKey = plantKeyFor(best)
 }
 
 function refresh(v: BoxView): void {
-  const pos = BOX_POSITIONS.find(p => p.id === v.boxId)!
+  if (deleted.has(v.boxId)) return   // removed in the layout editor — stays hidden until the bake
+  const pos = layout.get(v.boxId)!
   if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
   setBalloonVisual(v, pos)
   if (v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, Date.now())
@@ -330,7 +338,7 @@ function createBox(p: PlanterPos & { id: string }): BoxView {
   const sign  = createSign({ x: at.x, y: PLAQUE_Y, z: at.z }, (180 + p.rot) % 360, PLAQUE_SIZE, PLAQUE_FONT, false)
   const label = sign.text
 
-  const v: BoxView = { boxId: p.id, base, label, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, label, sign, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
     { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
@@ -341,6 +349,87 @@ function createBox(p: PlanterPos & { id: string }): BoxView {
 /** Test-panel only: force two boxes into the growing state so the rarity-tinted
  *  seedling colors can be compared side by side without waiting on real timers.
  *  Client-only, cosmetic — the next boxState broadcast (or a rejoin) overwrites it. */
+// ---------------------------------------------------------------
+// Planter layout editor API (planterLayoutTool) — moves the REAL planters in this
+// client only; the result is baked into BOX_POSITIONS. The server only knows ids.
+// ---------------------------------------------------------------
+
+export type PlanterPose = PlanterPos & { id: string }
+
+/** Current layout, deleted planters excluded — what gets saved and baked. */
+export function getPlanterLayout(): PlanterPose[] {
+  return [...layout.entries()].filter(([id]) => !deleted.has(id)).map(([id, p]) => ({ id, ...p }))
+}
+
+/** Move/turn one planter and everything on it. Plant is rebuilt (unless it's being carried). */
+export function setPlanterPose(id: string, pose: PlanterPos): void {
+  const v = views.get(id)
+  if (!v) return
+  layout.set(id, pose)
+  const base = Transform.getMutable(v.base)
+  base.position = { x: pose.x, y: 0, z: pose.z }
+  base.rotation = planterRotation(pose)
+  const at = planterPoint(pose, 0, PLAQUE_OFFSET_Z)
+  moveSign(v.sign, { x: at.x, y: PLAQUE_Y, z: at.z })
+  Transform.getMutable(v.sign.root).rotation = Quaternion.fromEulerDegrees(0, (180 + pose.rot) % 360, 0)
+  if (v.balloon !== null) {
+    const b = Transform.getMutable(v.balloon)
+    b.position = { x: pose.x, y: 0, z: pose.z }
+    b.rotation = planterRotation(pose)
+  }
+  if (!carrying.has(id) && v.plant !== null) { v.plantKey = ''; pendingPlant.add(v) }
+}
+
+/** Editor: lift a planter — its plant is taken down while it moves, rebuilt on drop. */
+export function beginCarry(id: string): void {
+  const v = views.get(id)
+  if (!v) return
+  carrying.add(id)
+  detachPlantVfx(id)
+  if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
+  v.plantKey = ''
+}
+export function endCarry(id: string): void {
+  const v = views.get(id)
+  carrying.delete(id)
+  if (v) pendingPlant.add(v)
+}
+
+/** Editor: a new planter (client-only until baked — the server doesn't know its id yet). */
+export function addPlanter(pose: PlanterPos): string {
+  let n = views.size + 1
+  while (views.has(`box_${n}`)) n++
+  const id = `box_${n}`
+  layout.set(id, pose)
+  views.set(id, createBox({ id, ...pose }))
+  refresh(views.get(id)!)
+  return id
+}
+
+/** Editor: hide a planter until the next bake drops it (the server hands back its contents). */
+export function deletePlanter(id: string): void {
+  const v = views.get(id)
+  if (!v || deleted.has(id)) return
+  deleted.add(id)
+  detachPlantVfx(id)
+  if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
+  const zero = { x: 0, y: 0, z: 0 }
+  Transform.getMutable(v.base).scale = zero
+  if (v.balloon !== null) Transform.getMutable(v.balloon).scale = zero
+  moveSign(v.sign, { x: 0, y: -50, z: 0 })
+}
+export function isPlanterDeleted(id: string): boolean { return deleted.has(id) }
+
+/** Editor: apply a saved layout — move known planters, add new ids, delete missing ones. */
+export function applyPlanterLayout(list: PlanterPose[]): void {
+  const keep = new Set(list.map(p => p.id))
+  for (const p of list) {
+    if (views.has(p.id)) setPlanterPose(p.id, { x: p.x, z: p.z, rot: p.rot })
+    else { layout.set(p.id, { x: p.x, z: p.z, rot: p.rot }); views.set(p.id, createBox(p)); refresh(views.get(p.id)!) }
+  }
+  for (const id of [...views.keys()]) if (!keep.has(id)) deletePlanter(id)
+}
+
 /** Test panel: run the crowding rule once now (server picks the longest-away owner's planter). */
 export function adminTidyPlanter(): void { room.send('adminTidyPlanter', {}) }
 
@@ -426,7 +515,7 @@ function balloonStartSystem(): void {
 
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupBoxSystem(): void {
-  for (const p of BOX_POSITIONS) views.set(p.id, createBox(p))
+  for (const p of BOX_POSITIONS) { layout.set(p.id, { x: p.x, z: p.z, rot: p.rot }); views.set(p.id, createBox(p)) }
 
   room.onMessage('boxState', (data) => {
     const v = views.get(data.boxId)

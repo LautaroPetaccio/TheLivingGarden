@@ -26,7 +26,7 @@ import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter } from './boxSystem'
 import { vfxFlags, setVfxFlag } from './plantVfx'
-import { isLayoutToolOn, setLayoutTool, layoutDraftCount, layoutPlaceHere, layoutUndo, layoutRemoveNearest, layoutRotateNearest, layoutExport } from './planterLayoutTool'
+import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -292,18 +292,30 @@ export function TestPanelUi() {
           </UiEntity>
         </UiEntity>
 
-        {/* Planter layout tool — walk the garden, drop draft planters, then bake (GDD §3.1) */}
+        {/* Planter layout editor — move/rotate the real planters, then bake (GDD §3.1) */}
         <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
-          <Label value={isLayoutToolOn() ? `Planter layout  (${layoutDraftCount()} placed)` : 'Planter layout tool'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <Label value={isLayoutToolOn() ? `Planter editor  (${layoutCount()})` : 'Planter editor'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
           <ToggleButton value={isLayoutToolOn()} onChange={setLayoutTool} />
         </UiEntity>
+        <Label value={layoutSelectedInfo()} fontSize={11} color={MUTED} uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', height: 18, margin: { bottom: 4 } }} />
         <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
-          <SeedBtn label="Place here" color={BTN_ON} onClick={layoutPlaceHere} />
-          <SeedBtn label="Undo" color={BTN_OFF} onClick={layoutUndo} />
-          <SeedBtn label="Rotate near" color={BTN_OFF} onClick={layoutRotateNearest} last />
+          <SeedBtn label="Select nearest" color={BTN_OFF} onClick={layoutSelectNearest} />
+          <SeedBtn label={layoutIsCarrying() ? "Drop" : "Pick up"} color={BTN_ON} onClick={layoutPickUpOrDrop} />
+          <SeedBtn label="Add here" color={BTN_OFF} onClick={layoutAddHere} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Nudge fwd" color={BTN_OFF} onClick={() => layoutNudge('fwd')} />
+          <SeedBtn label="Nudge back" color={BTN_OFF} onClick={() => layoutNudge('back')} />
+          <SeedBtn label="Nudge left" color={BTN_OFF} onClick={() => layoutNudge('left')} />
+          <SeedBtn label="Nudge right" color={BTN_OFF} onClick={() => layoutNudge('right')} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Turn -15" color={BTN_OFF} onClick={layoutRotateLeft} />
+          <SeedBtn label="Turn +15" color={BTN_OFF} onClick={layoutRotateRight} />
+          <SeedBtn label="Snap 90" color={BTN_OFF} onClick={layoutSnap90} />
+          <SeedBtn label="Delete" color={BTN_OFF} onClick={layoutDelete} last />
         </UiEntity>
         <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
-          <SeedBtn label="Remove near" color={BTN_OFF} onClick={layoutRemoveNearest} />
           <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={layoutExport} last />
         </UiEntity>
 

@@ -62,6 +62,7 @@ import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './pla
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
+import { setupPlanterLayoutTool } from './planterLayoutTool'
 import { setupTributeSystem } from './tributeSystem'
 import { PLANT_LAYOUT } from './shared/layout'
 import { Quaternion, Color4 } from '@dcl/sdk/math'
@@ -1322,6 +1323,7 @@ export function setupWateringSystem(): void {
   // cost a full day of playtests to find. Keep every room.onMessage below this line.)
   setupSeedSystem()
   setupBoxSystem()
+  setupPlanterLayoutTool()   // planter editor (admin): re-applies the saved layout draft
   setupTributeSystem()
 
   room.onMessage('notifyServerTime', (data) => {
