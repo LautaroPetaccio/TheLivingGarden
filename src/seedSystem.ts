@@ -11,9 +11,9 @@
 // FX/variant phase.
 //
 // Server communication (one message per seed — see messages.ts registry note):
-//   receive ←  seedSpawned   { id, x, z, rare, spawnedAt }
+//   receive ←  seedSpawned   { id, x, z, rarityTier, spawnedAt }
 //   send    →  gatherSeed    { seedId }
-//   receive ←  seedGathered  { seedId, by, byAddress, rare }
+//   receive ←  seedGathered  { seedId, by, byAddress, rarityTier }
 //
 // The server is authoritative: a seed only despawns-with-reward on
 // seedGathered. Client-side proximity just *requests* the gather.
@@ -35,6 +35,7 @@ import {
   SEED_GATHER_RADIUS,
   SEED_COLLECT_RADIUS,
   SEED_SPAWN_HEIGHT,
+  rarityTierById,
 } from './shared/config'
 import { showToast } from './notifications'
 
@@ -43,8 +44,8 @@ import { showToast } from './notifications'
 // ---------------------------------------------------------------
 
 // `let` — live-tunable from the test panel admin controls (adminScaleSeeds / adminShiftSeedHeight)
-let SEED_SCALE_NORMAL = 0.45          // greybox: oversized for visibility, tune down with real art
-let SEED_SCALE_RARE   = 0.6
+let SEED_SCALE_MIN = 0.45             // greybox: oversized for visibility, tune down with real art
+let SEED_SCALE_MAX = 0.6              // at the top of the rollable range (tier 5, Exotic)
 let SEED_REST_Y       = 1.1           // rest at ~chest height so plants/decor don't hide seeds
 const SEED_BOB_AMPL     = 0.06        // idle bob amplitude (m)
 const SEED_BOB_SPEED    = 2.0         // idle bob speed (rad/s)
@@ -56,9 +57,18 @@ const DRIFT_SPEED_MIN   = 2.5         // m/s at SEED_GATHER_RADIUS
 const DRIFT_SPEED_MAX   = 9.0         // m/s when nearly touching (outruns a running avatar)
 const CHEST_HEIGHT      = 0.9         // m above the avatar Transform origin (origin = feet)
 const GATHER_RETRY_MS   = 3_000       // re-allow a gather request if no reply
-const COLOR_NORMAL      = Color4.create(0.55, 0.95, 0.65, 1)
-const COLOR_RARE        = Color4.create(1.0, 0.82, 0.25, 1)
 const TOAST_GATHER_MS   = 4_000
+// Tiers roll 0..5 in normal play (rollSeedTier) — Mythic/Unique (6, 7) are `custom`
+// and only reachable via admin test tools, so scale/color just clamp at the top.
+const MAX_ROLLABLE_TIER = 5
+function seedScaleForTier(tier: number): number {
+  const t = Math.max(0, Math.min(MAX_ROLLABLE_TIER, tier)) / MAX_ROLLABLE_TIER
+  return SEED_SCALE_MIN + (SEED_SCALE_MAX - SEED_SCALE_MIN) * t
+}
+function seedColorForTier(tier: number): Color4 {
+  const c = rarityTierById(tier).seedColor
+  return Color4.create(c.r, c.g, c.b, 1)
+}
 
 // ---------------------------------------------------------------
 // State
@@ -67,7 +77,7 @@ const TOAST_GATHER_MS   = 4_000
 interface Seed {
   id:          string
   entity:      Entity
-  rare:        boolean
+  rarityTier:  number
   baseX:       number
   baseZ:       number
   spawnLocalMs: number   // local-clock ms when the fall began (clock-synced)
@@ -83,7 +93,7 @@ const seeds = new Map<string, Seed>()   // seedId → live seed
 // Spawning / despawning
 // ---------------------------------------------------------------
 
-function spawnSeed(rec: { id: string; x: number; z: number; rare: boolean; spawnedAt: number }): void {
+function spawnSeed(rec: { id: string; x: number; z: number; rarityTier: number; spawnedAt: number }): void {
   if (seeds.has(rec.id)) return   // duplicate seedSpawned (e.g. fullSync resend)
 
   // Fall timing runs off the CLIENT clock from the moment the message arrives —
@@ -95,24 +105,25 @@ function spawnSeed(rec: { id: string; x: number; z: number; rare: boolean; spawn
   const despawnAt  = localSpawn + SEED_LIFETIME_MS
 
   const entity = engine.addEntity()
-  const scale  = rec.rare ? SEED_SCALE_RARE : SEED_SCALE_NORMAL
+  const scale  = seedScaleForTier(rec.rarityTier)
   Transform.create(entity, {
     position: { x: rec.x, y: SEED_SPAWN_HEIGHT, z: rec.z },
     scale:    { x: scale, y: scale, z: scale },
   })
   MeshRenderer.setSphere(entity)
+  const color = seedColorForTier(rec.rarityTier)
   Material.setPbrMaterial(entity, {
-    albedoColor:       rec.rare ? COLOR_RARE : COLOR_NORMAL,
-    emissiveColor:     rec.rare ? COLOR_RARE : COLOR_NORMAL,
-    // Low emissive so the hue (mint vs gold) actually reads — high values washed both to white.
-    // Placeholder until the real seed model with rare/normal as a material colour overlay.
-    emissiveIntensity: rec.rare ? 1.0 : 0.5,
+    albedoColor:       color,
+    emissiveColor:     color,
+    // Low emissive so the tier hue actually reads — high values wash everything to white.
+    // Placeholder until the real seed model with rarity as a material colour overlay.
+    emissiveIntensity: rec.rarityTier > 0 ? 1.0 : 0.5,
   })
 
   seeds.set(rec.id, {
     id:           rec.id,
     entity,
-    rare:         rec.rare,
+    rarityTier:   rec.rarityTier,
     baseX:        rec.x,
     baseZ:        rec.z,
     spawnLocalMs: localSpawn,
@@ -121,7 +132,7 @@ function spawnSeed(rec: { id: string; x: number; z: number; rare: boolean; spawn
     drifting:     false,
     gatherSentAt: 0,
   })
-  console.log(`[Seeds] spawned ${rec.id} rare=${rec.rare} at (${rec.x.toFixed(1)}, ${SEED_SPAWN_HEIGHT}, ${rec.z.toFixed(1)}) → rest y=${SEED_REST_Y}`)
+  console.log(`[Seeds] spawned ${rec.id} tier=${rec.rarityTier} at (${rec.x.toFixed(1)}, ${SEED_SPAWN_HEIGHT}, ${rec.z.toFixed(1)}) → rest y=${SEED_REST_Y}`)
 }
 
 function despawnSeed(id: string): void {
@@ -142,28 +153,28 @@ export function clearAllSeeds(): void {
 
 /** Spawn a seed 4 m in front of the player (far enough to watch it fall) with NO network round-trip —
  *  isolates "can the client render a seed" from "does the message arrive". */
-export function adminSpawnLocalSeed(rare = false): void {
+export function adminSpawnLocalSeed(rarityTier = 0): void {
   const p = Transform.getOrNull(engine.PlayerEntity)?.position
   if (!p) { console.log('[Seeds][admin] no player transform yet'); return }
-  spawnSeed({ id: `local_${Date.now()}`, x: p.x + 4, z: p.z, rare, spawnedAt: Date.now() })
+  spawnSeed({ id: `local_${Date.now()}`, x: p.x + 4, z: p.z, rarityTier, spawnedAt: Date.now() })
 }
 
 /** Ask the server to spawn one seed near the player through the REAL seedSpawned path. */
-export function adminRequestServerSeed(rare = false): void {
+export function adminRequestServerSeed(rarityTier = 0): void {
   const p = Transform.getOrNull(engine.PlayerEntity)?.position ?? { x: 8, y: 0, z: 12 }
   console.log('[Seeds][admin] requesting server seed')
-  room.send('adminSpawnSeed', { x: p.x + 4, z: p.z, rare })
+  room.send('adminSpawnSeed', { x: p.x + 4, z: p.z, rarityTier })
 }
 
 /** Multiply seed scale (applies to live seeds immediately). */
 export function adminScaleSeeds(mult: number): void {
-  SEED_SCALE_NORMAL *= mult
-  SEED_SCALE_RARE   *= mult
+  SEED_SCALE_MIN *= mult
+  SEED_SCALE_MAX *= mult
   for (const s of seeds.values()) {
-    const k = s.rare ? SEED_SCALE_RARE : SEED_SCALE_NORMAL
+    const k = seedScaleForTier(s.rarityTier)
     Transform.getMutable(s.entity).scale = { x: k, y: k, z: k }
   }
-  console.log(`[Seeds][admin] scale normal=${SEED_SCALE_NORMAL.toFixed(2)} rare=${SEED_SCALE_RARE.toFixed(2)}`)
+  console.log(`[Seeds][admin] scale min=${SEED_SCALE_MIN.toFixed(2)} max=${SEED_SCALE_MAX.toFixed(2)}`)
 }
 
 /** Raise/lower the resting height (live seeds follow on their next bob frame). */
@@ -177,7 +188,7 @@ export function adminListSeeds(): void {
   console.log(`[Seeds][admin] ${seeds.size} live · seedSpawned listeners=${room.listenerCount('seedSpawned')}`)
   for (const s of seeds.values()) {
     const p = Transform.getOrNull(s.entity)?.position
-    console.log(`  ${s.id} rare=${s.rare} at (${p?.x.toFixed(1)}, ${p?.y.toFixed(1)}, ${p?.z.toFixed(1)}) drifting=${s.drifting}`)
+    console.log(`  ${s.id} tier=${s.rarityTier} at (${p?.x.toFixed(1)}, ${p?.y.toFixed(1)}, ${p?.z.toFixed(1)}) drifting=${s.drifting}`)
   }
 }
 
@@ -266,11 +277,12 @@ export function setupSeedSystem(): void {
     const existed = seeds.has(data.seedId)
     despawnSeed(data.seedId)
     if (!existed) return
-    console.log(`[Seeds] gathered ${data.seedId}${data.rare ? ' (RARE)' : ''}`)
+    console.log(`[Seeds] gathered ${data.seedId} tier=${data.rarityTier}`)
     const localId = getPlayer()?.userId ?? ''
     if (localId && data.byAddress.toLowerCase() === localId.toLowerCase()) {
       // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)
-      showToast(data.rare ? 'You caught a RARE seed!' : 'Seed gathered', TOAST_GATHER_MS, false)
+      const tierName = rarityTierById(data.rarityTier).name
+      showToast(data.rarityTier > 0 ? `You caught a ${tierName} seed!` : 'Seed gathered', TOAST_GATHER_MS, false)
     }
   })
 

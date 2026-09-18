@@ -12,6 +12,8 @@ import {
   getUseClickbox,
   resetAllPlants,
   forceTriggerBloom,
+  forceResetBloom,
+  adminGrantWaters,
   forceWaterToThreshold,
   forceStartPlayerTrail,
   forceStopPlayerTrail,
@@ -20,6 +22,10 @@ import {
   getWateringStatus,
 } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
+import { getCanvasCalibration } from './ui'
+import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
+import { demoSeedlings, demoRevealedFlowers } from './boxSystem'
+import { vfxFlags, setVfxFlag } from './plantVfx'
 import {
   adminSpawnLocalSeed,
   adminRequestServerSeed,
@@ -48,10 +54,11 @@ const ERR_TEXT   = Color4.create(0.95, 0.56, 0.14, 1.0)
 
 // ── Layout — right-anchored, top of screen ───────────────────────
 const PANEL_W      = 390
-const PANEL_LEFT   = 1920 - PANEL_W - 20   // 1510
+// Dev panel lives on the LEFT edge, below the client's top-left chrome: the HUD ring and
+// seed chip own the top right. (A fixed left:1510 was off-screen on narrower canvases.)
+const PANEL_LEFT   = 24
 const PANEL_TOP    = 20
 const HEADER_H     = 46
-const PANEL_H_OPEN = 760
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
@@ -115,7 +122,6 @@ function SeedBtn({ label, color, onClick, last = false }: { label: string; color
 
 export function TestPanelUi() {
   const s   = getWateringStatus()
-  const pnH = panelOpen ? PANEL_H_OPEN : HEADER_H
 
   return (
     <UiEntity
@@ -123,7 +129,9 @@ export function TestPanelUi() {
         positionType: 'absolute',
         position:     { left: PANEL_LEFT, top: PANEL_TOP },
         width:        PANEL_W,
-        height:       pnH,
+        // Open = auto height. A fixed 1020 px box clipped the lower rows on the phone
+        // (Godot clips children to the parent box; Unity desktop lets them spill out).
+        height:       panelOpen ? undefined : HEADER_H,
         flexDirection: 'column',
       }}
       uiBackground={{ color: PANEL_BG }}
@@ -146,6 +154,11 @@ export function TestPanelUi() {
         <Label value="🧪  PROTOTYPE TEST PANEL" fontSize={12} color={MUTED} />
         <Label value={panelOpen ? '▲ close' : '▼ open'} fontSize={10} color={MUTED} />
       </UiEntity>
+
+      {/* Canvas calibration — the phone has no console; read the numbers here */}
+      {panelOpen && (
+        <Label value={getCanvasCalibration()} fontSize={9} color={MUTED} uiTransform={{ width: '100%', height: 16, margin: { left: 14 } }} />
+      )}
 
       {/* ── Content ───────────────────────────────────────────── */}
       <UiEntity
@@ -226,9 +239,74 @@ export function TestPanelUi() {
         <UiEntity
           uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
           uiBackground={{ color: BTN_BLOOM }}
-          onMouseDown={forceTriggerBloom}
+          onMouseDown={() => forceTriggerBloom()}
         >
           <Label value="Force Bloom Now" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Stop bloom / reset — cancels a stuck sustain hold too, not just an active bloom */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_DANGER }}
+          onMouseDown={forceResetBloom}
+        >
+          <Label value="Stop Bloom / Reset Sustain" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_BLOOM }}
+          onMouseDown={() => forceTriggerBloom('moonlit')}
+        >
+          <Label value="Force MOONLIT Bloom (rare, full scale)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_BLOOM }}
+          onMouseDown={() => adminGrantWaters(100)}
+        >
+          <Label value="Grant +100 lifetime waters (flair / tribute)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* 100-planter performance test — local only */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_BLOOM }}
+          onMouseDown={() => (getTestPotCount() > 0 ? removeTestPots() : spawnTestPots())}
+        >
+          <Label value={getTestPotCount() > 0 ? `Remove ${getTestPotCount()} test planters  (${getFps()} fps)` : `Spawn 100 test planters  (${getFps()} fps)`} fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Rarity VFX A/B — flip one family off, watch the fps above (one row: the phone clips overflow) */}
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 4 } }} uiBackground={{ color: vfxFlags.pulse ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('pulse', !vfxFlags.pulse)}>
+            <Label value={`Pulse ${vfxFlags.pulse ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
+          <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 4 } }} uiBackground={{ color: vfxFlags.particles ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('particles', !vfxFlags.particles)}>
+            <Label value={`Particles ${vfxFlags.particles ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
+          <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 0 } }} uiBackground={{ color: vfxFlags.lights ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('lights', !vfxFlags.lights)}>
+            <Label value={`Lights ${vfxFlags.lights ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
+        </UiEntity>
+
+        {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_OFF }}
+          onMouseDown={demoSeedlings}
+        >
+          <Label value="Demo seedling tints (box_1 Common / box_2 Epic)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Revealed-flower demo — one box per rarity effect tier, box_5..8 */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_OFF }}
+          onMouseDown={demoRevealedFlowers}
+        >
+          <Label value="Demo rarity VFX (Rare / Epic / Legendary / Exotic)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Divider */}
@@ -238,9 +316,9 @@ export function TestPanelUi() {
         <Label value={`SEEDS  ·  live: ${getSeedCount()}`} fontSize={10} color={MUTED} uiTransform={{ margin: { bottom: 6 } }} />
 
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
-          <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(false)} />
-          <SeedBtn label="LOCAL rare"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(true)} />
-          <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(false)} last />
+          <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(0)} />
+          <SeedBtn label="LOCAL Epic"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(3)} />
+          <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(0)} last />
         </UiEntity>
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
           <SeedBtn label="Size ×2"  color={BTN_OFF} onClick={() => adminScaleSeeds(2)} />

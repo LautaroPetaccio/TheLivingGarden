@@ -31,8 +31,11 @@ import {
   VisibilityComponent,
   Tween,
   EasingFunction,
+  TweenSequence,
+  TweenLoop,
   timers,
   PlayerIdentityData,
+  MaterialTransparencyMode,
 } from '@dcl/sdk/ecs'
 import { getPlayer }              from '@dcl/sdk/players'
 import { onEnterSceneObservable } from '@dcl/sdk/observables'
@@ -43,17 +46,24 @@ import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSyst
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { setupLeaderboardBoards, updateLeaderboardDisplay }   from './leaderboardSystem'
+import { flairIcon, bloomSustainMs, bloomVariantById, bloomFxLevel } from './shared/config'
+import { setBloomSparklePalette } from './sparkleSystem'
+import { setAmbientPalette } from './ambientFX'
+import { startMoonlight, stopMoonlight } from './moonlight'
+import { setupLeaderboardBoards, updateLeaderboardDisplay, BoardEntry }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
-import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
+import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, updateBloomRemaining, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
 import { clockSync } from './shared/clockSync'
 import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
-import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_SUSTAIN_MS, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
+import { setupTributeSystem } from './tributeSystem'
+import { PLANT_LAYOUT } from './shared/layout'
+import { Quaternion, Color4 } from '@dcl/sdk/math'
 
 // ===============================================================
 // ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -79,6 +89,8 @@ let bloomThreshold = BLOOM_THRESHOLD
 // Stored here for the FX phase to consume.
 let currentBloomScale = 1
 export function getCurrentBloomScale(): number { return currentBloomScale }
+let currentBloomVariant = 'classic'   // BLOOM_VARIANTS id of the active bloom (Phase 6)
+export function getCurrentBloomVariant(): string { return currentBloomVariant }
 
 // ── Animation clip names (must match GLB exactly) ─────────────
 const ANIM_DROOPY_STATE  = 'CloseIdle'  // droopy idle loop
@@ -126,19 +138,9 @@ const waterDropMap = new Map<Entity, Entity>()
 // ── Droplet idle float animation ──────────────────────────────
 const DROP_ANIM_AMPLITUDE = 0.065   // metres (within 0.05–0.08)
 const DROP_ANIM_SPEED     = 1.1     // radians / second — slow, calm
-
-interface DropletAnim { entity: Entity; phase: number }
-const dropletAnims: DropletAnim[] = []
-let   dropletTime = 0
-
-function dropletIdleSystem(dt: number): void {
-  dropletTime += dt
-  for (const d of dropletAnims) {
-    const tf = Transform.getMutableOrNull(d.entity)
-    if (!tf) continue
-    tf.position.y = WATER_DROP_Y + Math.sin(dropletTime * DROP_ANIM_SPEED + d.phase) * DROP_ANIM_AMPLITUDE
-  }
-}
+// The bob is a renderer-side yoyo Tween on a parent 'bob' entity (the drop itself carries the
+// fade scale Tween — one Tween per entity). Was a per-frame Transform write on all 38 drops.
+const DROP_BOB_HALF_MS    = Math.round(Math.PI / DROP_ANIM_SPEED * 1000)
 
 // ── Sounds ────────────────────────────────────────────────────
 const SND_HOVER    = 'assets/scene/Sounds/hover.mp3'
@@ -155,7 +157,15 @@ const SND_INIT_POS = { x: 8, y: 1, z: 8 }   // initial transform — overwritten
 
 // ── Clickbox (optional alternative pointer target) ────────────
 const CLICKBOX_Y     = 1    // local Y offset above plant pivot
-const CLICKBOX_SCALE = { x: 1.5, y: 2, z: 1.5 }
+const CLICKBOX_SCALE = { x: 1.5, y: 2, z: 1.5 }   // initial only — resizeClickboxes() sets the real size
+// Click boxes are sized in WORLD metres (2026-09-17). The old fixed LOCAL scale made a
+// full-size plant's box 1.5 m wide × 2 m tall while a 0.38-scale fast plant 0.5 m away
+// got 0.57 m — inside its neighbour's box, so small plants were untappable everywhere.
+const CLICKBOX_W_MAX   = 1.2    // m — never wider than this, however isolated the plant
+const CLICKBOX_W_MIN   = 0.4    // m — touch floor, even for the tightest pairs (0.49 m apart)
+const CLICKBOX_GAP     = 0.96   // fraction of the neighbour gap the two boxes may fill together
+const CLICKBOX_H_PER_SCALE = 1.9  // m of box height per unit of plant scale
+const CLICKBOX_H_MIN   = 0.9    // m — short plants still need a finger-sized target
 
 // ── In-world text labels ──────────────────────────────────────
 const FONT_PCT_LABEL      = 6    // Image_2–5 + wateringPercentage entity
@@ -238,8 +248,33 @@ let bloomActive           = false  // true from startBloomPhases() until end of 
 let emoteActive          = false
 let lastSyncRequestMs    = 0
 const SYNC_REQUEST_MIN_MS = 5_000   // don't flood server with requestFullSync on rapid reloads
+let lastDailyStateMs      = 0       // last playerDailyState (the head of every full sync) — see room.onReady
 
 const wateredByLabelMap = new Map<Entity, Entity>()
+// Flair icon above a "Watered by" label — created lazily (most waterers have no tier yet),
+// parented to the billboarded label so it turns with the text.
+const flairIconMap = new Map<Entity, Entity>()
+const FLAIR_ICON_Y = 0.30
+const FLAIR_ICON_S = 0.22
+function setLabelFlair(plant: Entity, tier: number): void {
+  const f = flairIcon(tier)
+  let icon = flairIconMap.get(plant)
+  if (!f) { if (icon) Transform.getMutable(icon).scale = { x: 0, y: 0, z: 0 }; return }
+  const label = wateredByLabelMap.get(plant)
+  if (!label) return
+  if (!icon) {
+    icon = engine.addEntity()
+    Transform.create(icon, { position: { x: 0, y: FLAIR_ICON_Y, z: 0 }, parent: label })
+    MeshRenderer.setPlane(icon)
+    flairIconMap.set(plant, icon)
+  }
+  Transform.getMutable(icon).scale = { x: FLAIR_ICON_S, y: FLAIR_ICON_S, z: FLAIR_ICON_S }
+  Material.setPbrMaterial(icon, {
+    texture: Material.Texture.Common({ src: f.src }), alphaTexture: Material.Texture.Common({ src: f.src }),
+    albedoColor: Color4.create(f.tint.r, f.tint.g, f.tint.b, 1), emissiveColor: f.tint, emissiveIntensity: 0.9,
+    transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND, castShadows: false,
+  })
+}
 const wateredByNames    = new Map<Entity, string>()   // entity → display name
 
 const bloomContributors = new Set<string>()           // unique waterer names this bloom cycle
@@ -316,8 +351,10 @@ function setVisible(entity: Entity | null, visible: boolean) {
 let bloomResetTickerGen  = 0
 let bloomResetStartMs: number | null = null
 
-function startBloomResetTicker(): void {
-  bloomResetStartMs = Date.now()
+/** @param elapsedMs how far into the bloom we join (late joiners) — keeps every client's
+ *  countdown and end-of-bloom moment aligned with the server's. */
+function startBloomResetTicker(elapsedMs = 0): void {
+  bloomResetStartMs = Date.now() - elapsedMs
   const myGen = ++bloomResetTickerGen
 
   // Dedicated terminal timer — fires startBloomClose() at exactly countdown=0,
@@ -327,7 +364,7 @@ function startBloomResetTicker(): void {
   // against stale timers firing during a subsequent bloom cycle (test mode).
   timers.setTimeout(() => {
     if (isBloomActive()) startBloomClose()
-  }, BLOOM_RESET_DELAY_MS)
+  }, Math.max(0, BLOOM_RESET_DELAY_MS - elapsedMs))
 
   function tick(): void {
     if (bloomResetTickerGen !== myGen) return
@@ -340,6 +377,7 @@ function startBloomResetTicker(): void {
       ? (m > 0 ? `${m}m ${s}s` : `${s}s`)
       : '…'
     setBloomResetText(label)
+    updateBloomRemaining(totalSecs > 0 ? `${m}:${String(s).padStart(2, '0')}` : '', remaining)   // HUD ring shows time left
     if (remaining > 0) timers.setTimeout(tick, 1_000)
     // No startBloomClose() here — the dedicated timer above handles it
   }
@@ -451,13 +489,14 @@ let countdownUnlocked = false
 // ── Client-side 60 s sustain countdown ───────────────────────
 // Mirrors the server's pauseable sustain timer so the 3D labels show
 // exactly how long until bloom fires (not the scheduled window time).
+let gardenersPresent = 1   // server's count (thresholdUpdate) — drives hold length + the HUD
 let clientSustainStartMs:  number | null = null   // wall-clock ms when current run started
 let clientSustainElapsedMs: number       = 0      // ms accumulated across paused segments
 
 function formatSustainCountdown(): string {
   const elapsed     = clientSustainElapsedMs
                     + (clientSustainStartMs !== null ? Date.now() - clientSustainStartMs : 0)
-  const remainingMs = Math.max(0, BLOOM_SUSTAIN_MS - elapsed)
+  const remainingMs = Math.max(0, bloomSustainMs(gardenersPresent) - elapsed)
   return `${Math.ceil(remainingMs / 1_000)}s`
 }
 
@@ -547,6 +586,35 @@ function showWelcomeProgress() {
 // ---------------------------------------------------------------
 // Plant click registry
 // ---------------------------------------------------------------
+
+/** Size every clickbox in world metres from its nearest neighbour: the gap between two
+ *  plants is split in proportion to their scales (big plant → bigger share), so boxes
+ *  never swallow a smaller neighbour. Call once all plants are registered. */
+function resizeClickboxes(): void {
+  const items: Array<{ box: Entity; x: number; z: number; s: number }> = []
+  for (const info of plantRegistry.values()) {
+    if (!info.clickboxEntity) continue
+    const tf = Transform.getOrNull(info.anchor)
+    if (!tf) continue
+    items.push({ box: info.clickboxEntity, x: tf.position.x, z: tf.position.z, s: Math.max(0.05, tf.scale.x) })
+  }
+  for (const a of items) {
+    let width = CLICKBOX_W_MAX
+    for (const b of items) {
+      if (b === a) continue
+      const d = Math.hypot(a.x - b.x, a.z - b.z)
+      // my share of the gap, as a full width: 2 × d × myScale / (myScale + theirScale)
+      width = Math.min(width, 2 * d * CLICKBOX_GAP * a.s / (a.s + b.s))
+    }
+    width = Math.max(CLICKBOX_W_MIN, Math.min(CLICKBOX_W_MAX, width))
+    const height = Math.max(CLICKBOX_H_MIN, CLICKBOX_H_PER_SCALE * a.s)
+    const t = Transform.getMutable(a.box)
+    // anchor mirrors the plant's scale, so convert world metres → local units
+    t.scale    = { x: width / a.s, y: height / a.s, z: width / a.s }
+    t.position = { x: 0, y: (height / 2) / a.s, z: 0 }
+  }
+  console.log(`[WateringSystem] clickboxes sized for ${items.length} plants (world metres, neighbour-aware)`)
+}
 
 const plantRegistry     = new Map<Entity, { clickTarget: Entity; plantName: string; clickboxEntity: Entity | null; anchor: Entity }>()
 const plantNameToEntity = new Map<string, Entity>()
@@ -676,14 +744,28 @@ function triggerWateringEmote(_plantEntity: Entity) {
 // Plant lifecycle
 // ---------------------------------------------------------------
 
-/** Returns the correct expiry duration for a plant — fast or standard. */
+// Decay is gardener-scaled on the server, so the authoritative duration arrives
+// with every plantStateUpdate. The constants below are only the optimistic guess
+// for the ~200 ms between our tap and the server's confirmation.
+const serverExpiryMs = new Map<string, number>()   // plantId → last expiresInMs from the server
+
+/** Expiry duration for a plant — the server's figure once known, else the local guess. */
 function plantExpiryMs(plantId: string): number {
+  const fromServer = serverExpiryMs.get(plantId)
+  if (fromServer !== undefined && fromServer > 0) return fromServer
   if (FAST_PLANT_NAMES.has(plantId)) return FAST_PLANT_EXPIRY_MS
   return runtimeTestMode ? EXPIRY_TEST_MS : EXPIRY_PROD_MS
 }
 
+// One live expiry timer per plant: a reschedule (server confirming a longer
+// decay than our guess) must supersede the earlier timer, not race it.
+const expiryGen = new Map<Entity, number>()
+
 function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: number) {
+  const gen = (expiryGen.get(entity) ?? 0) + 1
+  expiryGen.set(entity, gen)
   timers.setTimeout(() => {
+    if (expiryGen.get(entity) !== gen) return
     const pd = PlantData.getMutable(entity)
     if (!pd.isWatered || pd.wateredAt !== sessionTimestamp) return
 
@@ -697,6 +779,7 @@ function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: numbe
 
     // Clear the "watered by" label immediately on expiry
     wateredByNames.delete(entity)
+    setLabelFlair(entity, 0)
     const expiredLabel = wateredByLabelMap.get(entity)
     if (expiredLabel) TextShape.getMutable(expiredLabel).text = ''
 
@@ -828,6 +911,7 @@ export function resetAllPlants(): void {
     TextShape.getMutable(labelEntity).text = ''
   }
   wateredByNames.clear()
+  for (const plant of flairIconMap.keys()) setLabelFlair(plant, 0)
 
   reset.queue = []
   for (const [entity] of engine.getEntitiesWith(PlantData)) {
@@ -880,13 +964,30 @@ function refreshWateredByLabels(): void {
     const pd   = PlantData.getOrNull(entity)
     const name = wateredByNames.get(entity)
     if (!pd?.isWatered || !name) continue
-    const pid      = entityPlantId.get(entity)
-    const expiryMs = plantExpiryMs(pid ?? '')
-    const alpha    = Math.max(0, 1 - (now - pd.wateredAt) / expiryMs)
     const ts = TextShape.getMutable(labelEntity)
     ts.text      = `Watered by ${name}\n${formatTimeAgo(pd.wateredAt)}`
-    ts.textColor = { ...WATERED_BY_COLOR, a: alpha }
+    // Fixed alpha, matching the flair icon above it (which never fades) — a fade tied to
+    // time-to-expiry made the name go fully invisible on any plant watered a while ago,
+    // leaving just the flair badge floating with no name under it. Found 2026-09-17.
+    ts.textColor = WATERED_BY_COLOR
   }
+}
+
+/** Code-owned layout (shared/layout.ts): move the composite's plant entities BEFORE
+ *  setupPlant derives anchors / drops / click boxes from their transforms. */
+function applyPlantLayout(): void {
+  let moved = 0
+  for (const [name, p] of Object.entries(PLANT_LAYOUT)) {
+    const entity = engine.getEntityOrNullByName(name)
+    if (!entity) { console.log(`[Layout] no entity named "${name}" — skipped`); continue }
+    const tf = Transform.getMutableOrNull(entity)
+    if (!tf) continue
+    tf.position = { x: p.x, y: p.y, z: p.z }
+    if (p.rotY !== undefined) tf.rotation = Quaternion.fromEulerDegrees(0, p.rotY, 0)
+    if (p.scale !== undefined) tf.scale = { x: p.scale, y: p.scale, z: p.scale }
+    moved++
+  }
+  if (moved > 0) console.log(`[Layout] ${moved} plants placed from shared/layout.ts`)
 }
 
 function setupPlant(plantName: string) {
@@ -901,8 +1002,10 @@ function setupPlant(plantName: string) {
   PlantData.create(entity, { isWatered: false, wateredAt: 0 })
 
   if (GltfContainer.has(entity)) {
+    // With clickboxes the mesh has no pointer handler — on the pointer layer it would
+    // only BLOCK taps meant for a smaller neighbour behind it.
     GltfContainer.getMutable(entity).visibleMeshesCollisionMask =
-      ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
+      useClickbox ? ColliderLayer.CL_PHYSICS : ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
   }
 
   // Neutral anchor mirroring the plant's transform. Runtime children (rose, drop,
@@ -951,12 +1054,18 @@ function setupPlant(plantName: string) {
   enablePlantClick(entity)
 
   // ── Water drop indicator ─────────────────────────────────────
+  const bobEnt = engine.addEntity()
+  Transform.create(bobEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, parent: anchor })
+  Tween.create(bobEnt, {
+    duration: DROP_BOB_HALF_MS, easingFunction: EasingFunction.EF_EASESINE, currentTime: Math.random(),
+    mode: { $case: 'move', move: { start: { x: 0, y: WATER_DROP_Y - DROP_ANIM_AMPLITUDE, z: 0 }, end: { x: 0, y: WATER_DROP_Y + DROP_ANIM_AMPLITUDE, z: 0 } } },
+  })
+  TweenSequence.create(bobEnt, { sequence: [], loop: TweenLoop.TL_YOYO })
   const dropEnt = engine.addEntity()
-  Transform.create(dropEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: anchor })
+  Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: bobEnt })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
   Billboard.create(dropEnt, { billboardMode: BillboardMode.BM_Y })
   waterDropMap.set(entity, dropEnt)
-  dropletAnims.push({ entity: dropEnt, phase: Math.random() * Math.PI * 2 })
 
   // "Watered by" label — hidden until plant is watered
   const wateredByLabel = engine.addEntity()
@@ -1054,8 +1163,10 @@ export function setupWateringSystem(): void {
       }
       triggerBloomSparkles(positions)
 
-      // All VFX, audio, petals, and lights driven by intensity system
-      startBloomPhases()
+      // All VFX, audio, petals, and lights driven by intensity system —
+      // budget from bloom scale (solo = quiet bloom), flavour from the variant,
+      // pacing from the real hold time so the finale actually plays before reset.
+      startBloomPhases(bloomFxLevel(currentBloomScale), currentBloomVariant, bloomSustainMs(gardenersPresent))
       bloomActive = true
     },
   })
@@ -1080,7 +1191,9 @@ export function setupWateringSystem(): void {
     magicSoundEntities.push(ent)
   }
 
+  applyPlantLayout()
   for (const name of PLANT_NAMES) setupPlant(name)
+  resizeClickboxes()
 
   // Deferred animator setup — ensures GltfContainers have loaded
   timers.setTimeout(() => {
@@ -1141,22 +1254,12 @@ export function setupWateringSystem(): void {
 
   engine.addSystem(resetAnimSystem)
   engine.addSystem(emoteWatchSystem)
-  engine.addSystem(dropletIdleSystem)
   engine.addSystem(petalParticleSystem)
   engine.addSystem(sparkleSystem)
   engine.addSystem(bloomSparkleSystem)
   engine.addSystem(ambientFXSystem)
 
-  // Player count — throttled, updates UI every 5 s
-  let playerCountTimer = 0
-  engine.addSystem((dt: number) => {
-    playerCountTimer += dt
-    if (playerCountTimer < 5) return
-    playerCountTimer = 0
-    let count = 0
-    for (const _ of engine.getEntitiesWith(PlayerIdentityData)) count++
-    updatePlayerCount(count)
-  })
+  // (HUD gardener count now comes from the server's thresholdUpdate — see that handler.)
 
   // Refresh "X min ago" timestamps and decay alpha on watered-by labels every 5 s
   let labelRefreshTimer = 0
@@ -1178,6 +1281,12 @@ export function setupWateringSystem(): void {
       console.log('[Client] requestFullSync skipped — rate limited')
       return
     }
+    // The server's join sync usually lands just before onReady; asking again re-applied the
+    // whole garden a second later (KJ log 2026-09-18 15:36:30/31) — double the join spike.
+    if (roomReady && now - lastDailyStateMs < SYNC_REQUEST_MIN_MS) {
+      console.log('[Client] requestFullSync skipped — join sync just arrived')
+      return
+    }
     lastSyncRequestMs = now
     // Reset init flags so playerDailyState handler re-runs welcome flow on reload
     roomReady       = false
@@ -1197,12 +1306,14 @@ export function setupWateringSystem(): void {
   // cost a full day of playtests to find. Keep every room.onMessage below this line.)
   setupSeedSystem()
   setupBoxSystem()
+  setupTributeSystem()
 
   room.onMessage('notifyServerTime', (data) => {
     clockSync.updateOffset(data.sentAt)
   })
 
   room.onMessage('playerDailyState', (data) => {
+    lastDailyStateMs = Date.now()
     // Clock sync — keep offset calibrated on every server message
     if (data.sentAt)    clockSync.updateOffset(data.sentAt)
     // Store server-authoritative bloom time converted to local clock
@@ -1267,6 +1378,12 @@ export function setupWateringSystem(): void {
 
   room.onMessage('thresholdUpdate', (data) => {
     if (!data || typeof data.threshold !== 'number' || data.threshold <= 0) return
+    // Gardeners first: the threshold is flat since the decay rework, so the early return
+    // below used to swallow every gardener change (hold length + HUD never heard of it).
+    if (typeof data.gardeners === 'number' && data.gardeners > 0) {
+      gardenersPresent = data.gardeners
+      updatePlayerCount(gardenersPresent)
+    }
     if (data.threshold === bloomThreshold) return
     bloomThreshold = data.threshold
     setBloomRatio(bloomThreshold / TOTAL_PLANTS)
@@ -1278,12 +1395,27 @@ export function setupWateringSystem(): void {
 
   room.onMessage('bloomTriggered', (data) => {
     currentBloomScale = typeof data?.scale === 'number' && data.scale > 0 ? Math.min(data.scale, 1) : 1
+    currentBloomVariant = data?.variant || 'classic'
+    const variant = bloomVariantById(currentBloomVariant)
+    if (!isBloomActive() && variant.id !== 'classic') {
+      showToast(`A ${variant.name}! Rare seeds fall thicker tonight`, 6_000, false)
+    }
+    // The rare variant changes the light itself — also on a late joiner's re-send
+    if (variant.id === 'moonlit') startMoonlight()
+    // Phase 6b: the variant's palette on every pooled bloom FX, before any of it fires
+    setBloomSparklePalette(variant.palette)
+    setAmbientPalette(variant.palette)
+    const fxLevel = bloomFxLevel(currentBloomScale)
+    const bannerLabel = variant.id !== 'classic' ? `A ${variant.name}!`
+                      : fxLevel === 0 ? 'A quiet bloom has woken'
+                      : fxLevel === 1 ? 'The Garden is blooming'
+                      : 'The Garden is in Full Bloom!'
     stopWateringEmote()
     stopPreBloomTicker()   // stop immediately — prevents stale "1s" from being re-written
     resetClientSustain()   // sustain complete — bloom is firing
-    showBannerBloom()      // switch banner from countdown → bloom before visual effects ramp up
+    showBannerBloom(bannerLabel)   // switch banner from countdown → bloom before visual effects ramp up
     for (const e of bloomCountdownLabels) TextShape.getMutable(e).text = ''  // clear countdown before reset ticker starts
-    startBloomResetTicker()  // begin counting down to garden reset (phase 3 label)
+    startBloomResetTicker(typeof data?.elapsedMs === 'number' && data.elapsedMs > 0 ? data.elapsedMs : 0)  // countdown to garden reset, aligned for late joiners
     if (!isBloomActive()) {
       triggerBloomEvent()
       startContributorCycle([...bloomContributors])   // thank each waterer in turn
@@ -1292,14 +1424,20 @@ export function setupWateringSystem(): void {
 
     // Snap every currently-unwatered plant to healthy appearance for the bloom event.
     // Purely aesthetic — PlantData state is unchanged; resetAllPlants() restores visuals on bloomReset.
+    // DIAGNOSTIC 2026-09-17: a late-joining mobile player saw water drops on every plant
+    // during an active bloom — this loop should have hidden all of them. Logging counts to
+    // catch it live next time (registry not yet populated / drops not yet snapped / etc).
+    let snappedCount = 0
     for (const [entity] of plantRegistry) {
       if (!PlantData.getOrNull(entity)?.isWatered) {
         hideRose(entity)
         showPlant(entity)
         setDropFade(entity, 'out')
         Animator.playSingleAnimation(entity, ANIM_HEALTHY_STATE)
+        snappedCount++
       }
     }
+    console.log(`[Client] bloomTriggered: registry=${plantRegistry.size} snappedToHealthy=${snappedCount} elapsedMs=${data?.elapsedMs ?? 0}`)
   })
 
   room.onMessage('bloomReset', () => {
@@ -1309,6 +1447,9 @@ export function setupWateringSystem(): void {
     countdownUnlocked = false   // full cycle reset — labels and banner return to idle
     resetClientSustain()
     stopContributorCycle()
+    setBloomSparklePalette(bloomVariantById('classic').palette)   // back to the warm default for the next cycle
+    setAmbientPalette(bloomVariantById('classic').palette)
+    stopMoonlight()          // dawn breaks as the garden resets (no-op after a classic bloom)
     startBloomFlower([...bloomContributors])  // attach hand flower to contributors — must run BEFORE clear()
     bloomContributors.clear()
     resetAllPlants()         // stops bloom, resets visuals + audio via endBloom()
@@ -1323,8 +1464,8 @@ export function setupWateringSystem(): void {
   })
 
   room.onMessage('leaderboardUpdate', (data) => {
-    const entries: Array<{ displayName: string; count: number }> = JSON.parse(data.entriesJson)
-    updateLeaderboardDisplay(entries)
+    const parse = (s: string): BoardEntry[] => { try { return JSON.parse(s) } catch { return [] } }
+    updateLeaderboardDisplay({ weekly: parse(data.entriesJson), allTime: parse(data.allTimeJson), weeklyResetAt: Number(data.weeklyResetAt) })
   })
 
   room.onMessage('plantStateUpdate', (data) => {
@@ -1335,6 +1476,9 @@ export function setupWateringSystem(): void {
 
     const wasWatered = local.isWatered
     const plantPos   = Transform.getOrNull(entity)?.position
+    const wateredAt  = Number(data.wateredAt)   // Int64 on the wire
+    if (data.isWatered && data.expiresInMs > 0) serverExpiryMs.set(data.plantId, data.expiresInMs)
+    else serverExpiryMs.delete(data.plantId)
 
     // Consume any pending optimistic water — server has spoken.
     // Four cases:
@@ -1349,18 +1493,17 @@ export function setupWateringSystem(): void {
     const wateredByLabel = wateredByLabelMap.get(entity)
     if (data.isWatered && data.wateredBy) {
       wateredByNames.set(entity, data.wateredBy)
+      setLabelFlair(entity, data.tier)   // flair icon above the label (GDD §5)
       bloomContributors.add(data.wateredBy)   // tracks everyone who contributed this cycle
     } else {
       wateredByNames.delete(entity)
+      setLabelFlair(entity, 0)
     }
     if (wateredByLabel) {
       const ts = TextShape.getMutable(wateredByLabel)
       if (data.isWatered && data.wateredBy) {
-        const pid      = entityPlantId.get(entity)
-        const expiryMs = plantExpiryMs(pid ?? '')
-        const alpha    = Math.max(0, 1 - (Date.now() - data.wateredAt) / expiryMs)
-        ts.text      = `Last watered by ${data.wateredBy}\n${formatTimeAgo(data.wateredAt)}`
-        ts.textColor = { ...WATERED_BY_COLOR, a: alpha }
+        ts.text      = `Last watered by ${data.wateredBy}\n${formatTimeAgo(wateredAt)}`
+        ts.textColor = WATERED_BY_COLOR   // fixed — matches the flair icon, see refreshWateredByLabels
       } else {
         ts.text = ''
       }
@@ -1374,26 +1517,27 @@ export function setupWateringSystem(): void {
       // All other cases use the server-authoritative timestamp for accurate decay.
       const isCaseA = pending !== undefined && !pending.wasTopUp
       if (!isCaseA) {
-        PlantData.getMutable(entity).wateredAt = data.wateredAt
+        PlantData.getMutable(entity).wateredAt = wateredAt
       }
 
       if (pending !== undefined && !pending.wasTopUp) {
         // ── Case A: our fresh water confirmed ────────────────────
-        // Optimistic animations already running in waterPlant — just re-enable click.
+        // Optimistic animations already running in waterPlant — just re-enable click,
+        // and replace the guessed expiry with the server's gardener-scaled one.
         enablePlantClick(entity)
+        if (data.expiresInMs > 0) scheduleExpiry(entity, local.wateredAt, data.expiresInMs)
 
       } else if (pending !== undefined && pending.wasTopUp) {
         // ── Case B: our top-up confirmed ─────────────────────────
         // Plant already healthy; re-enable click. Drop stays hidden (plant watered).
         // The optimistic expiry (keyed on local `now`) will self-cancel because
-        // pd.wateredAt is now data.wateredAt — schedule a fresh expiry from there.
+        // pd.wateredAt is now the server's — schedule a fresh expiry from there.
         enablePlantClick(entity)
-        const remaining = plantExpiryMs(data.plantId) - (Date.now() - data.wateredAt)
-        if (remaining > 0) scheduleExpiry(entity, data.wateredAt, remaining)
+        if (data.expiresInMs > 0) scheduleExpiry(entity, wateredAt, data.expiresInMs)
 
       } else if (!wasWatered) {
         // ── Case C: remote player freshly watered this plant ─────
-        const isLive = (Date.now() - data.wateredAt) < LIVE_WATER_THRESHOLD_MS
+        const isLive = (Date.now() - wateredAt) < LIVE_WATER_THRESHOLD_MS
         if (isLive) {
           hideRose(entity)
           showPlant(entity)
@@ -1513,8 +1657,14 @@ export function setUseClickbox(val: boolean): void {
       info.clickboxEntity = null
       info.clickTarget    = plantEntity
     }
+    // mesh is only a pointer target when it IS the click target
+    if (GltfContainer.has(plantEntity)) {
+      GltfContainer.getMutable(plantEntity).visibleMeshesCollisionMask =
+        val ? ColliderLayer.CL_PHYSICS : ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER
+    }
     enablePlantClick(plantEntity)
   }
+  if (val) resizeClickboxes()
 }
 
 export function getUseClickbox(): boolean { return useClickbox }
@@ -1530,10 +1680,22 @@ export function getWateringStatus() {
   }
 }
 
-export function forceTriggerBloom(): void {
+/** Test panel: +amount lifetime waters through the server's real flair / tribute path. */
+export function adminGrantWaters(amount: number): void {
+  if (room.isReady()) room.send('adminGrantWaters', { amount })
+}
+
+/** @param variant '' = normal roll; a BLOOM_VARIANTS id forces it at full scale (test panel) */
+/** Test-panel stop-bloom / reset button — cancels a stuck sustain hold or ends an
+ *  active bloom, whichever applies. Server-side; no-op if nothing is active. */
+export function forceResetBloom(): void {
+  if (room.isReady()) room.send('adminResetBloom', {})
+}
+
+export function forceTriggerBloom(variant = ''): void {
   if (isBloomActive()) return
   if (room.isReady()) {
-    room.send('forceBloom', {})
+    room.send('forceBloom', { variant })
   } else {
     // Local fallback — room not connected yet (common in local preview)
     triggerBloomEvent()

@@ -31,7 +31,6 @@ import {
 } from './groundLightSystem'
 import { setFairyLightsBloom, setFairyLightsPreboom } from './fairyLightSystem'
 import { startPetalRain } from './petalSystem'
-import { endBloomSparkles } from './sparkleSystem'
 import { setBloomAudioIntensity, playBloomAudioAccent } from './bloomSystem'
 import { BLOOM_CENTER } from './shared/config'
 
@@ -53,6 +52,11 @@ let petalLoopGen  = 0
 // Shared intensity state
 // ---------------------------------------------------------------
 let bloomIntensity: 0|1|2 = 0
+// Phase 6: the bloom's FX budget (from bloom scale) caps every intensity call, so a
+// solo bloom can never reach the full spectacle; the variant flavours the timeline.
+let bloomFxCap: 0|1|2 = 2
+let bloomVariantId = 'classic'
+export function getBloomVariantId(): string { return bloomVariantId }
 
 // ---------------------------------------------------------------
 // Internal helpers
@@ -63,8 +67,9 @@ function jitter(ms: number): number {
   return Math.max(0, ms + (Math.random() * 2000 - 1000))
 }
 
-/** Set intensity — drives audio, lampposts, and accent FX. */
-function setIntensity(level: 0|1|2): void {
+/** Set intensity — drives audio, lampposts, and accent FX. Capped by the bloom's FX budget. */
+function setIntensity(requested: 0|1|2): void {
+  const level = (requested > bloomFxCap ? bloomFxCap : requested) as 0|1|2
   bloomIntensity = level
   setBloomAudioIntensity(level)
   setLamppostBloomIntensity(level)
@@ -226,68 +231,105 @@ export function cancelPreBloom(stopFfx = false): void {
 }
 
 // ---------------------------------------------------------------
-// BLOOM PHASES  (10-minute main event)
-//   0–60 s     → intensity 2  (opening burst)
-//   60–180 s   → intensity 1
-//   180–240 s  → intensity 0  (mid-event quiet)
-//   240–360 s  → intensity 1
-//   360–420 s  → intensity 2  (second peak)
-//   420–540 s  → intensity 1
-//   540–600 s  → intensity 2  (finale)
+// BLOOM PHASES — every beat is a FRACTION of the real hold time (holdMs), not a fixed
+// second count. The hold is bloomSustainMs(gardeners): 20 s solo / 35 s (2) / 50 s (3)
+// / 60 s (4+) since the 2026-09-17 decay-rate rework. This file's old schedule assumed
+// a ~10-minute event and scheduled its second half — including the ENTIRE moonlit
+// finale — at 150–235 s, long after the server had already reset the garden at 20–60 s.
+// startBloomCooldown() bumps bloomGen on reset, so those late beats were silently
+// no-ops: the true root cause of "moonlight bloom doesn't look any different" (found
+// 2026-09-17). Also: the gentle branch (fxLevel 1) never checked variantId at all,
+// even though moonlit IS reachable there (exactly 3 gardeners) — it now gets the same
+// richer closing beat as the full spectacle, scaled to its shorter window.
 // ---------------------------------------------------------------
 
-export function startBloomPhases(): void {
+/** @param fxLevel  0 = quiet solo bloom, 1 = gentle, 2 = full spectacle (bloomFxLevel of the bloom scale)
+ *  @param variantId BLOOM_VARIANTS id — 'classic' or a rare flavour
+ *  @param holdMs   real time until the server resets the bloom — bloomSustainMs(gardenersPresent)
+ *  at the caller. Every beat below is `at(fraction of holdMs)`, clamped short of the end
+ *  so nothing fires after the reset has already happened. */
+export function startBloomPhases(fxLevel: 0|1|2 = 2, variantId = 'classic', holdMs = 60_000): void {
   cancelPreBloom()          // cancel pre-bloom timers + loops
   bloomGen++
   const gen = bloomGen
+  bloomFxCap     = fxLevel
+  bloomVariantId = variantId
+  const moonlit  = variantId === 'moonlit'
 
-  function after(sec: number, fn: () => void): void {
-    timers.setTimeout(() => {
-      if (bloomGen !== gen) return
-      fn()
-    }, jitter(sec * 1000))
+  function at(frac: number, fn: () => void): void {
+    const ms = Math.max(0, Math.min(frac * holdMs, holdMs - 1500))
+    timers.setTimeout(() => { if (bloomGen === gen) fn() }, jitter(ms))
   }
 
-  // ── Visual baseline ──────────────────────────────────────────
+  // ── Visual baseline (every bloom, even the quiet one) ────────
   setGroundLightsBloom(true)
   setFairyLightsBloom(true)
   startFireflies()
-
-  // ── Opening burst ────────────────────────────────────────────
-  setIntensity(2)
-  triggerBloomShockwave()
-  triggerGroundLightBurst()
-
-  // Restart loops for bloom phase
   stopLoops()
   startLoops()
 
-  // ── Intensity timeline ───────────────────────────────────────
- after( 20, () => setIntensity(1))     // was 60
-after( 80, () => setIntensity(0))     // was 180
-after(100, () => setIntensity(1))     // was 240
+  // ── Quiet solo bloom: lights, one soft petal rain, a ripple — no shockwaves.
+  // GDD §3 pillar 3: "solo care earns a quiet bloom, group care the full spectacle".
+  // Always classic — moonlit needs bloomScale ≥0.75, unreachable at 1 gardener.
+  if (fxLevel === 0) {
+    setIntensity(0)
+    at(0.20, () => triggerGroundRipple(BLOOM_CENTER))
+    at(0.60, () => startPetalRain())
+    return
+  }
 
-after(150, () => {
+  // ── Gentle bloom (2–3 gardeners): opening burst, one mid petal wave, one closing
+  // flourish — capped at intensity 1. Moonlit is reachable at exactly 3 gardeners.
+  if (fxLevel === 1) {
+    setIntensity(1)
+    triggerBloomShockwave()
+    triggerGroundLightBurst()
+    if (moonlit) {
+      // Rare variant: a double-crack opening and petals from the first second
+      timers.setTimeout(triggerBloomShockwave, jitter(900))
+      startPetalRain()
+    }
+    at(0.40, () => setIntensity(0))
+    at(0.65, () => { setIntensity(1); triggerBloomShockwave(); startPetalRain() })
+    at(0.88, () => {
+      // Finale: the rare variant gets an extra wave and a second petal pass
+      const waves = moonlit ? [0, 400, 900] : [0, 900]
+      waves.forEach(d => timers.setTimeout(triggerBloomShockwave, jitter(d)))
+      if (moonlit) startPetalRain()
+    })
+    return
+  }
+
+  // ── Full spectacle (4+ gardeners) ─────────────────────────────
   setIntensity(2)
   triggerBloomShockwave()
   triggerGroundLightBurst()
-  startPetalRain()
-  timers.setTimeout(startPetalRain, 500)
-})
+  if (moonlit) {
+    // Rare variant: a double-crack opening and petals from the first second
+    timers.setTimeout(triggerBloomShockwave, jitter(900))
+    startPetalRain()
+  }
 
-after(180, () => setIntensity(1))     // was 420
-
-after(220, () => {
-  setIntensity(2)
-  triggerBloomShockwave()
-  triggerGroundLightBurst()
-})
-after(230, () => {
-  const waves = [0, 800, 1600, 2400]
-  waves.forEach(d => timers.setTimeout(triggerBloomShockwave, jitter(d)))
-})
-
-after(235, () => endBloomSparkles())
+  at(0.22, () => setIntensity(1))
+  at(0.42, () => {
+    setIntensity(2)
+    triggerBloomShockwave()
+    triggerGroundLightBurst()
+    startPetalRain()
+    if (moonlit) timers.setTimeout(startPetalRain, 500)
+  })
+  at(0.62, () => setIntensity(1))
+  at(0.80, () => {
+    setIntensity(2)
+    triggerBloomShockwave()
+    triggerGroundLightBurst()
+  })
+  at(0.90, () => {
+    // Finale: the rare variant "erupts over the whole garden" — more waves, gentler spacing
+    const waves = moonlit ? [0, 400, 800, 1200] : [0, 700, 1400]
+    waves.forEach(d => timers.setTimeout(triggerBloomShockwave, jitter(d)))
+    if (moonlit) { startPetalRain(); timers.setTimeout(startPetalRain, 700) }
+  })
 }
 
 // ---------------------------------------------------------------

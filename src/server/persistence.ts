@@ -19,7 +19,7 @@ export type LoadResult<T> =
   | { ok: false }                     // the read threw and returned no answer
 
 // ---------------------------------------------------------------
-// Host-call budget
+// Pacing
 // ---------------------------------------------------------------
 
 /** The authoritative-server runtime allows 32 concurrent fetches per scene and
@@ -44,6 +44,21 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
     inFlight--
     waiting.shift()?.()
   }
+}
+
+/** One write in flight at a time, across every key. The preview storage service
+ *  serves a PUT as read-whole-file, set one key, write-whole-file with no lock, so
+ *  concurrent writes to DIFFERENT keys erase each other: on 2026-09-17 a harvest's
+ *  'boxes' write lost to its own 'flowers' write and the box stayed opened after a
+ *  restart. The SDK only orders writes per key, so the global chain stays. Harmless
+ *  on the Worlds key-value store, and it keeps writes to one slot of the fetch cap. */
+let writeChain: Promise<unknown> = Promise.resolve()
+
+/** Runs `write` after every earlier write has settled. */
+function queuedWrite<T>(write: () => Promise<T>): Promise<T> {
+  const run = writeChain.then(write, write)
+  writeChain = run.catch(() => undefined)
+  return run
 }
 
 // ---------------------------------------------------------------
@@ -109,7 +124,7 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
   /** One write attempt. A throw counts as a failure, like a false result. */
   async function attempt(value: unknown): Promise<boolean> {
     try {
-      return await withSlot(() => write(value))
+      return await queuedWrite(() => write(value))
     } catch {
       return false
     }
