@@ -23,9 +23,10 @@ const speciesName = (flower: string) => plantSpeciesById(flower)?.name ?? flower
 let open = false
 let selectedKey = ''      // `${flower}|${rarityTier}` of the tile picked in My flowers
 let giftMode = false      // choosing who to give the selected flower to
+let page = 0              // My flowers page (pagination — scrolling isn't verified on both explorers)
 
 export function isSeedMenuOpen(): boolean { return open }
-export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false } }
+export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; page = 0 } }
 export function openSeedMenu(): void { open = true }
 
 /** The keepsake index the menu currently has selected for gifting, or null if none —
@@ -41,7 +42,7 @@ const RAISED = { r: 1, g: 1, b: 1, a: 0.08 }
 const CREAM  = { r: 0.957, g: 0.918, b: 0.824, a: 1 }
 const DIM    = { r: 0.83,  g: 0.82,  b: 0.78,  a: 1 }
 const MOSS   = { r: 0.18,  g: 0.49,  b: 0.34,  a: 1 }
-const MAX_TILES = 8
+const PAGE_TILES = 8   // 2 rows of 4
 
 interface Group { key: string; flower: string; rarityTier: number; count: number; lastIndex: number }
 function groupFlowers(): Group[] {
@@ -71,7 +72,9 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const total  = pouchGroups.reduce((a, g) => a + g.count, 0)
   const next   = nextSeedTier()
   const groups = groupFlowers()
-  const shown  = groups.slice(0, MAX_TILES)
+  const pages  = Math.max(1, Math.ceil(groups.length / PAGE_TILES))
+  page         = Math.min(page, pages - 1)   // collection shrank (gift / tidy) — stay in range
+  const shown  = groups.slice(page * PAGE_TILES, (page + 1) * PAGE_TILES)
   const speciesFound = new Set(getFlowers().map(f => f.flower)).size
   const sel    = groups.find(g => g.key === selectedKey) ?? null
   const here   = giftMode ? gardenersHere() : []
@@ -141,7 +144,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
 
       {/* my flowers */}
       <UiEntity uiTransform={{ width: '100%', height: fs(28), flexDirection: 'row', alignItems: 'center' }}>
-        <Label value="My flowers" fontSize={fs(19)} color={CREAM} textAlign="middle-left" uiTransform={{ flexGrow: 1, flexShrink: 0, height: '100%' }} />
+        <Label value="My flowers" fontSize={fs(19)} color={CREAM} textAlign="middle-left" textWrap="nowrap" uiTransform={{ flexGrow: 1, flexShrink: 0, height: '100%' }} />
         <Label value={`${getFlowers().length} kept - ${speciesFound}/${PLANT_SPECIES.length} species found`} fontSize={fs(14)} color={DIM} textAlign="middle-right" uiTransform={{ height: '100%' }} />
       </UiEntity>
       <Label value="Harvest an opened planter, or receive a gift" fontSize={fs(14)} color={{ ...DIM, a: 0.7 }} textAlign="middle-left" uiTransform={{ display: groups.length === 0 ? 'flex' : 'none', width: '100%', height: fs(26), margin: { top: px(6) } }} />
@@ -149,7 +152,16 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       <UiEntity uiTransform={{ display: groups.length > 0 ? 'flex' : 'none', width: '100%', flexDirection: 'row', flexWrap: 'wrap', margin: { top: px(8) } }}>
         {shown.map((g, i) => flowerTile(g, i))}
       </UiEntity>
-      <Label value={`+${groups.length - MAX_TILES} more kinds`} fontSize={fs(13)} color={DIM} textAlign="middle-left" uiTransform={{ display: groups.length > MAX_TILES ? 'flex' : 'none', width: '100%', height: fs(22) }} />
+      {/* pages: Prev · 1 / 3 · Next — only when the collection needs more than one */}
+      <UiEntity uiTransform={{ display: pages > 1 ? 'flex' : 'none', width: '100%', height: px(44), flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+        <UiEntity uiTransform={{ width: px(96), height: px(40), alignItems: 'center', justifyContent: 'center', borderRadius: px(20) }} uiBackground={{ color: page > 0 ? RAISED : { ...RAISED, a: 0.03 } }} onMouseDown={() => { if (page > 0) { page--; selectedKey = ''; giftMode = false } }}>
+          <Label value="Prev" fontSize={fs(15)} color={page > 0 ? CREAM : { ...DIM, a: 0.4 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+        </UiEntity>
+        <Label value={`${page + 1} / ${pages}`} fontSize={fs(15)} color={DIM} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+        <UiEntity uiTransform={{ width: px(96), height: px(40), alignItems: 'center', justifyContent: 'center', borderRadius: px(20) }} uiBackground={{ color: page < pages - 1 ? RAISED : { ...RAISED, a: 0.03 } }} onMouseDown={() => { if (page < pages - 1) { page++; selectedKey = ''; giftMode = false } }}>
+          <Label value="Next" fontSize={fs(15)} color={page < pages - 1 ? CREAM : { ...DIM, a: 0.4 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+        </UiEntity>
+      </UiEntity>
 
       {/* selection → gift */}
       <UiEntity uiTransform={{ display: sel && !giftMode ? 'flex' : 'none', width: '100%', height: px(48), flexDirection: 'row', alignItems: 'center', margin: { top: px(6) } }}>
