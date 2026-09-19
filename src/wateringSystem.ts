@@ -1144,7 +1144,8 @@ function setupPlant(plantName: string) {
   Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: bobEnt })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
   GltfNodeModifiers.create(dropEnt, { modifiers: [{ path: '', castShadows: false }] })   // 38 small drops — not worth a shadow pass
-  Billboard.create(dropEnt, { billboardMode: BillboardMode.BM_Y })
+  // No Billboard: the drop is a 3D teardrop, symmetric about Y, so facing the camera changed
+  // nothing — yet the explorer re-rotated all 38 every frame.
   waterDropMap.set(entity, dropEnt)
   shownDrops.add(dropEnt)
   pendingDropAnimators.add(dropEnt)

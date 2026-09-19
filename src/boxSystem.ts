@@ -67,6 +67,12 @@ const PLAQUE_OFFSET_Z = 1.055 * BOX_MODEL_SCALE
 const PLAQUE_Y        = 0.988 * BOX_MODEL_SCALE
 const PLAQUE_SIZE     = { w: 0.92 * BOX_MODEL_SCALE, h: 0.30 * BOX_MODEL_SCALE }
 const PLAQUE_FONT     = 0.4    // TUNING — two lines on a 0.55 × 0.18 m board
+// Plaques are POOLED: signs.ts only ever shows the nearest 8 within 9 m, so 96 per-box
+// plaques meant 88 hidden text entities (+ a 96-text rewrite on every pouch update).
+// PLAQUE_POOL plaques re-home to the nearest planters instead (same idea as the 100-pot test).
+const PLAQUE_POOL     = 8
+const PLAQUE_RANGE_M  = 12     // a bit beyond signs.ts' 9 m show range, so a plaque is in place before it fades in
+const PLAQUE_SCAN_MS  = 400
 const SEEDLING_SCALE = 0.25
 const SEEDLING_MODEL_MIN_Y = 1.15   // seedling.glb's geometry starts 1.15 above its origin
 // Balloon countdown, in the balloon GLB's own space (the entity carries BOX_MODEL_SCALE).
@@ -92,8 +98,7 @@ interface BoxView {
   boxId:        string
   base:         Entity
   hit:          Entity          // box collider child: tap target + walk blocker
-  label:        Entity
-  sign:         Sign            // the plaque (root + text) — moved by the layout editor
+  labelText:    string          // what this box's plaque says — shown by a pooled plaque when near
   plant:        Entity | null   // sprout or flower entity while planted
   plantKey:     string          // what `plant` currently shows — rebuilt only when this changes
   balloon:      Entity | null   // animated balloon while the box holds a seed or flower
@@ -306,7 +311,7 @@ function refresh(v: BoxView): void {
   if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
   setBalloonVisual(v, pos)
   if (v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, Date.now())
-  TextShape.getMutable(v.label).text = labelFor(v)
+  setLabel(v, labelFor(v))
   const pe = PointerEvents.getMutableOrNull(v.hit)?.pointerEvents[0]?.eventInfo
   if (pe) pe.hoverText = hoverFor(v)
 }
@@ -367,11 +372,7 @@ function createBox(p: PlanterPos & { id: string }): BoxView {
   Transform.create(hit, { parent: base, position: PLANTER_COLLIDER_CENTER, scale: PLANTER_COLLIDER_SIZE })
   MeshCollider.setBox(hit, ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS)
 
-  const at    = planterPoint(p, 0, PLAQUE_OFFSET_Z)   // on the planter's front board
-  const sign  = createSign({ x: at.x, y: PLAQUE_Y, z: at.z }, (180 + p.rot) % 360, PLAQUE_SIZE, PLAQUE_FONT, false)
-  const label = sign.text
-
-  const v: BoxView = { boxId: p.id, base, hit, label, sign, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
     { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
@@ -402,9 +403,8 @@ export function setPlanterPose(id: string, pose: PlanterPos): void {
   const base = Transform.getMutable(v.base)
   base.position = { x: pose.x, y: 0, z: pose.z }
   base.rotation = planterRotation(pose)
-  const at = planterPoint(pose, 0, PLAQUE_OFFSET_Z)
-  moveSign(v.sign, { x: at.x, y: PLAQUE_Y, z: at.z })
-  Transform.getMutable(v.sign.root).rotation = Quaternion.fromEulerDegrees(0, (180 + pose.rot) % 360, 0)
+  const pl = plaques.find(q => q.boxId === id)
+  if (pl) placePlaque(pl, pose)
   if (v.balloon !== null) {
     const b = Transform.getMutable(v.balloon)
     b.position = { x: pose.x, y: 0, z: pose.z }
@@ -449,7 +449,8 @@ export function deletePlanter(id: string): void {
   const zero = { x: 0, y: 0, z: 0 }
   Transform.getMutable(v.base).scale = zero
   hideBalloon(v)
-  moveSign(v.sign, { x: 0, y: -50, z: 0 })
+  const pl = plaques.find(q => q.boxId === id)
+  if (pl) freePlaque(pl)
 }
 export function isPlanterDeleted(id: string): boolean { return deleted.has(id) }
 
@@ -546,8 +547,63 @@ function balloonStartSystem(): void {
   }
 }
 
+// ---------------------------------------------------------------
+// Plaque pool
+// ---------------------------------------------------------------
+
+interface Plaque { sign: Sign; boxId: string | null }
+const plaques: Plaque[] = []
+let plaqueAccum = 0
+
+function placePlaque(pl: Plaque, pose: PlanterPos): void {
+  const at = planterPoint(pose, 0, PLAQUE_OFFSET_Z)   // on the planter's front board
+  moveSign(pl.sign, { x: at.x, y: PLAQUE_Y, z: at.z })
+  Transform.getMutable(pl.sign.root).rotation = Quaternion.fromEulerDegrees(0, (180 + pose.rot) % 360, 0)
+}
+
+function freePlaque(pl: Plaque): void {
+  pl.boxId = null
+  moveSign(pl.sign, { x: 0, y: -50, z: 0 })
+}
+
+/** Remember the text; write it only if a plaque is on that box right now. */
+function setLabel(v: BoxView, text: string): void {
+  if (v.labelText === text) return
+  v.labelText = text
+  const pl = plaques.find(q => q.boxId === v.boxId)
+  if (pl) TextShape.getMutable(pl.sign.text).text = text
+}
+
+/** Keep the pool on the nearest planters. A plaque only moves when its box drops out of the
+ *  nearest set, so plaques in view stay put. */
+function plaqueHomeSystem(dt: number): void {
+  plaqueAccum += dt * 1_000
+  if (plaqueAccum < PLAQUE_SCAN_MS) return
+  plaqueAccum = 0
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!me) return
+  const wanted = new Set([...layout.entries()]
+    .filter(([id]) => !deleted.has(id))
+    .map(([id, p]) => ({ id, p, d: Math.hypot(p.x - me.x, p.z - me.z) }))
+    .filter(r => r.d <= PLAQUE_RANGE_M)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, PLAQUE_POOL)
+    .map(r => r.id))
+  for (const pl of plaques) if (pl.boxId !== null && !wanted.has(pl.boxId)) freePlaque(pl)
+  for (const id of wanted) {
+    if (plaques.some(q => q.boxId === id)) continue
+    const pl = plaques.find(q => q.boxId === null)
+    const v = views.get(id), pose = layout.get(id)
+    if (!pl || !v || !pose) break
+    pl.boxId = id
+    placePlaque(pl, pose)
+    TextShape.getMutable(pl.sign.text).text = v.labelText
+  }
+}
+
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupBoxSystem(): void {
+  for (let i = 0; i < PLAQUE_POOL; i++) plaques.push({ sign: createSign({ x: 0, y: -50, z: 0 }, 0, PLAQUE_SIZE, PLAQUE_FONT, false), boxId: null })
   for (const p of BOX_POSITIONS) { layout.set(p.id, { x: p.x, z: p.z, rot: p.rot }); views.set(p.id, createBox(p)) }
 
   room.onMessage('boxState', (data) => {
@@ -587,7 +643,7 @@ export function setupBoxSystem(): void {
   room.onMessage('pouchUpdate', (data) => {
     try { pouch = JSON.parse(data.countsJson) } catch { pouch = [] }
     setPouch(pouch)   // HUD chip + seed menu read the shared store
-    for (const v of views.values()) if (!v.owner) TextShape.getMutable(v.label).text = labelFor(v)
+    for (const v of views.values()) if (!v.owner) setLabel(v, labelFor(v))
   })
 
   setupSignSystem()
@@ -595,5 +651,6 @@ export function setupBoxSystem(): void {
   engine.addSystem(boxTickSystem)
   engine.addSystem(balloonStartSystem)
   engine.addSystem(plantRevealSystem)
+  engine.addSystem(plaqueHomeSystem)
   console.log(`[Boxes] ${views.size} seed boxes ready · boxState listeners=${room.listenerCount('boxState')}`)
 }

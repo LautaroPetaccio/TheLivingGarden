@@ -31,6 +31,7 @@ import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS,
 
 let toastVisible  = false
 let toastText     = ''
+let toastColor: { r: number; g: number; b: number } | null = null   // e.g. the rarity colour of a gathered seed
 let toastGen      = 0
 
 let dailyLimitVisible = false
@@ -68,8 +69,10 @@ function openBanner(ms = BANNER_OPEN_MS): void {
 // Public API — toasts and pills (stacked under the banner)
 // ---------------------------------------------------------------
 
-export function showToast(text: string, durationMs: number, _large = false): void {
+/** @param color optional text colour (e.g. a seed's rarity colour); default cream */
+export function showToast(text: string, durationMs: number, _large = false, color?: { r: number; g: number; b: number }): void {
   toastText    = text
+  toastColor   = color ?? null
   toastVisible = true
   const gen    = ++toastGen
   timers.setTimeout(() => { if (toastGen === gen) toastVisible = false }, durationMs)
@@ -166,27 +169,29 @@ const EDGE       = 16          // gap from the safe-area edge
 function barColor(): { r: number; g: number; b: number } {
   return bannerHealth >= 0.8 ? BAR_GREEN : bannerHealth >= 0.5 ? BAR_ORANGE : BAR_RED
 }
-// Ring sprites: art exists at 41 health steps + 21 bloom steps, but mounting one
-// UiEntity per frame (needed so nothing gets texture-swapped mid-game — see below)
-// means that many SIMULTANEOUS distinct UI textures. KJ 2026-09-17: the ring renders
-// as a plain white square on desktop even after the frames were made power-of-two —
-// so pixel size wasn't the whole story. DIAGNOSTIC: sample every 4th frame instead of
-// every one (62 → 17 simultaneous textures) to test whether sheer texture COUNT is the
-// actual limit. If this doesn't fix it either, the cause is something else entirely —
-// this file only picks a subset of the existing PNGs, no new art needed either way.
+// Ring sprites: ONE sprite sheet (ring_sheet.png, 8×8 cells of 256 px) holding all 41 health
+// frames then all 21 bloom frames, packed from the original ring_NN / ringbloom_NN PNGs
+// (2026-09-19, originals kept). The ring shows a frame by moving its UV window, so the texture
+// never changes — changing an element's texture made the client rebuild its background (a
+// blank-frame flash), which is why frames used to be STACKED and toggled by alpha. Stacking
+// cost one scene texture per frame (17 after the every-4th-frame cut) against a 71-texture
+// scene limit, and is the prime suspect for the desktop white-square ring. Now: 1 texture,
+// every frame back (the stride cut is gone).
 const RING_STEPS   = 40
 const BLOOM_STEPS  = 20
-const FRAME_STRIDE = 4
-const RING_FRAME_COUNT  = Math.floor(RING_STEPS  / FRAME_STRIDE) + 1   // 11 frames: 0,4,…40
-const BLOOM_FRAME_COUNT = Math.floor(BLOOM_STEPS / FRAME_STRIDE) + 1   // 6 frames: 0,4,…20
-const two = (n: number): string => String(n).padStart(2, '0')
-const RING_FILES: string[] = [
-  ...Array.from({ length: RING_FRAME_COUNT },  (_, i) => `${UI_DIR}ring_${two(i * FRAME_STRIDE)}.png`),
-  ...Array.from({ length: BLOOM_FRAME_COUNT }, (_, i) => `${UI_DIR}ringbloom_${two(i * FRAME_STRIDE)}.png`),
-]
-/** Index into RING_FILES of the one frame to show. Frames are STACKED and toggled by alpha —
- *  changing an element's texture makes the client rebuild its background (a blank frame),
- *  which with eased values meant several flashes per watering. */
+const RING_FRAME_COUNT  = RING_STEPS  + 1   // 41 frames: 0…40
+const BLOOM_FRAME_COUNT = BLOOM_STEPS + 1   // 21 frames: 0…20
+const RING_SHEET      = `${UI_DIR}ring_sheet.png`
+const RING_SHEET_COLS = 8                    // 8×8 grid, frames in reading order from the top-left
+const RING_TEXEL      = 0.5 / 2048           // half-texel inset so neighbouring cells never bleed in
+/** UVs of one sheet cell, bottom-left vertex clockwise (PBUiBackground.uvs order). */
+function ringUvs(i: number): number[] {
+  const col = i % RING_SHEET_COLS, row = Math.floor(i / RING_SHEET_COLS), k = 1 / RING_SHEET_COLS
+  const u0 = col * k + RING_TEXEL, u1 = (col + 1) * k - RING_TEXEL
+  const v1 = 1 - row * k - RING_TEXEL, v0 = 1 - (row + 1) * k + RING_TEXEL
+  return [u0, v0, u0, v1, u1, v1, u1, v0]
+}
+/** Sheet index of the frame to show. */
 function ringIndex(): number {
   const clamp = (v: number) => Math.max(0, Math.min(1, v))
   return bannerState === 'bloom'
@@ -346,13 +351,10 @@ function uiComponent() {
 
       {/* ═════ HEALTH RING — top right, the resting HUD. Tap to open the banner. ═════ */}
       <UiEntity uiTransform={{ positionType: 'absolute', position: { top: topPx, right: pct(rightPct) }, width: ringSize, height: ringSize }}>
-        {RING_FILES.map((src, i) => (
-          <UiEntity
-            key={src}
-            uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize }}
-            uiBackground={{ textureMode: 'stretch', texture: { src }, color: { r: 1, g: 1, b: 1, a: i === frame ? 1 : 0 } }}
-          />
-        ))}
+        <UiEntity
+          uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize }}
+          uiBackground={{ textureMode: 'stretch', texture: { src: RING_SHEET }, uvs: ringUvs(frame) }}
+        />
         <UiEntity
           uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize, alignItems: 'center', justifyContent: 'center' }}
           onMouseDown={() => openBanner()}
@@ -405,7 +407,7 @@ function uiComponent() {
       <UiEntity uiTransform={{ display: toastVisible ? 'flex' : 'none', positionType: 'absolute', position: { top: toastY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
         <UiEntity uiTransform={{ height: px(PILL_H), flexDirection: 'row', alignItems: 'center', padding: { left: px(PILL_PAD_X - 6), right: px(PILL_PAD_X) }, borderRadius: px(PILL_H / 2) }} uiBackground={{ color: DARK }}>
           <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(10) } }} uiBackground={{ textureMode: 'stretch', texture: { src: glyph.src }, color: { ...glyph.tint, a: 1 } }} />
-          <Label value={toastText} fontSize={fs(PILL_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+          <Label value={toastText} fontSize={fs(PILL_FONT)} color={{ ...(toastColor ?? CREAM), a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
 

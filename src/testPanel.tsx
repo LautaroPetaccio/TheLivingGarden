@@ -30,6 +30,7 @@ import { waterFxFlags } from './sparkleSystem'
 import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
 import {
   adminSpawnLocalSeed,
+  adminSpawnSeedLadder,
   adminRequestServerSeed,
   adminScaleSeeds,
   adminShiftSeedHeight,
@@ -364,7 +365,7 @@ export function TestPanelUi() {
 
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
           <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(0)} />
-          <SeedBtn label="LOCAL Epic"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(3)} />
+          <SeedBtn label="LOCAL ladder" color={BTN_WATER} onClick={() => adminSpawnSeedLadder()} />
           <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(0)} last />
         </UiEntity>
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>

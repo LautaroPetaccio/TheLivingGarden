@@ -23,10 +23,14 @@ import {
   engine,
   Entity,
   Transform,
-  MeshRenderer,
-  Material,
+  GltfContainer,
+  GltfNodeModifiers,
+  ColliderLayer,
+  ParticleSystem,
+  LightSource,
 } from '@dcl/sdk/ecs'
-import { Color4 } from '@dcl/sdk/math'
+import { Color4, Quaternion } from '@dcl/sdk/math'
+import { isMobile } from '@dcl/sdk/platform'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
 import {
@@ -35,6 +39,9 @@ import {
   SEED_GATHER_RADIUS,
   SEED_COLLECT_RADIUS,
   SEED_SPAWN_HEIGHT,
+  SEED_MODEL_HEIGHT,
+  SPARKLE_SRC,
+  seedModelSrc,
   rarityTierById,
   withArticle,
 } from './shared/config'
@@ -47,10 +54,9 @@ import { playSfx } from './sounds'
 // ---------------------------------------------------------------
 
 // `let` — live-tunable from the test panel admin controls (adminScaleSeeds / adminShiftSeedHeight)
-let SEED_SCALE_MIN = 0.45             // greybox: oversized for visibility, tune down with real art
-let SEED_SCALE_MAX = 0.6              // at the top of the rollable range (tier 5, Exotic)
+let SEED_SCALE_MIN = 0.45             // world HEIGHT (m) of a Common seed — sized for visibility
+let SEED_SCALE_MAX = 0.62             // world height at the top of the range (tier 7, Unique)
 let SEED_REST_Y       = 1.1           // rest at ~chest height so plants/decor don't hide seeds
-const SEED_BOB_AMPL     = 0.06        // idle bob amplitude (m)
 const SEED_BOB_SPEED    = 2.0         // idle bob speed (rad/s)
 const SEED_SWAY_AMPL    = 0.35        // horizontal sway while falling (m)
 // Chase speed scales with proximity: gentle drift at the leash edge, then it
@@ -61,16 +67,78 @@ const DRIFT_SPEED_MAX   = 9.0         // m/s when nearly touching (outruns a run
 const CHEST_HEIGHT      = 0.9         // m above the avatar Transform origin (origin = feet)
 const GATHER_RETRY_MS   = 3_000       // re-allow a gather request if no reply
 const TOAST_GATHER_MS   = 4_000
-// Tiers roll 0..5 in normal play (rollSeedTier) — Mythic/Unique (6, 7) are `custom`
-// and only reachable via admin test tools, so scale/color just clamp at the top.
-const MAX_ROLLABLE_TIER = 5
+// Tiers roll 0..7 (Mythic/Unique joined the roll 2026-09-19); size ramps across all of them.
+const MAX_ROLLABLE_TIER = 7
 function seedScaleForTier(tier: number): number {
   const t = Math.max(0, Math.min(MAX_ROLLABLE_TIER, tier)) / MAX_ROLLABLE_TIER
-  return SEED_SCALE_MIN + (SEED_SCALE_MAX - SEED_SCALE_MIN) * t
+  return (SEED_SCALE_MIN + (SEED_SCALE_MAX - SEED_SCALE_MIN) * t) / SEED_MODEL_HEIGHT
 }
-function seedColorForTier(tier: number): Color4 {
-  const c = rarityTierById(tier).seedColor
-  return Color4.create(c.r, c.g, c.b, 1)
+
+// ---------------------------------------------------------------
+// Tier FX ladder (KJ 2026-09-19) — restraint over quantity: "too much for too little".
+// Motion carries the tiers and is FREE — the drift system already rewrites every live seed's
+// Transform each frame, so spin / bob / heartbeat throb / wobble / spiral fall ride on that
+// same write. On top, AT MOST ONE emitter per seed (Epic+): a few LARGE soft glints (≤ ~5
+// alive), alpha-blended so they read on the bright floor, world-space so a falling seed leaves
+// one or two behind. Seed materials are NEVER overridden: KJ's outline is an inverted hull
+// (flipped normals + back-face culling) that an override material turns into a solid blob.
+// ---------------------------------------------------------------
+
+type RGB = { r: number; g: number; b: number }
+interface SeedFx {
+  spinDegS: number
+  bob:      number                                  // idle bob height (m)
+  throb:    { periodS: number; amp: number } | null // heartbeat scale spike
+  wobbleDeg: number                                 // tilt sway while spinning
+  spiral:   number                                  // fall sway multiplier (1 = the old sway)
+  glints:   { a: RGB; b: RGB; rate: number; size: number } | null
+  light:    RGB | null                              // desktop only (godot LightSource flicker)
+}
+const BLUE = { r: 0.26, g: 0.56, b: 1 }, ICE = { r: 0.7, g: 0.88, b: 1 }
+const PURPLE = { r: 0.63, g: 0.29, b: 0.95 }, LAVENDER = { r: 0.9, g: 0.78, b: 1 }
+const LIME = { r: 0.61, g: 0.82, b: 0.26 }, RED = { r: 1, g: 0.2, b: 0.15 }, PINK = { r: 1, g: 0.29, b: 0.93 }
+const GOLD = { r: 1, g: 0.64, b: 0.09 }, CREAM = { r: 1, g: 0.93, b: 0.7 }
+// TUNING — the whole ladder. glints.rate is per second; lifetime 1.2 s → rate × 1.2 alive.
+const SEED_FX: ReadonlyArray<SeedFx> = [
+  /* Common    */ { spinDegS: 40, bob: 0.05, throb: null,                         wobbleDeg: 0,  spiral: 1,   glints: null, light: null },
+  /* Uncommon  */ { spinDegS: 60, bob: 0.08, throb: null,                         wobbleDeg: 0,  spiral: 1,   glints: null, light: null },
+  /* Rare      */ { spinDegS: 60, bob: 0.08, throb: { periodS: 1.5, amp: 0.10 },  wobbleDeg: 0,  spiral: 1,   glints: null, light: null },
+  /* Epic      */ { spinDegS: 70, bob: 0.09, throb: { periodS: 1.5, amp: 0.10 },  wobbleDeg: 12, spiral: 1,   glints: { a: BLUE,   b: ICE,      rate: 2,   size: 0.35 }, light: null },
+  /* Legendary */ { spinDegS: 70, bob: 0.10, throb: { periodS: 1.3, amp: 0.12 },  wobbleDeg: 12, spiral: 2.2, glints: { a: PURPLE, b: LAVENDER, rate: 2.5, size: 0.4 },  light: null },
+  /* Exotic    */ { spinDegS: 90, bob: 0.10, throb: { periodS: 0.8, amp: 0.14 },  wobbleDeg: 22, spiral: 2.2, glints: { a: LIME,   b: RED,      rate: 3,   size: 0.4 },  light: null },
+  /* Mythic    */ { spinDegS: 90, bob: 0.12, throb: { periodS: 0.8, amp: 0.16 },  wobbleDeg: 22, spiral: 2.6, glints: { a: PINK,   b: CREAM,    rate: 3.5, size: 0.45 }, light: null },
+  /* Unique    */ { spinDegS: 45, bob: 0.12, throb: { periodS: 1.1, amp: 0.14 },  wobbleDeg: 8,  spiral: 2.6, glints: { a: GOLD,   b: CREAM,    rate: 4,   size: 0.5 },  light: GOLD },
+]
+const seedFx = (tier: number): SeedFx => SEED_FX[Math.max(0, Math.min(SEED_FX.length - 1, tier))]
+const PSB_ALPHA = 0, PS_PLAYING = 0, PSS_WORLD = 1   // const enums in @dcl/ecs internals (same as plantVfx)
+
+/** Heartbeat: a sharp throb then rest (sin⁸ spike), 0..1. */
+const heartbeat = (tS: number, periodS: number): number => Math.pow(Math.max(0, Math.sin(Math.PI * ((tS / periodS) % 1))), 8)
+
+/** The seed's one accent emitter (+ Unique's light), as CHILDREN — removed with it. */
+function attachSeedFx(seed: Entity, fx: SeedFx): void {
+  if (fx.glints) {
+    const { a, b, rate, size } = fx.glints
+    const e = engine.addEntity()
+    Transform.create(e, { parent: seed })
+    ParticleSystem.create(e, {
+      shape: ParticleSystem.Shape.Sphere({ radius: 0.3 }),
+      rate, maxParticles: Math.ceil(rate * 1.2) + 1, lifetime: 1.2,
+      gravity: 0, additionalForce: { x: 0, y: 0.25, z: 0 },
+      initialVelocitySpeed: { start: 0, end: 0.1 },
+      initialSize: { start: size * 0.7, end: size }, sizeOverTime: { start: 0.4, end: 1 },   // swell…
+      initialColor: { start: Color4.create(a.r, a.g, a.b, 1), end: Color4.create(b.r, b.g, b.b, 1) },
+      colorOverTime: { start: Color4.create(1, 1, 1, 1), end: Color4.create(1, 1, 1, 0) },   // …then fade
+      texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ALPHA,
+      simulationSpace: PSS_WORLD,
+      loop: true, prewarm: false, active: true, playbackState: PS_PLAYING,
+    })
+  }
+  if (fx.light && !isMobile()) {
+    const l = engine.addEntity()
+    Transform.create(l, { parent: seed })
+    LightSource.create(l, { active: true, color: fx.light, intensity: 2_500, shadow: false, type: { $case: 'point', point: {} } })
+  }
 }
 
 // ---------------------------------------------------------------
@@ -81,6 +149,8 @@ interface Seed {
   id:          string
   entity:      Entity
   rarityTier:  number
+  fx:          SeedFx
+  baseScale:   number
   baseX:       number
   baseZ:       number
   spawnLocalMs: number   // local-clock ms when the fall began (clock-synced)
@@ -113,20 +183,19 @@ function spawnSeed(rec: { id: string; x: number; z: number; rarityTier: number; 
     position: { x: rec.x, y: SEED_SPAWN_HEIGHT, z: rec.z },
     scale:    { x: scale, y: scale, z: scale },
   })
-  MeshRenderer.setSphere(entity)
-  const color = seedColorForTier(rec.rarityTier)
-  Material.setPbrMaterial(entity, {
-    albedoColor:       color,
-    emissiveColor:     color,
-    // Low emissive so the tier hue actually reads — high values wash everything to white.
-    // Placeholder until the real seed model with rarity as a material colour overlay.
-    emissiveIntensity: rec.rarityTier > 0 ? 1.0 : 0.5,
-  })
+  // KJ's tier seed model (was a greybox sphere). Proximity-collected, so no colliders;
+  // small and numerous during a bloom, so no shadow casting either.
+  GltfContainer.create(entity, { src: seedModelSrc(rec.rarityTier), visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  GltfNodeModifiers.create(entity, { modifiers: [{ path: '', castShadows: false }] })
+  const fx = seedFx(rec.rarityTier)
+  attachSeedFx(entity, fx)
 
   seeds.set(rec.id, {
     id:           rec.id,
     entity,
     rarityTier:   rec.rarityTier,
+    fx,
+    baseScale:    scale,
     baseX:        rec.x,
     baseZ:        rec.z,
     spawnLocalMs: localSpawn,
@@ -141,7 +210,7 @@ function spawnSeed(rec: { id: string; x: number; z: number; rarityTier: number; 
 function despawnSeed(id: string): void {
   const seed = seeds.get(id)
   if (!seed) return
-  engine.removeEntity(seed.entity)
+  engine.removeEntityWithChildren(seed.entity)   // + its glint emitter / light
   seeds.delete(id)
 }
 
@@ -162,6 +231,16 @@ export function adminSpawnLocalSeed(rarityTier = 0): void {
   spawnSeed({ id: `local_${Date.now()}`, x: p.x + 4, z: p.z, rarityTier, spawnedAt: Date.now() })
 }
 
+/** Test panel: one LOCAL seed of every tier (Common → Unique) in a row 4 m out, 1.2 m apart —
+ *  compare the whole FX ladder side by side. Local seeds self-collect on contact. */
+export function adminSpawnSeedLadder(): void {
+  const p = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!p) return
+  for (let tier = 0; tier < SEED_FX.length; tier++) {
+    spawnSeed({ id: `local_${Date.now()}_${tier}`, x: p.x + 4, z: p.z + (tier - (SEED_FX.length - 1) / 2) * 1.2, rarityTier: tier, spawnedAt: Date.now() })
+  }
+}
+
 /** Ask the server to spawn one seed near the player through the REAL seedSpawned path. */
 export function adminRequestServerSeed(rarityTier = 0): void {
   const p = Transform.getOrNull(engine.PlayerEntity)?.position ?? { x: 8, y: 0, z: 12 }
@@ -173,10 +252,7 @@ export function adminRequestServerSeed(rarityTier = 0): void {
 export function adminScaleSeeds(mult: number): void {
   SEED_SCALE_MIN *= mult
   SEED_SCALE_MAX *= mult
-  for (const s of seeds.values()) {
-    const k = seedScaleForTier(s.rarityTier)
-    Transform.getMutable(s.entity).scale = { x: k, y: k, z: k }
-  }
+  for (const s of seeds.values()) s.baseScale = seedScaleForTier(s.rarityTier)   // applied on the next frame
   console.log(`[Seeds][admin] scale min=${SEED_SCALE_MIN.toFixed(2)} max=${SEED_SCALE_MAX.toFixed(2)}`)
 }
 
@@ -211,16 +287,24 @@ function seedDriftSystem(dt: number): void {
 
     const t  = Transform.getMutable(seed.entity)
     const fallElapsed = now - seed.spawnLocalMs
+    // Tier motion — all in this one Transform write (no extra messages)
+    const fx = seed.fx, tS = now / 1_000
+    const tilt = fx.wobbleDeg * Math.sin(tS * 1.7 + seed.phase)
+    t.rotation = Quaternion.fromEulerDegrees(tilt, (tS * fx.spinDegS + seed.phase * 57) % 360, 0)
+    const k = seed.baseScale * (1 + (fx.throb ? fx.throb.amp * heartbeat(tS + seed.phase, fx.throb.periodS) : 0))
+    t.scale = { x: k, y: k, z: k }
 
     if (fallElapsed < SEED_FALL_MS && !seed.drifting) {
       // ── Falling: ease down with a gentle horizontal sway ──
       const p = fallElapsed / SEED_FALL_MS
       t.position.y = SEED_SPAWN_HEIGHT - (SEED_SPAWN_HEIGHT - SEED_REST_Y) * p
-      t.position.x = seed.baseX + Math.sin(seed.phase + p * Math.PI * 3) * SEED_SWAY_AMPL * (1 - p)
-      t.position.z = seed.baseZ + Math.cos(seed.phase + p * Math.PI * 3) * SEED_SWAY_AMPL * (1 - p)
+      // Rarer tiers spiral down wider and with more turns (fx.spiral)
+      const turns = Math.PI * 3 * fx.spiral, amp = SEED_SWAY_AMPL * fx.spiral * (1 - p)
+      t.position.x = seed.baseX + Math.sin(seed.phase + p * turns) * amp
+      t.position.z = seed.baseZ + Math.cos(seed.phase + p * turns) * amp
     } else if (!seed.drifting) {
       // ── Landed: idle bob ──
-      t.position.y = SEED_REST_Y + Math.abs(Math.sin(now / 1_000 * SEED_BOB_SPEED + seed.phase)) * SEED_BOB_AMPL
+      t.position.y = SEED_REST_Y + Math.abs(Math.sin(now / 1_000 * SEED_BOB_SPEED + seed.phase)) * fx.bob
     }
 
     if (!playerPos) continue
@@ -286,7 +370,7 @@ export function setupSeedSystem(): void {
       // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)
       playSfx('seedCatch')
       const tierName = rarityTierById(data.rarityTier).name
-      showToast(data.rarityTier > 0 ? `You caught ${withArticle(tierName)} seed!` : 'Seed gathered', TOAST_GATHER_MS, false)
+      showToast(data.rarityTier > 0 ? `You caught ${withArticle(tierName)} seed!` : 'Seed gathered', TOAST_GATHER_MS, false, rarityTierById(data.rarityTier).seedColor)
     }
   })
 

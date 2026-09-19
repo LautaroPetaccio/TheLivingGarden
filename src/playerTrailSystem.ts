@@ -30,7 +30,7 @@ import { Color4 } from '@dcl/sdk/math'
 import { SPARKLE_SRC } from './shared/config'
 
 // const enums in @dcl/ecs internals, not re-exported (same as plantVfx)
-const PSB_ADD = 1, PS_PLAYING = 0, PSS_WORLD = 1
+const PSB_ALPHA = 0, PS_PLAYING = 0, PSS_WORLD = 1   // alpha, not additive: additive vanishes on the bright garden
 
 // ---------------------------------------------------------------
 // Config  (tweak here — no magic numbers below)
@@ -40,10 +40,10 @@ const PSB_ADD = 1, PS_PLAYING = 0, PSS_WORLD = 1
 const TRAIL_DURATION_MS  = 10 * 60_000
 
 /** Sparkles per second per player (was 2 every 350 ms). */
-const TRAIL_RATE         = 6
+const TRAIL_RATE         = 3    // few and big (KJ 2026-09-19)
 
 /** World-space sparkle diameter at peak (m). */
-const TRAIL_SPARKLE_SIZE = 0.25
+const TRAIL_SPARKLE_SIZE = 0.4
 
 /** Sparkle lifetime (s). */
 const TRAIL_LIFE_S       = 1.6
@@ -86,7 +86,7 @@ function addEmitter(address: string): void {
     initialSize: { start: TRAIL_SPARKLE_SIZE, end: TRAIL_SPARKLE_SIZE }, sizeOverTime: { start: 1, end: 0 },
     initialColor: { start: Color4.create(1.0, 0.95, 0.78, 1), end: Color4.create(1.0, 0.88, 0.52, 1) },   // warm cream → gold
     colorOverTime: { start: Color4.create(1, 1, 1, 1), end: Color4.create(1, 1, 1, 0) },
-    texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ADD,
+    texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ALPHA,
     simulationSpace: PSS_WORLD,
     loop: true, prewarm: false, active: true, playbackState: PS_PLAYING,
   })

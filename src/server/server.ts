@@ -44,7 +44,7 @@ import {
   rollTierAtLeast,
   GUARANTEED_RARE_AT_CONTRIBUTORS,
   GOLDEN_SEED_AT_FRACTION,
-  GOLDEN_SEED_MIN_TIER,
+  rollRainbowTier,
   rollPlantSpecies,
   RARITY_TIERS,
   SEED_LIFETIME_MS,
@@ -1245,20 +1245,20 @@ export async function server(): Promise<void> {
     room.send('seedGathered', { seedId: seed.id, by: displayName, byAddress: playerAddress, rarityTier: seed.rarityTier }, { to: [playerAddress] })
   })
 
-  /** Golden seed: each player may catch it once and rolls their own tier ≥ Epic. */
+  /** Rainbow ("golden") seed: each player may catch it once and rolls their own tier by rollRainbowTier. */
   async function catchGolden(seedId: string, playerAddress: string): Promise<void> {
     if (!golden || golden.id !== seedId || Date.now() >= golden.endsAt) return
     if (golden.gatheredBy.has(playerAddress)) return
     golden.gatheredBy.add(playerAddress)                       // before any await — no double award
-    const tier  = rollTierAtLeast(GOLDEN_SEED_MIN_TIER)
+    const tier  = rollRainbowTier()
     const name  = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
     const pouch = await loadPouch(playerAddress)
     pouch[tier] = (pouch[tier] ?? 0) + 1
     void savePouch(playerAddress)
     sendPouch(playerAddress)
-    console.log(`[Server] ${name} caught the golden seed → tier ${tier} (${golden.gatheredBy.size} caught so far)`)
+    console.log(`[Server] ${name} caught the rainbow seed → tier ${tier} (${golden.gatheredBy.size} caught so far)`)
     room.send('seedGathered', { seedId, by: name, byAddress: playerAddress, rarityTier: tier }, { to: [playerAddress] })
-    room.send('notice', { text: `${name} caught the golden seed!` })   // everyone — a shared moment
+    room.send('notice', { text: `${name} caught the rainbow seed!` })   // everyone — a shared moment
   }
 
   // ── Message: adminSpawnSeed (test panel) ────────────────────

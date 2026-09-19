@@ -59,9 +59,9 @@ export const waterFxFlags = { ripple: true, burst: true, tribute: true }
 // isn't a reliable "play again" signal, and one entity per watering is nothing.
 // =============================================================
 
-const BURST_COUNT     = 14   // sparkles per watering
+const BURST_COUNT     = 6    // sparkles per watering — few and big (KJ 2026-09-19: "too small and heavy")
 const BURST_EMIT_MS   = 120  // emit window — maxParticles caps it at BURST_COUNT
-const SPARKLE_SIZE    = 0.22 // world-space diameter at peak (m)
+const SPARKLE_SIZE    = 0.4  // world-space diameter at peak (m)
 const SPEED_MIN       = 1.8  // m/s
 const SPEED_MAX       = 4.2  // m/s
 const GRAVITY_MOD     = 0.5  // × 9.81 m/s² (was 5 m/s²)
@@ -69,7 +69,7 @@ const LIFE_S          = 1.6
 const SPAWN_Y         = 2    // metres above plant base
 const CONE_HALF_ANGLE = 70   // ° from vertical — the old 20–90° elevation fountain
 // const enums in @dcl/ecs internals, not re-exported (same as plantVfx)
-const PSB_ADD = 1, PS_PLAYING = 0, PSS_WORLD = 1
+const PSB_ALPHA = 0, PS_PLAYING = 0, PSS_WORLD = 1   // alpha, not additive: additive vanishes on the bright garden
 
 let burstAlbedo:   { r: number; g: number; b: number } = { r: 1.0, g: 0.95, b: 0.78 }   // warm cream
 let burstEmissive: { r: number; g: number; b: number } = { r: 1.0, g: 0.88, b: 0.52 }   // warm gold
@@ -94,7 +94,7 @@ export function triggerSparkle(pos: { x: number; y: number; z: number }): void {
     initialVelocitySpeed: { start: SPEED_MIN, end: SPEED_MAX },
     initialSize: { start: SPARKLE_SIZE, end: SPARKLE_SIZE }, sizeOverTime: { start: 1, end: 0 },
     initialColor: { start: Color4.create(burstAlbedo.r, burstAlbedo.g, burstAlbedo.b, 1), end: Color4.create(burstEmissive.r, burstEmissive.g, burstEmissive.b, 1) },
-    texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ADD,
+    texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ALPHA,
     simulationSpace: PSS_WORLD,
     loop: true, prewarm: false, active: true, playbackState: PS_PLAYING,
   })

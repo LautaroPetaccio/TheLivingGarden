@@ -102,13 +102,20 @@ export const SPARKLE_SRC  = 'assets/scene/Images/sparkle.png'
 /** Garden walkable area bounds — used for ambient FX spawning. */
 export const GARDEN_BOUNDS = { xMin: 3, xMax: 14, zMin: 3, zMax: 22 } as const
 
-// ── Golden seed chase (KJ 2026-09-18) ──
+// ── Rainbow seed chase (KJ 2026-09-18 as the "golden seed"; rainbow since 2026-09-19 so
+// gold stays the Unique tier's colour). Code names still say "golden".
 // One per bloom: appears GOLDEN_SEED_AT_FRACTION into the bloom and wanders the garden
-// until it ends. Everyone may catch it once; each catcher rolls their own tier ≥
-// GOLDEN_SEED_MIN_TIER. The server sends only { spawnedAt, pathSeed } — every client
+// until it ends. Everyone may catch it once; each catcher rolls their own tier by
+// RAINBOW_TIER_WEIGHTS. The server sends only { spawnedAt, pathSeed } — every client
 // computes the same position from goldenSeedPos, so nothing streams per frame.
 export const GOLDEN_SEED_AT_FRACTION   = 0.3   // TUNING — late enough that bloom-arrivals see it
-export const GOLDEN_SEED_MIN_TIER      = 3     // TUNING — Epic or better
+/** What a rainbow catch rolls into — the realistic route to Mythic and Unique. */
+const RAINBOW_TIER_WEIGHTS: ReadonlyArray<[number, number]> = [[4, 55], [5, 30], [6, 12], [7, 3]]   // TUNING — [tier, weight]: Legendary / Exotic / Mythic / Unique
+export function rollRainbowTier(): number {
+  let r = Math.random() * RAINBOW_TIER_WEIGHTS.reduce((a, [, w]) => a + w, 0)
+  for (const [tier, w] of RAINBOW_TIER_WEIGHTS) { r -= w; if (r <= 0) return tier }
+  return RAINBOW_TIER_WEIGHTS[0][0]
+}
 export const GOLDEN_SEED_CATCH_RADIUS  = 1.3   // m, 3D from chest height — generous for mobile
 
 /** Where the golden seed is `tSec` after it appeared: a slow Lissajous wander inside
@@ -276,6 +283,20 @@ export const BALLOON_ANIM_CLIPS  = ['balloons', 'balloons.001'] as const
  *  attempt showed no visible difference between rarities). The two rarity colors are
  *  baked directly into two exported variants instead. */
 export const SEEDLING_MODEL_SRC_NORMAL = 'assets/scene/Models/seedling/seedling_normal.glb'
+/** KJ's seed models (2026-09-19), one per rarity tier, indexed by tier id (RARITY_TIERS).
+ *  All share the same 152-tri mesh; the model is ~0.94 m tall, centred near its origin. */
+export const SEED_MODEL_SRCS: ReadonlyArray<string> = [
+  'assets/scene/Models/Seeds/CommonSeed/commonSeed.glb',
+  'assets/scene/Models/Seeds/UncommonSeed/uncommonSeed.glb',
+  'assets/scene/Models/Seeds/RareSeed/rareSeed.glb',
+  'assets/scene/Models/Seeds/EpicSeed/epicSeed.glb',
+  'assets/scene/Models/Seeds/LegendarySeed/legendarySeed.glb',
+  'assets/scene/Models/Seeds/ExoticSeed/exoticSeed.glb',
+  'assets/scene/Models/Seeds/MythicSeed/mythicSeed.glb',
+  'assets/scene/Models/Seeds/UniqueSeed/uniqueSeed.glb',
+]
+export const SEED_MODEL_HEIGHT = 0.94   // m at scale 1 — divide a wanted world height by this
+export const seedModelSrc = (tier: number): string => SEED_MODEL_SRCS[Math.max(0, Math.min(SEED_MODEL_SRCS.length - 1, tier))]
 export const SEEDLING_MODEL_SRC_RARE   = 'assets/scene/Models/seedling/seedling_rare.glb'
 /** TUNING — GDD: overnight scale, "an evening plant opens by next morning" (~10 h).
  *  Set to 2 minutes for the greybox playtest so the whole loop fits one session. */
@@ -429,10 +450,11 @@ export function rarityTierById(id: number): RarityTierDef {
   return RARITY_TIERS[id] ?? RARITY_TIERS[0]
 }
 
-/** Relative odds among Uncommon..Exotic (tiers 1-5) once a seed rolls "above Common" —
- *  see seedRareChance. Mythic/Unique (6, 7) are `custom` — no art yet, excluded from
- *  general rolling until they have models. */
-const TIER_ROLL_WEIGHTS: ReadonlyArray<number> = [55, 30, 10, 4, 1]   // tier 1..5
+/** Relative odds among Uncommon..Unique (tiers 1-7) once a seed rolls "above Common" —
+ *  see seedRareChance. Mythic/Unique joined the roll 2026-09-19 (KJ) now that their seed
+ *  models exist: per seed ≈ Mythic 1 in 2,500 solo → 1 in 840 at 6+ gardeners, Unique
+ *  1 in 10,000 → 1 in 3,350. The rainbow seed (rollRainbowTier) is the realistic route. */
+const TIER_ROLL_WEIGHTS: ReadonlyArray<number> = [55, 30, 10, 4, 1, 0.4, 0.1]   // TUNING — tier 1..7
 
 /** Rolls a rarity tier for a newly-spawned seed: seedRareChance(...) decides whether
  *  it beats Common at all, then this weights which of Uncommon..Exotic it lands on. */
@@ -441,7 +463,7 @@ export function rollSeedTier(contributors: number, rareSeedMult = 1): number {
   return rollTierAtLeast(1)
 }
 
-/** A tier ≥ `minTier` (1..5) by TIER_ROLL_WEIGHTS — the guaranteed Rare+ seed uses 2. */
+/** A tier ≥ `minTier` (1..7) by TIER_ROLL_WEIGHTS — the guaranteed Rare+ seed uses 2. */
 export function rollTierAtLeast(minTier: number): number {
   const from    = Math.max(1, Math.min(TIER_ROLL_WEIGHTS.length, minTier))
   const weights = TIER_ROLL_WEIGHTS.slice(from - 1)

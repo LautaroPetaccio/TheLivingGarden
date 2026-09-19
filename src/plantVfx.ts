@@ -8,7 +8,7 @@
 //   Epic       blue particles
 //   Legendary  tonal purple pulse + purple particles           (+ pulsing light, desktop)
 //   Exotic     alternating lime/red pulse + particles + tween  (+ pulsing light, desktop)
-// Common/Uncommon get nothing. Mythic/Unique are custom models (not built).
+// Common/Uncommon get nothing. Mythic/Unique: stopgap re-coloured Exotic kit until their custom designs.
 //
 // The pulse uses GltfNodeModifiers, which REPLACES a node's material — so it re-supplies
 // the plant's real texture/colour/alpha from PLANT_MATERIALS and adds emissive on top.
@@ -30,11 +30,11 @@
 import { engine, Entity, Transform, GltfContainer, GltfContainerLoadingState, GltfNodeModifiers, ParticleSystem, Material, MaterialTransparencyMode, LightSource, Tween, TweenSequence } from '@dcl/sdk/ecs'
 import { Color4, Quaternion } from '@dcl/sdk/math'
 import { isMobile } from '@dcl/sdk/platform'
-import { SPARKLE_SRC } from './shared/config'
+import { SPARKLE_SRC, rarityTierById } from './shared/config'
 import { PLANT_MATERIALS, PlantNodeMaterial } from './plantMaterials'
 
 // const enums in @dcl/ecs internals, not re-exported (same as Clean The Club's stinkSystem)
-const PSB_ADD    = 1
+const PSB_ALPHA  = 0
 const LS_FINISHED = 4   // LoadingState
 const PS_PLAYING = 0
 const EF_EASESINE = 6   // EasingFunction
@@ -49,6 +49,10 @@ const LAVENDER    = { r: 0.860, g: 0.700, b: 1.000 }
 const DEEP_PURPLE = { r: 0.380, g: 0.080, b: 0.780 }
 const LIME        = { r: 0.608, g: 0.820, b: 0.255 }
 const RED         = { r: 1.000, g: 0.200, b: 0.150 }
+const MYTHIC_PINK  = { r: 1.000, g: 0.294, b: 0.929 }
+const MYTHIC_CREAM = { r: 1.000, g: 0.800, b: 0.960 }
+const UNIQUE_GOLD  = { r: 0.996, g: 0.635, b: 0.090 }
+const UNIQUE_CREAM = { r: 1.000, g: 0.930, b: 0.700 }
 
 interface Sparkles { colors: [RGB, RGB]; rate: number; max: number; size: [number, number] }
 interface TierVfx {
@@ -60,9 +64,13 @@ interface TierVfx {
 // TUNING — every number here. Each tier must read as clearly MORE than the one below.
 const TIER_VFX: Record<number, TierVfx> = {
   2: { pulse: { colors: [GREEN], mode: 'solid', periodS: 3.0, peak: 3 }, particles: null, light: 0, tween: false },
-  3: { pulse: null, particles: { colors: [BLUE, ICE], rate: 30, max: 90, size: [0.05, 0.11] }, light: 0, tween: false },
-  4: { pulse: { colors: [DEEP_PURPLE, LAVENDER], mode: 'tonal', periodS: 2.6, peak: 5 }, particles: { colors: [PURPLE, LAVENDER], rate: 45, max: 120, size: [0.06, 0.13] }, light: 3_000, tween: false },
-  5: { pulse: { colors: [LIME, RED], mode: 'alternate', periodS: 2.2, peak: 7 }, particles: { colors: [LIME, RED], rate: 65, max: 170, size: [0.06, 0.15] }, light: 4_500, tween: true },
+  3: { pulse: null, particles: { colors: [BLUE, ICE], rate: 2, max: 5, size: [0.25, 0.35] }, light: 0, tween: false },
+  4: { pulse: { colors: [DEEP_PURPLE, LAVENDER], mode: 'tonal', periodS: 2.6, peak: 5 }, particles: { colors: [PURPLE, LAVENDER], rate: 2.5, max: 6, size: [0.28, 0.4] }, light: 3_000, tween: false },
+  5: { pulse: { colors: [LIME, RED], mode: 'alternate', periodS: 2.2, peak: 7 }, particles: { colors: [LIME, RED], rate: 3, max: 7, size: [0.3, 0.42] }, light: 4_500, tween: true },
+  // STOPGAP until the bespoke Mythic/Unique designs exist (KJ 2026-09-19: both now drop):
+  // Exotic's full kit, re-coloured, so a Mythic/Unique never looks plainer than an Exotic.
+  6: { pulse: { colors: [MYTHIC_PINK, MYTHIC_CREAM], mode: 'tonal', periodS: 2.0, peak: 7 }, particles: { colors: [MYTHIC_PINK, MYTHIC_CREAM], rate: 3.5, max: 8, size: [0.3, 0.45] }, light: 4_500, tween: true },
+  7: { pulse: { colors: [UNIQUE_GOLD, UNIQUE_CREAM], mode: 'tonal', periodS: 2.4, peak: 8 }, particles: { colors: [UNIQUE_GOLD, UNIQUE_CREAM], rate: 4, max: 9, size: [0.35, 0.5] }, light: 5_000, tween: true },
 }
 
 // ── Seedlings (growing stage) — KJ's table, seedling column (RARITY_TIERS.seedVfx):
@@ -74,9 +82,6 @@ const GOLD = { r: 0.996, g: 0.635, b: 0.090 }
 const SEEDLING_PULSE: Record<number, RGB> = { 2: GREEN, 3: BLUE, 4: PURPLE, 5: RED, 6: PINK, 7: GOLD }
 const SEEDLING_PERIOD_S = 2.6   // TUNING — gentler than the opened flowers
 const SEEDLING_PEAK     = 2.5   // TUNING
-// Base colours baked into seedling_normal.glb / seedling_rare.glb (boxSystem picks rare for tier > 0)
-const SEEDLING_BASE_NORMAL: [number, number, number, number] = [0.55, 0.85, 0.55, 1]
-const SEEDLING_BASE_RARE:   [number, number, number, number] = [1.0, 0.88, 0.45, 1]
 
 const PULSE_LEVELS    = 3      // cached material states per colour (0 = no emissive) — each step = one material rebuild
 const SPARKLE_RADIUS  = 0.38   // m — emitter sphere around the plant
@@ -91,7 +96,6 @@ const VFX_RADIUS_M    = 12
 const MAX_PULSING     = MOBILE ? 4 : 8
 const MAX_EMITTERS    = MOBILE ? 3 : 6
 const MAX_LIGHTS      = 2               // desktop only (no lights on mobile at all)
-const PARTICLE_SCALE  = MOBILE ? 0.5 : 1   // rate + max particles per emitter
 const BUDGET_MS       = 500
 const HYSTERESIS_M    = 1.5             // an effect already running ranks this much closer — no flip-flop at the edge
 
@@ -107,6 +111,7 @@ interface Active {
   light:     Entity | null
   phase:     number
   sentKey:   string   // last pulse state sent — re-send only when it changes
+  staticTint: boolean // seedlings: keep the tier tint on even when not pulsing (colour-only, one write)
   soil:      { x: number; z: number }
   inPulse:   boolean  // inside the budget for each effect
   inEmit:    boolean
@@ -126,13 +131,16 @@ export function attachPlantVfx(key: string, plant: Entity, speciesId: string, ti
     Transform.create(emitter, { position: { x: soil.x, y: soil.y + SPARKLE_Y, z: soil.z } })
     ParticleSystem.create(emitter, {
       shape: ParticleSystem.Shape.Sphere({ radius: SPARKLE_RADIUS }),
-      rate: p.rate * PARTICLE_SCALE, maxParticles: Math.ceil(p.max * PARTICLE_SCALE), lifetime: 2.0,
+      // KJ 2026-09-19: "too small and heavy" — was 30–70 tiny additive particles/s (up to 180
+      // alive per flower). Now a few LARGE glints that swell then fade, alpha-blended so they
+      // read on the bright garden. Cheap enough that mobile keeps the full count.
+      rate: p.rate, maxParticles: p.max, lifetime: 2.0,
       gravity: 0, additionalForce: { x: 0, y: 0.18, z: 0 },
-      initialVelocitySpeed: { start: 0.03, end: 0.15 },
-      initialSize: { start: p.size[0], end: p.size[1] }, sizeOverTime: { start: 1, end: 0.15 },
+      initialVelocitySpeed: { start: 0, end: 0.08 },
+      initialSize: { start: p.size[0], end: p.size[1] }, sizeOverTime: { start: 0.4, end: 1 },
       initialColor: { start: Color4.create(a.r, a.g, a.b, 1), end: Color4.create(b.r, b.g, b.b, 1) },
       colorOverTime: { start: Color4.create(1, 1, 1, 1), end: Color4.create(1, 1, 1, 0) },
-      texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ADD,
+      texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ALPHA,
       loop: true, prewarm: false, active: false, playbackState: PS_PLAYING,   // budget pass switches it on; prewarm simulated a full lifetime on the spawn frame
     })
   }
@@ -150,6 +158,7 @@ export function attachPlantVfx(key: string, plant: Entity, speciesId: string, ti
     mats: PLANT_MATERIALS[speciesId] ?? [],
     phase: Math.random() * 10,
     sentKey: '',
+    staticTint: false,
     soil: { x: soil.x, z: soil.z },
     inPulse: false, inEmit: false, inLight: false,
   })
@@ -173,23 +182,34 @@ export function setVfxFlag(name: keyof typeof vfxFlags, on: boolean): void {
     if (name === 'lights' && a.light !== null) LightSource.getMutable(a.light).active = on && a.inLight
     if (name === 'pulse') {
       a.sentKey = ''
-      if (!on && GltfNodeModifiers.has(a.plant)) GltfNodeModifiers.deleteFrom(a.plant)
+      if (!on && !a.staticTint && GltfNodeModifiers.has(a.plant)) GltfNodeModifiers.deleteFrom(a.plant)   // seedlings keep their tint
     }
   }
 }
 
-/** Growing seedling: its tier's pulse, no particles/light (seedling column of KJ's table). */
+/** Seedling leaf tint for a tier: the rarity colour lifted 20% toward white so it reads as
+ *  a leaf. Only two tints are BAKED (seedling_normal / seedling_rare = pale gold), so every tier
+ *  above Common looked gold — a Mythic seedling was yellow, not pink (KJ 2026-09-19). */
+function seedlingTint(tier: number): [number, number, number, number] {
+  const c = rarityTierById(tier).seedColor, w = 0.2
+  return [c.r + (1 - c.r) * w, c.g + (1 - c.g) * w, c.b + (1 - c.b) * w, 1]
+}
+
+/** Growing seedling: tier TINT always (tier 1+), plus its tier's pulse (2+) when in the budget;
+ *  no particles/light (seedling column of KJ's table). The seedling GLB is one untextured,
+ *  single-shell material ('Seedling'), so the override is a safe colour-only rebuild. */
 export function attachSeedlingVfx(key: string, seedling: Entity, tier: number): void {
   const soil = Transform.getOrNull(seedling)?.position ?? { x: 0, y: 0, z: 0 }
   detachPlantVfx(key)
+  if (tier <= 0) return   // Common: the baked green seedling_normal is its look
   const color = SEEDLING_PULSE[tier]
-  if (!color) return
   active.set(key, {
     key, plant: seedling, emitter: null, light: null,
-    def: { pulse: { colors: [color], mode: 'solid', periodS: SEEDLING_PERIOD_S, peak: SEEDLING_PEAK }, particles: null, light: 0, tween: false },
-    mats: [{ path: 'Seedling', color: tier > 0 ? SEEDLING_BASE_RARE : SEEDLING_BASE_NORMAL, blend: false, metallic: 0, roughness: 0.9 }],
+    def: { pulse: color ? { colors: [color], mode: 'solid', periodS: SEEDLING_PERIOD_S, peak: SEEDLING_PEAK } : null, particles: null, light: 0, tween: false },
+    mats: [{ path: 'Seedling', color: seedlingTint(tier), blend: false, metallic: 0, roughness: 0.9 }],
     phase: Math.random() * 10,
     sentKey: '',
+    staticTint: true,
     soil: { x: soil.x, z: soil.z },
     inPulse: false, inEmit: false, inLight: false,
   })
@@ -211,16 +231,20 @@ function lerp(a: RGB, b: RGB, t: number): RGB {
 
 function applyPulse(a: Active, now: number): void {
   const p = a.def.pulse
-  if (!p || !vfxFlags.pulse || !a.inPulse) return
-  const t = (now + a.phase) / p.periodS
-  const cycle = Math.floor(t)
-  const level = Math.round(Math.sin(Math.PI * (t - cycle)) * (PULSE_LEVELS - 1))   // 0 → top → 0; colour swaps at 0
-  const colorIdx = p.mode === 'alternate' ? cycle % p.colors.length : 0
-  const key = `${colorIdx}|${level}`
+  const pulsing = p !== null && vfxFlags.pulse && a.inPulse
+  if (!pulsing && !a.staticTint) return
+  let key = 'static', k = 0, color: RGB = { r: 0, g: 0, b: 0 }   // static = tint only, no emissive
+  if (pulsing) {
+    const t = (now + a.phase) / p.periodS
+    const cycle = Math.floor(t)
+    const level = Math.round(Math.sin(Math.PI * (t - cycle)) * (PULSE_LEVELS - 1))   // 0 → top → 0; colour swaps at 0
+    const colorIdx = p.mode === 'alternate' ? cycle % p.colors.length : 0
+    key = `${colorIdx}|${level}`
+    k = level / (PULSE_LEVELS - 1)
+    color = p.mode === 'tonal' ? lerp(p.colors[0], p.colors[1], k) : p.colors[colorIdx]
+  }
   if (key === a.sentKey) return
   a.sentKey = key
-  const k = level / (PULSE_LEVELS - 1)
-  const color = p.mode === 'tonal' ? lerp(p.colors[0], p.colors[1], k) : p.colors[colorIdx]
   if (a.light !== null) {
     const l = LightSource.getMutable(a.light)
     l.color = color
@@ -245,7 +269,7 @@ function applyPulse(a: Active, now: number): void {
           metallic: m.metallic,
           roughness: m.roughness,
           emissiveColor: color,
-          emissiveIntensity: p.peak * k,
+          emissiveIntensity: (p?.peak ?? 0) * k,
         } } },
       }
     }),
@@ -272,7 +296,7 @@ function rebudget(): void {
   const light = pick(a => a.light !== null,     a => a.inLight, MAX_LIGHTS)
   for (const a of active.values()) {
     const p = pulse.has(a), e = emit.has(a), l = light.has(a)
-    if (a.inPulse && !p && GltfNodeModifiers.has(a.plant)) GltfNodeModifiers.deleteFrom(a.plant)
+    if (a.inPulse && !p && !a.staticTint && GltfNodeModifiers.has(a.plant)) GltfNodeModifiers.deleteFrom(a.plant)   // seedlings fall back to the static tint
     if (a.inPulse !== p) a.sentKey = ''
     if (a.inEmit !== e && a.emitter !== null) ParticleSystem.getMutable(a.emitter).active = e && vfxFlags.particles
     if (a.inLight !== l && a.light !== null) LightSource.getMutable(a.light).active = l && vfxFlags.lights
