@@ -251,16 +251,20 @@ function applyPulse(a: Active, now: number): void {
     l.intensity = a.def.light * (0.25 + 0.75 * k)
   }
   if (a.mats.length === 0) return
-  // Only once the renderer has instantiated THIS model: the node paths are resolved against
-  // the loaded hierarchy (explorer logs "GLTF Node path '…' not found" otherwise). Seen for
-  // mushroom_brown, whose model matches rose's structure exactly — so timing, not the paths.
+  // Only once the renderer has instantiated THIS model (paths resolve against the loaded hierarchy).
   if (GltfContainerLoadingState.getOrNull(a.plant)?.currentState !== LS_FINISHED) { a.sentKey = ''; return }
   if (!GltfNodeModifiers.has(a.plant)) console.log(`[PlantVfx] pulse on ${a.key}: ${GltfContainer.getOrNull(a.plant)?.src ?? '?'} paths=${a.mats.map(m => m.path).join(',')}`)
   GltfNodeModifiers.createOrReplace(a.plant, {
     modifiers: a.mats.map(m => {
       const tex = m.texture ? Material.Texture.Common({ src: m.texture }) : undefined
       return {
-        path: m.path,
+        // ONE mesh node → GLOBAL modifier (path ''). The explorer (v0.174, FindRendererByPath) looks
+        // a path up under the model's first child; for a single-root model whose mesh sits ON that
+        // root there's no scene wrapper, so the first child IS the named node and 'Seedling' is
+        // searched for inside 'Seedling' → "GLTF Node path … not found" (the mushroom_brown error),
+        // and the seedling tint / 52 of 78 species' pulses silently never applied (KJ 2026-09-19).
+        // A global modifier skips the lookup; with one mesh node it's exactly equivalent.
+        path: a.mats.length === 1 ? '' : m.path,
         material: { material: { $case: 'pbr' as const, pbr: {
           texture: tex,
           emissiveTexture: tex,
