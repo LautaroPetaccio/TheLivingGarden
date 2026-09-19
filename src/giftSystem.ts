@@ -43,6 +43,7 @@ import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, 
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
 import { rarityTierById, plantSpeciesById, withArticle } from './shared/config'
 import { isBloomFlowerActive } from './bloomFlowerSystem'
+import { playSfx } from './sounds'
 
 // ---------------------------------------------------------------
 // Config
@@ -94,6 +95,7 @@ function tryGift(toAddress: string): void {
   }
   console.log(`[Gift] offering ${flowers[flowerIndex]?.flower ?? '?'} to ${toAddress}`)
   room.send('giftFlower', { toAddress, flowerIndex })
+  playSfx('gift')
 }
 
 function localAddress(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
@@ -182,6 +184,7 @@ export function setupGiftSystem(): void {
   })
 
   room.onMessage('giftReceived', (data) => {
+    playSfx('gift')
     const tierName = rarityTierById(data.rarityTier).name
     showToast(`${data.from} gave you ${withArticle(plantSpeciesById(data.flower)?.name ?? data.flower)}${data.rarityTier > 0 ? ` — ${withArticle(tierName)} one!` : ''}`, TOAST_MS, false)
   })
@@ -198,7 +201,7 @@ export function setupGiftSystem(): void {
   // track) and the one call that sends a flower.
   registerGiftApi({
     gardenersHere: () => [...tags.keys()].map(address => ({ address, name: getPlayer({ userId: address })?.name || `${address.slice(0, 6)}...` })),
-    give: (toAddress, flowerIndex) => { console.log(`[Gift] menu gift #${flowerIndex} to ${toAddress}`); room.send('giftFlower', { toAddress, flowerIndex }) },
+    give: (toAddress, flowerIndex) => { console.log(`[Gift] menu gift #${flowerIndex} to ${toAddress}`); room.send('giftFlower', { toAddress, flowerIndex }); playSfx('gift') },
     hold: (flowerIndex) => { console.log(`[Gift] hold #${flowerIndex}`); room.send('holdFlower', { flowerIndex }) },
   })
   engine.addSystem(tagScanSystem)

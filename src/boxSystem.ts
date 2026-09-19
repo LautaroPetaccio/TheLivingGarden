@@ -53,6 +53,7 @@ import { setupGiftSystem } from './giftSystem'
 import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
 import { createSign, moveSign, setupSignSystem, Sign } from './signs'
 import { BALLOON_TEXT_TRACK } from './balloonTextTrack'
+import { playSfx } from './sounds'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals)
@@ -114,6 +115,7 @@ const views  = new Map<string, BoxView>()
 const layout   = new Map<string, PlanterPos>()
 const deleted  = new Set<string>()   // removed in the editor (hidden until the next bake)
 const carrying = new Set<string>()   // being carried by the editor — plant rebuilt on drop
+const synced   = new Set<string>()   // boxes that have had their first boxState (join sync) — no sounds for that one
 let   pouch: number[] = []   // counts per rarity tier, from pouchUpdate
 let   tickAccum = 0
 
@@ -523,6 +525,9 @@ export function setupBoxSystem(): void {
     if (!v) return
     const wasOpened = v.opened
     const wasMine   = isMine(v)
+    const wasOwned  = !!v.owner
+    const live      = synced.has(v.boxId)   // false for the join/resync snapshot
+    synced.add(v.boxId)
     v.owner     = data.owner
     v.ownerName = data.ownerName
     v.rarityTier = data.rarityTier
@@ -533,6 +538,12 @@ export function setupBoxSystem(): void {
     // Countdown from the server's own clock delta — clockSync is unreliable here
     v.opensLocalAt = Date.now() + (Number(data.opensAt) - Number(data.serverNow))
     refresh(v)
+    // Sounds (sounds.ts): planting + opening play AT the planter so neighbours hear them too
+    const p = layout.get(v.boxId)
+    const at = p ? { x: p.x, y: 1, z: p.z } : undefined
+    if (live && !wasOwned && v.owner) playSfx('plant', at)
+    if (live && !wasOpened && v.opened) playSfx('flowerOpen', at)
+    if (live && wasMine && wasOpened && !v.owner) playSfx('harvest')
     if (!wasOpened && v.opened && isMine(v)) {
       const tierName = rarityTierById(v.rarityTier).name
       showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` ${withArticle(tierName, true)} one!` : ''} Harvest it, or leave it on show.`, TOAST_MS, false)

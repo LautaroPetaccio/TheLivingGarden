@@ -9,12 +9,13 @@
 // only for the catcher.
 // =============================================================
 
-import { engine, Entity, Transform, MeshRenderer, Material, ParticleSystem, AudioSource } from '@dcl/sdk/ecs'
+import { engine, Entity, Transform, MeshRenderer, Material, ParticleSystem } from '@dcl/sdk/ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
 import { goldenSeedPos, GOLDEN_SEED_CATCH_RADIUS, SPARKLE_SRC, rarityTierById, withArticle } from './shared/config'
 import { showToast } from './notifications'
+import { playSfx } from './sounds'
 
 // const enums in @dcl/ecs internals, not re-exported (same as plantVfx)
 const PSB_ADD = 1, PS_PLAYING = 0
@@ -24,11 +25,9 @@ const SIZE        = 0.32    // m — bigger than a regular seed
 const CHEST_Y     = 0.9     // avatar origin is at the feet
 const RETRY_MS    = 3_000
 const TOAST_MS    = 5_000
-const CATCH_SOUND = 'assets/scene/Sounds/MagicFX.mp3'
 
 interface Golden { id: string; pathSeed: number; spawnLocal: number; endsLocal: number; entity: Entity; sentAt: number }
 let g: Golden | null = null
-let chime: Entity | null = null
 
 function despawn(): void {
   if (g === null) return
@@ -79,20 +78,6 @@ function goldenSystem(): void {
   room.send('gatherSeed', { seedId: g.id })
 }
 
-function playChime(): void {
-  const at = Transform.getOrNull(engine.PlayerEntity)?.position
-  if (!at) return
-  if (chime === null) {
-    chime = engine.addEntity()
-    Transform.create(chime, { position: at })
-    AudioSource.create(chime, { audioClipUrl: CATCH_SOUND, playing: false, loop: false, volume: 1 })
-  }
-  Transform.getMutable(chime).position = at
-  const a = AudioSource.getMutable(chime)
-  a.playing = false
-  a.playing = true
-}
-
 /** Register — call after wateringSystem's room.clear() (seedSystem does). */
 export function setupGoldenSeed(): void {
   room.onMessage('goldenSeed', (data) => spawn(data))
@@ -101,7 +86,7 @@ export function setupGoldenSeed(): void {
     const mine = data.byAddress.toLowerCase() === (getPlayer()?.userId ?? '').toLowerCase()
     if (!mine) return
     despawn()
-    playChime()
+    playSfx('golden')   // was a same-tick false→true flip: only ever played the first time
     showToast(`You caught the golden seed — ${withArticle(rarityTierById(data.rarityTier).name)} seed!`, TOAST_MS, false)
   })
   engine.addSystem(goldenSystem)

@@ -40,6 +40,7 @@ import {
 } from './shared/config'
 import { showToast } from './notifications'
 import { setupGoldenSeed } from './goldenSeed'
+import { playSfx } from './sounds'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals — replaced in the FX phase)
@@ -283,6 +284,7 @@ export function setupSeedSystem(): void {
     const localId = getPlayer()?.userId ?? ''
     if (localId && data.byAddress.toLowerCase() === localId.toLowerCase()) {
       // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)
+      playSfx('seedCatch')
       const tierName = rarityTierById(data.rarityTier).name
       showToast(data.rarityTier > 0 ? `You caught ${withArticle(tierName)} seed!` : 'Seed gathered', TOAST_GATHER_MS, false)
     }
