@@ -472,20 +472,20 @@ function checkBloomThreshold(): void {
   }
 }
 
-/** @param forcedVariant test-panel only: a BLOOM_VARIANTS id to show at FULL scale ('' = normal roll) */
+/** @param forcedVariant test-panel only: a BLOOM_VARIANTS id to force ('' = normal roll). Forces the
+ *  variant ONLY — scale, length and seeds follow the real gardeners, so a test bloom plays out
+ *  like a real one (KJ 2026-09-19: a solo forced bloom ran the full 6 min). */
 function triggerBloom(forcedVariant = ''): void {
   if (bloomActive) return
   const threshold = currentBloomThreshold()
   cancelBloomSustain()
   bloomActive    = true
   bloomStartedAt = Date.now()
-  bloomScale     = forcedVariant ? 1 : bloomScaleFor(knownPlayers.size)
+  bloomScale     = bloomScaleFor(knownPlayers.size)
   const variant  = forcedVariant ? bloomVariantById(forcedVariant) : rollBloomVariant(bloomScale)
   bloomVariant   = variant.id
-  // Forced (test-panel) blooms are full-scale, so full length too
-  // Forced (test-panel) blooms count as a full 6-contributor bloom
-  bloomSeedContributors = forcedVariant ? 6 : Math.max(1, cycleContributors.size)
-  bloomDuration  = forcedVariant ? BLOOM_RESET_DELAY_MS : bloomDurationMs(bloomSeedContributors)
+  bloomSeedContributors = Math.max(1, cycleContributors.size)
+  bloomDuration  = bloomDurationMs(bloomSeedContributors)
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name}, ${cycleContributors.size} contributor(s) → ${bloomDuration / 60_000} min)`)
   room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration })
   scheduleSeedWaves()

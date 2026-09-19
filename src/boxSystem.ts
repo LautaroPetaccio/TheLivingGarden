@@ -32,6 +32,7 @@ import {
   GltfContainer,
   GltfNodeModifiers,
   ColliderLayer,
+  MeshCollider,
   TextShape,
   TextAlignMode,
   PointerEvents,
@@ -90,6 +91,7 @@ const TL_RESTART = 0   // TweenLoop
 interface BoxView {
   boxId:        string
   base:         Entity
+  hit:          Entity          // box collider child: tap target + walk blocker
   label:        Entity
   sign:         Sign            // the plaque (root + text) — moved by the layout editor
   plant:        Entity | null   // sprout or flower entity while planted
@@ -220,15 +222,32 @@ function setPlantVisual(v: BoxView, pos: PlanterPos): void {
   v.plant = e
 }
 
-/** One pooled balloon per box, created once and never removed — shown/hidden by scale.
- *  Removing it made the Unity explorer's ResetMaterialSystem throw (it restores the
- *  Text.002 override's material on a GLB already being torn down — KJ log 2026-09-18
- *  15:40, on harvest), and every replant re-loaded the GLB and re-synced its clip. */
+/** One pooled balloon per box, created the first time the box is planted and never removed —
+ *  shown/hidden by scale. Removing it made the Unity explorer's ResetMaterialSystem throw (it
+ *  restores the Text.002 override's material on a GLB already being torn down — KJ log
+ *  2026-09-18 15:40, on harvest), and every replant re-loaded the GLB and re-synced its clip.
+ *  While hidden its clip and text Tweens are STOPPED: the explorer writes every looping-tweened
+ *  entity's Transform back to the scene each frame, hidden or not — 96 always-on balloons were
+ *  192 messages per tick and held the scene tick at ~13 fps (KJ debug panel 2026-09-19). */
 function setBalloonVisual(v: BoxView, pos: PlanterPos): void {
+  if (!v.owner) { if (v.balloon !== null) hideBalloon(v); return }
   if (v.balloon === null) createBalloon(v, pos)
-  const k = v.owner ? BOX_MODEL_SCALE : 0
+  else if (v.balloonMover !== null && !Tween.has(v.balloonMover)) v.balloonAnimPending = true   // replanted — restart clip + text together
   const tr = Transform.getMutable(v.balloon!)
-  if (tr.scale.x !== k) tr.scale = { x: k, y: k, z: k }
+  if (tr.scale.x !== BOX_MODEL_SCALE) tr.scale = { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE }
+}
+
+function hideBalloon(v: BoxView): void {
+  if (v.balloon === null) return
+  const tr = Transform.getMutable(v.balloon)
+  if (tr.scale.x !== 0) tr.scale = { x: 0, y: 0, z: 0 }
+  v.balloonAnimPending = false
+  if (Animator.has(v.balloon)) Animator.stopAllAnimations(v.balloon)
+  for (const e of [v.balloonMover, v.balloonPivot]) {
+    if (e === null) continue
+    TweenSequence.deleteFrom(e)
+    Tween.deleteFrom(e)
+  }
 }
 
 function createBalloon(v: BoxView, pos: PlanterPos): void {
@@ -288,7 +307,7 @@ function refresh(v: BoxView): void {
   setBalloonVisual(v, pos)
   if (v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, Date.now())
   TextShape.getMutable(v.label).text = labelFor(v)
-  const pe = PointerEvents.getMutableOrNull(v.base)?.pointerEvents[0]?.eventInfo
+  const pe = PointerEvents.getMutableOrNull(v.hit)?.pointerEvents[0]?.eventInfo
   if (pe) pe.hoverText = hoverFor(v)
 }
 
@@ -330,20 +349,31 @@ function onTap(v: BoxView): void {
 // Setup
 // ---------------------------------------------------------------
 
+// Model-space (before BOX_MODEL_SCALE): the planter body up to the soil rim
+const PLANTER_COLLIDER_CENTER = { x: 0, y: 0.55, z: 0.06 }
+const PLANTER_COLLIDER_SIZE   = { x: 1.8, y: 1.1, z: 1.95 }
+
 function createBox(p: PlanterPos & { id: string }): BoxView {
-  // KJ's planter template. The GLB has no _collider mesh, so the visible meshes
-  // carry both pointer (tap) and physics (walkable) collision.
+  // KJ's planter template has no _collider mesh. Its visible meshes used to carry pointer +
+  // physics collision: 96 × 1,577-tri mesh colliders tested on every pointer raycast and
+  // physics step. One box collider per planter instead, sized to the model (glTF bounds
+  // x ±0.9, y 0–1.31, z −0.93…1.05; the box stops at the rim so the decorations stay free).
   const base = engine.addEntity()
   Transform.create(base, { position: { x: p.x, y: 0, z: p.z }, rotation: planterRotation(p), scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
-  GltfContainer.create(base, { src: BOX_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS })
+  GltfContainer.create(base, { src: BOX_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  // No shadow casting (KJ 2026-09-19): 96 planters were drawn again for every shadow cascade
+  GltfNodeModifiers.create(base, { modifiers: [{ path: '', castShadows: false }] })
+  const hit = engine.addEntity()
+  Transform.create(hit, { parent: base, position: PLANTER_COLLIDER_CENTER, scale: PLANTER_COLLIDER_SIZE })
+  MeshCollider.setBox(hit, ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS)
 
   const at    = planterPoint(p, 0, PLAQUE_OFFSET_Z)   // on the planter's front board
   const sign  = createSign({ x: at.x, y: PLAQUE_Y, z: at.z }, (180 + p.rot) % 360, PLAQUE_SIZE, PLAQUE_FONT, false)
   const label = sign.text
 
-  const v: BoxView = { boxId: p.id, base, label, sign, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, hit, label, sign, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
-    { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
+    { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
   )
   return v
@@ -418,7 +448,7 @@ export function deletePlanter(id: string): void {
   if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
   const zero = { x: 0, y: 0, z: 0 }
   Transform.getMutable(v.base).scale = zero
-  if (v.balloon !== null) Transform.getMutable(v.balloon).scale = zero
+  hideBalloon(v)
   moveSign(v.sign, { x: 0, y: -50, z: 0 })
 }
 export function isPlanterDeleted(id: string): boolean { return deleted.has(id) }

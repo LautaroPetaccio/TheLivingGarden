@@ -90,7 +90,6 @@ function createGlow(): void {
     emissiveIntensity: 2.2,
     castShadows:       false,
   })
-  Billboard.create(entity, { billboardMode: BillboardMode.BM_ALL })
   glowEntity = entity
 }
 
@@ -102,6 +101,16 @@ function createLight(): void {
     shadow: false, type: { $case: 'point', point: {} },
   })
   lightEntity = entity
+}
+
+/** Billboards only during the night: the explorer rotates EVERY billboard entity toward the
+ *  camera each frame, parked or not — 29 of them idling all day between Moonlit Blooms. */
+function setBillboards(on: boolean): void {
+  const all = glowEntity === null ? wisps.map(w => w.entity) : [...wisps.map(w => w.entity), glowEntity]
+  for (const e of all) {
+    if (on) Billboard.createOrReplace(e, { billboardMode: BillboardMode.BM_ALL })
+    else Billboard.deleteFrom(e)
+  }
 }
 
 function respawn(w: Wisp, y: number): void {
@@ -124,7 +133,6 @@ function createWisps(): void {
       emissiveIntensity: 3,
       castShadows:       false,
     })
-    Billboard.create(entity, { billboardMode: BillboardMode.BM_ALL })
     const w: Wisp = {
       entity, x: 0, z: 0, y: 0,
       size: rnd(WISP_SIZE_MIN, WISP_SIZE_MAX), speed: rnd(0.18, 0.42),
@@ -166,6 +174,7 @@ export function startMoonlight(): void {
   glowT  = 0
   if (wisps.length === 0) createWisps()
   if (glowEntity === null) createGlow()
+  setBillboards(true)
   // Desktop (Unity) only — the real point light triggers a known godot-explorer
   // artifact on mobile (flicker); mobile relies on the boosted glow sprite instead.
   if (!isMobile()) {
@@ -182,6 +191,7 @@ export function stopMoonlight(): void {
   active = false
   SkyboxTime.deleteFrom(engine.RootEntity)
   engine.removeSystem(SYSTEM_NAME)
+  setBillboards(false)
   for (const w of wisps) {
     const t = Transform.getMutable(w.entity)
     t.position = { x: w.x, y: -100, z: w.z }

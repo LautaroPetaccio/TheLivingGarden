@@ -26,6 +26,7 @@ import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter } from './boxSystem'
 import { vfxFlags, setVfxFlag } from './plantVfx'
+import { waterFxFlags } from './sparkleSystem'
 import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
 import {
   adminSpawnLocalSeed,
@@ -259,7 +260,7 @@ export function TestPanelUi() {
           uiBackground={{ color: BTN_BLOOM }}
           onMouseDown={() => forceTriggerBloom('moonlit')}
         >
-          <Label value="Force MOONLIT Bloom (rare, full scale)" fontSize={12} color={WHITE} textAlign="middle-center" />
+          <Label value="Force MOONLIT Bloom (scales with players)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         <UiEntity
@@ -290,6 +291,15 @@ export function TestPanelUi() {
           <UiEntity uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: 0 } }} uiBackground={{ color: vfxFlags.lights ? BTN_ON : BTN_OFF }} onMouseDown={() => setVfxFlag('lights', !vfxFlags.lights)}>
             <Label value={`Lights ${vfxFlags.lights ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
           </UiEntity>
+        </UiEntity>
+
+        {/* Watering FX A/B — same idea for the per-watering effects */}
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          {(['ripple', 'burst', 'tribute'] as const).map((k, i) => (
+            <UiEntity key={k} uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: i < 2 ? 4 : 0 } }} uiBackground={{ color: waterFxFlags[k] ? BTN_ON : BTN_OFF }} onMouseDown={() => { waterFxFlags[k] = !waterFxFlags[k] }}>
+              <Label value={`${k[0].toUpperCase()}${k.slice(1)} ${waterFxFlags[k] ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+            </UiEntity>
+          ))}
         </UiEntity>
 
         {/* Planter layout editor — move/rotate the real planters, then bake (GDD §3.1) */}

@@ -71,11 +71,14 @@ function weightedPick(weights: number[]): Level {
   return 2
 }
 
+/** Swap the visible variant — only the two that change are written (was all three per step). */
 function applyLevel(s: LightString, level: Level): void {
-  s.current = level
   for (let i = 0; i < 3; i++) {
-    VisibilityComponent.createOrReplace(s.variants[i], { visible: i === level })
+    const visible = i === level
+    if (VisibilityComponent.getOrNull(s.variants[i])?.visible === visible) continue
+    VisibilityComponent.createOrReplace(s.variants[i], { visible })
   }
+  s.current = level
 }
 
 function scheduleNext(s: LightString, delayMs: number): void {

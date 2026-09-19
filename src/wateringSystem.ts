@@ -15,6 +15,7 @@ import {
   Animator,
   AudioSource,
   GltfContainer,
+  GltfNodeModifiers,
   TextShape,
   Billboard,
   BillboardMode,
@@ -31,8 +32,6 @@ import {
   VisibilityComponent,
   Tween,
   EasingFunction,
-  TweenSequence,
-  TweenLoop,
   timers,
   GltfContainerLoadingState,
   PlayerIdentityData,
@@ -43,7 +42,7 @@ import { onEnterSceneObservable } from '@dcl/sdk/observables'
 import { setupPetalSystem, petalParticleSystem }                                                                   from './petalSystem'
 import { setupBloomSystem, triggerBloomEvent, endBloom, startBloomClose, isBloomActive, playBloomAudioAccent }    from './bloomSystem'
 import { startPreBloomEffects, startBloomPhases, startBloomCooldown, cancelPreBloom }                             from './bloomEvent'
-import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSystem, triggerBloomSparkles, endBloomSparkles, bloomSparkleSystem } from './sparkleSystem'
+import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, triggerBloomSparkles, endBloomSparkles, bloomSparkleSystem } from './sparkleSystem'
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
@@ -131,7 +130,7 @@ const WATER_FX_MS   = 400
 const WATER_ANIM_MS = 1500
 
 // ── Water drop indicator ──────────────────────────────────────
-const WATER_DROP_SRC = 'assets/scene/Models/waterDrop/waterDrop.glb'
+const WATER_DROP_SRC = 'assets/scene/Models/waterDrop/waterDrop_bob.glb'   // waterDrop.glb + baked 'Bob' clip
 const WATER_DROP_Y   = 0.8   // local Y above plant pivot
 const DROP_FADE_MS   = 1600  // ms for scale-in / scale-out tween
 
@@ -139,11 +138,8 @@ const DROP_FADE_MS   = 1600  // ms for scale-in / scale-out tween
 const waterDropMap = new Map<Entity, Entity>()
 
 // ── Droplet idle float animation ──────────────────────────────
-const DROP_ANIM_AMPLITUDE = 0.065   // metres (within 0.05–0.08)
-const DROP_ANIM_SPEED     = 1.1     // radians / second — slow, calm
-// The bob is a renderer-side yoyo Tween on a parent 'bob' entity (the drop itself carries the
-// fade scale Tween — one Tween per entity). Was a per-frame Transform write on all 38 drops.
-const DROP_BOB_HALF_MS    = Math.round(Math.PI / DROP_ANIM_SPEED * 1000)
+// Baked into waterDrop_bob.glb: ±0.065 m, 1.1 rad/s (5.7 s period) — see setDropBob.
+// The drop carries the fade scale Tween; its parent 'bob' entity just holds the height.
 
 // ── Sounds ────────────────────────────────────────────────────
 const SND_HOVER    = 'assets/scene/Sounds/hover.mp3'
@@ -291,6 +287,7 @@ const roseMap = new Map<Entity, Entity>()
 // ── Plant / rose animators: created when each GLB reports loaded ──────────────
 const pendingPlantAnimators = new Set<Entity>()
 const pendingRoseAnimators  = new Set<Entity>()
+const pendingDropAnimators  = new Set<Entity>()
 
 /** LS_FINISHED → true; error/not-found → dropped (logged); still loading → false. */
 function glbReady(e: Entity, pending: Set<Entity>): boolean {
@@ -318,7 +315,12 @@ function plantAnimatorInitSystem(): void {
     // The state as of NOW: watered, or held healthy by a bloom (bloomTriggered snaps
     // unwatered plants to healthy; its playSingleAnimation was a no-op before this existed).
     const healthy = (PlantData.getOrNull(entity)?.isWatered ?? false) || isBloomActive() || bloomActive
-    Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
+    if (isShown(entity)) Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
+  }
+  for (const drop of [...pendingDropAnimators]) {
+    if (!glbReady(drop, pendingDropAnimators)) continue
+    pendingDropAnimators.delete(drop)
+    Animator.createOrReplace(drop, { states: [{ clip: DROP_BOB_CLIP, playing: shownDrops.has(drop), loop: true, speed: 0.85 + Math.random() * 0.3 }] })
   }
   for (const rose of [...pendingRoseAnimators]) {
     if (!glbReady(rose, pendingRoseAnimators)) continue
@@ -329,23 +331,51 @@ function plantAnimatorInitSystem(): void {
         { clip: ANIM_CLOSE_PLAY,     playing: false, loop: false },
       ],
     })
-    Animator.playSingleAnimation(rose, ANIM_UNHEALTHY_IDLE, true)
+    if (isShown(rose)) Animator.playSingleAnimation(rose, ANIM_UNHEALTHY_IDLE, true)
   }
 }
 
+// Each plant is a PAIR of skinned, animated GLBs (rose + healthy plant) swapped by
+// visibility. Hiding a model doesn't stop its Animator, so 38 hidden twins kept skinning
+// every frame. The hidden one is stopped; whoever shows it starts its clip (every
+// showPlant call site is followed by playSingleAnimation; showRose restarts the idle).
 function showRose(entity: Entity)  {
-  const r = roseMap.get(entity); if (r) VisibilityComponent.createOrReplace(r, { visible: true  })
+  const r = roseMap.get(entity); if (!r) return
+  VisibilityComponent.createOrReplace(r, { visible: true })
+  if (Animator.has(r)) Animator.playSingleAnimation(r, ANIM_UNHEALTHY_IDLE, false)
 }
 function hideRose(entity: Entity)  {
-  const r = roseMap.get(entity); if (r) VisibilityComponent.createOrReplace(r, { visible: false })
+  const r = roseMap.get(entity); if (!r) return
+  VisibilityComponent.createOrReplace(r, { visible: false })
+  if (Animator.has(r)) Animator.stopAllAnimations(r)
 }
 function showPlant(entity: Entity) { VisibilityComponent.createOrReplace(entity, { visible: true  }) }
-function hidePlant(entity: Entity) { VisibilityComponent.createOrReplace(entity, { visible: false }) }
+function hidePlant(entity: Entity) {
+  VisibilityComponent.createOrReplace(entity, { visible: false })
+  if (Animator.has(entity)) Animator.stopAllAnimations(entity)
+}
+const isShown = (e: Entity): boolean => VisibilityComponent.getOrNull(e)?.visible !== false
+
+// The bob is BAKED into waterDrop_bob.glb (clip 'Bob', node translation ±0.065 m,
+// one 5.7 s sine period — generated from waterDrop.glb, geometry untouched). It used to be a
+// looping Tween, and the explorer writes a looping-tweened entity's Transform back to the scene
+// EVERY frame: 38 drops = 38 inbound messages per tick at rest. GLB animation has no write-back.
+// Each drop gets a slightly different speed so they drift out of step instead of bobbing as one.
+const DROP_BOB_CLIP = 'Bob'
+const shownDrops   = new Set<Entity>()   // drops currently showing (their bob should play)
+
+function setDropBob(drop: Entity, on: boolean): void {
+  if (on) shownDrops.add(drop); else shownDrops.delete(drop)
+  const a = Animator.getMutableOrNull(drop)
+  const st = a?.states[0]
+  if (st && st.playing !== on) st.playing = on
+}
 
 function setDropFade(plantEntity: Entity, direction: 'in' | 'out') {
   const drop = waterDropMap.get(plantEntity)
   if (!drop) return
   if (direction === 'in') {
+    setDropBob(drop, true)
     Tween.setScale(drop,
       { x: 0.001, y: 0.001, z: 0.001 },
       { x: 1,     y: 1,     z: 1     },
@@ -359,6 +389,7 @@ function setDropFade(plantEntity: Entity, direction: 'in' | 'out') {
       DROP_FADE_MS,
       EasingFunction.EF_EASEINBACK,
     )
+    setDropBob(drop, false)
   }
 }
 
@@ -1013,8 +1044,12 @@ function refreshWateredByLabels(): void {
     const pd   = PlantData.getOrNull(entity)
     const name = wateredByNames.get(entity)
     if (!pd?.isWatered || !name) continue
+    // Only write when the text changes — any TextShape write rebuilds that label's mesh,
+    // and "2m ago" mostly doesn't change between 5 s refreshes.
+    const text = `Watered by ${name}\n${formatTimeAgo(pd.wateredAt)}`
+    if (TextShape.get(labelEntity).text === text) continue
     const ts = TextShape.getMutable(labelEntity)
-    ts.text      = `Watered by ${name}\n${formatTimeAgo(pd.wateredAt)}`
+    ts.text      = text
     // Fixed alpha, matching the flair icon above it (which never fades) — a fade tied to
     // time-to-expiry made the name go fully invisible on any plant watered a while ago,
     // leaving just the flair badge floating with no name under it. Found 2026-09-17.
@@ -1105,16 +1140,14 @@ function setupPlant(plantName: string) {
   // ── Water drop indicator ─────────────────────────────────────
   const bobEnt = engine.addEntity()
   Transform.create(bobEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, parent: anchor })
-  Tween.create(bobEnt, {
-    duration: DROP_BOB_HALF_MS, easingFunction: EasingFunction.EF_EASESINE, currentTime: Math.random(),
-    mode: { $case: 'move', move: { start: { x: 0, y: WATER_DROP_Y - DROP_ANIM_AMPLITUDE, z: 0 }, end: { x: 0, y: WATER_DROP_Y + DROP_ANIM_AMPLITUDE, z: 0 } } },
-  })
-  TweenSequence.create(bobEnt, { sequence: [], loop: TweenLoop.TL_YOYO })
   const dropEnt = engine.addEntity()
   Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: bobEnt })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
+  GltfNodeModifiers.create(dropEnt, { modifiers: [{ path: '', castShadows: false }] })   // 38 small drops — not worth a shadow pass
   Billboard.create(dropEnt, { billboardMode: BillboardMode.BM_Y })
   waterDropMap.set(entity, dropEnt)
+  shownDrops.add(dropEnt)
+  pendingDropAnimators.add(dropEnt)
 
   // "Watered by" label — hidden until plant is watered
   const wateredByLabel = engine.addEntity()
@@ -1273,7 +1306,6 @@ export function setupWateringSystem(): void {
   engine.addSystem(resetAnimSystem)
   engine.addSystem(emoteWatchSystem)
   engine.addSystem(petalParticleSystem)
-  engine.addSystem(sparkleSystem)
   engine.addSystem(bloomSparkleSystem)
   engine.addSystem(ambientFXSystem)
 
@@ -1583,6 +1615,7 @@ export function setupWateringSystem(): void {
           if (drop) {
             Tween.deleteFrom(drop)
             Transform.getMutable(drop).scale = { x: 0.001, y: 0.001, z: 0.001 }
+            setDropBob(drop, false)
           }
         }
 

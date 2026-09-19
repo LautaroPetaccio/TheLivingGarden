@@ -14,15 +14,11 @@ import {
   Material,
   MaterialTransparencyMode,
   Transform,
-  Billboard,
-  BillboardMode,
-  Tween,
-  TweenSequence,
-  TweenLoop,
-  EasingFunction,
+  ParticleSystem,
 } from '@dcl/sdk/ecs'
 import { Color4, Quaternion } from '@dcl/sdk/math'
 import { BLOOM_CENTER, SPARKLE_SRC, GARDEN_BOUNDS } from './shared/config'
+import { waterFxFlags } from './sparkleSystem'
 
 function rnd(min: number, max: number) { return min + Math.random() * (max - min) }
 
@@ -32,49 +28,31 @@ function rnd(min: number, max: number) { return min + Math.random() * (max - min
 
 const MOTE_COUNT  = 20
 const MOTE_Y_MIN  = 0.3
-const MOTE_Y_MAX  = 3.5
+const MOTE_LIFE_S = 40     // slow rise: ~2.4 m over a lifetime (MOTE_RISE)
+const MOTE_RISE   = 0.003  // m/s² upward — gentle, slightly accelerating drift
 
-// Motion is renderer-side (was a per-frame Transform write on every mote): a parent 'sway'
-// entity yoyos along X (sine), the mote child rises MIN→MAX and restarts at the bottom.
-// currentTime spreads the loops so they don't move in step.
+// One renderer-side ParticleSystem over the garden. The previous 20 motes were 40 looping
+// Tween entities, and the Unity explorer writes a looping-tweened entity's Transform back to
+// the scene EVERY frame — 40 inbound messages per tick for dust (KJ debug panel 2026-09-19).
+// Prewarm fills the garden on load; at 20 particles its spawn-frame cost is negligible.
+const PSB_ADD = 1, PS_PLAYING = 0, PSS_WORLD = 1   // const enums in @dcl/ecs internals (same as plantVfx)
 function setupMotes() {
-  for (let i = 0; i < MOTE_COUNT; i++) {
-    const baseX = rnd(GARDEN_BOUNDS.xMin, GARDEN_BOUNDS.xMax)
-    const z     = rnd(GARDEN_BOUNDS.zMin, GARDEN_BOUNDS.zMax)
-    const y     = rnd(MOTE_Y_MIN, MOTE_Y_MAX)
-    const sc    = rnd(0.04, 0.10)
-    const speed = rnd(0.03, 0.12), swayFreq = rnd(0.3, 0.8), swayAmp = rnd(0.1, 0.30)
-
-    const sway = engine.addEntity()
-    Transform.create(sway, { position: { x: baseX, y: 0, z } })
-    Tween.create(sway, {
-      duration: Math.round(Math.PI / swayFreq * 1000), easingFunction: EasingFunction.EF_EASESINE, currentTime: Math.random(),
-      mode: { $case: 'move', move: { start: { x: baseX - swayAmp, y: 0, z }, end: { x: baseX + swayAmp, y: 0, z } } },
-    })
-    TweenSequence.create(sway, { sequence: [], loop: TweenLoop.TL_YOYO })
-
-    const ent = engine.addEntity()
-    Transform.create(ent, { parent: sway, position: { x: 0, y, z: 0 }, scale: { x: sc, y: sc, z: sc } })
-    Tween.create(ent, {
-      duration: Math.round((MOTE_Y_MAX - MOTE_Y_MIN) / speed * 1000), easingFunction: EasingFunction.EF_LINEAR,
-      currentTime: (y - MOTE_Y_MIN) / (MOTE_Y_MAX - MOTE_Y_MIN),
-      mode: { $case: 'move', move: { start: { x: 0, y: MOTE_Y_MIN, z: 0 }, end: { x: 0, y: MOTE_Y_MAX, z: 0 } } },
-    })
-    TweenSequence.create(ent, { sequence: [], loop: TweenLoop.TL_RESTART })
-    MeshRenderer.setPlane(ent)
-    Material.setPbrMaterial(ent, {
-      texture:           Material.Texture.Common({ src: SPARKLE_SRC }),
-      alphaTexture:      Material.Texture.Common({ src: SPARKLE_SRC }),
-      transparencyMode:  MaterialTransparencyMode.MTM_ALPHA_BLEND,
-      albedoColor:       { r: 1, g: 1, b: 1, a: rnd(0.25, 0.50) },
-      emissiveColor:     { r: 1.0, g: 0.82, b: 0.45 },  // warm amber
-      emissiveIntensity: 0.8,
-    })
-    Billboard.create(ent, { billboardMode: BillboardMode.BM_ALL })
-  }
+  const w = GARDEN_BOUNDS.xMax - GARDEN_BOUNDS.xMin, d = GARDEN_BOUNDS.zMax - GARDEN_BOUNDS.zMin
+  const ent = engine.addEntity()
+  Transform.create(ent, { position: { x: GARDEN_BOUNDS.xMin + w / 2, y: MOTE_Y_MIN + 0.5, z: GARDEN_BOUNDS.zMin + d / 2 } })
+  ParticleSystem.create(ent, {
+    shape: ParticleSystem.Shape.Box({ size: { x: w, y: 1, z: d } }),
+    rate: MOTE_COUNT / MOTE_LIFE_S, maxParticles: MOTE_COUNT, lifetime: MOTE_LIFE_S,
+    gravity: 0, additionalForce: { x: 0, y: MOTE_RISE, z: 0 },
+    initialVelocitySpeed: { start: 0.01, end: 0.04 },
+    initialSize: { start: 0.04, end: 0.10 }, sizeOverTime: { start: 1, end: 1 },
+    initialColor: { start: Color4.create(1.0, 0.90, 0.70, 0.25), end: Color4.create(1.0, 0.82, 0.45, 0.50) },   // warm amber
+    colorOverTime: { start: Color4.create(1, 1, 1, 1), end: Color4.create(1, 1, 1, 0) },
+    texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ADD,
+    simulationSpace: PSS_WORLD,
+    loop: true, prewarm: true, active: true, playbackState: PS_PLAYING,
+  })
 }
-
-
 
 // =============================================================
 // SECTION 2 — Bloom shockwave rings
@@ -84,16 +62,32 @@ const SHOCK_COUNT   = 3
 const SHOCK_DUR_MS  = 1400
 const SHOCK_STAGGER = 280
 const SHOCK_R_MAX   = 12
+const SHOCK_ALPHA   = 0.85
 const SHOCK_Y_BLOOM  = -0.175   // central bloom (higher, more dramatic)
 const SHOCK_Y_PLANT  = 0.15   // per-plant (closer to ground)
 
 //const SHOCK_THICKNESS = 0.25
 
 interface ShockRing {
-  entity:  Entity
-  active:  boolean
-  elapsed: number
-  delay:   number
+  entity:    Entity
+  active:    boolean
+  elapsed:   number
+  delay:     number
+  alphaStep: number   // last fade step sent — see setFadeStep
+}
+
+// Fades are stepped, not continuous: every Material change is a renderer-side material
+// rebuild (and texture re-request — see plantVfx.ts), so a per-frame alpha write on these
+// textured planes cost ~60 rebuilds/s per plane. ALPHA_STEPS levels = that many writes per fade.
+const ALPHA_STEPS = 3   // TUNING — more steps = smoother fade, more rebuilds
+
+/** Send `alpha` quantised to ALPHA_STEPS levels of `peak`, only when the level changes. Returns the level. */
+function setFadeStep(entity: Entity, alpha: number, peak: number, lastStep: number): number {
+  const step = Math.ceil((alpha / peak) * ALPHA_STEPS - 1e-6)
+  if (step === lastStep) return lastStep
+  const mat = Material.getFlatMutable(entity)
+  if (mat.albedoColor) mat.albedoColor.a = (peak * step) / ALPHA_STEPS
+  return step
 }
 
 const shockRings: ShockRing[] = []
@@ -116,7 +110,7 @@ function setupShockwaves() {
       emissiveIntensity: 2.5,
       castShadows:       false,
     })
-    shockRings.push({ entity: ent, active: false, elapsed: 0, delay: i * SHOCK_STAGGER })
+    shockRings.push({ entity: ent, active: false, elapsed: 0, delay: i * SHOCK_STAGGER, alphaStep: 0 })
   }
 }
 
@@ -217,7 +211,9 @@ const RIPPLE_DUR_MS   = 1700
 const RIPPLE_R_MAX    = 4.5   // world-unit radius
 const RIPPLE_POOL_SIZE = 3
 
-interface RippleSlot { entity: Entity; active: boolean; elapsed: number }
+const RIPPLE_ALPHA     = 0.75
+
+interface RippleSlot { entity: Entity; active: boolean; elapsed: number; alphaStep: number }
 const rippleSlots: RippleSlot[] = []
 
 function setupRipplePool(): void {
@@ -238,11 +234,12 @@ function setupRipplePool(): void {
       emissiveIntensity: 2.0,
       castShadows:       false,
     })
-    rippleSlots.push({ entity: ent, active: false, elapsed: 0 })
+    rippleSlots.push({ entity: ent, active: false, elapsed: 0, alphaStep: 0 })
   }
 }
 
 export function triggerGroundRipple(pos: { x: number; y: number; z: number }): void {
+  if (!waterFxFlags.ripple) return
   const slot = rippleSlots.find(s => !s.active)
   if (!slot) return   // all slots busy — skip (3 concurrent ripples is unlikely)
   slot.active  = true
@@ -250,8 +247,7 @@ export function triggerGroundRipple(pos: { x: number; y: number; z: number }): v
   const tf = Transform.getMutable(slot.entity)
   tf.position = { x: pos.x, y: pos.y + SHOCK_Y_PLANT, z: pos.z }
   tf.scale    = { x: 0.001, y: 0.001, z: 0.001 }
-  const mat = Material.getFlatMutable(slot.entity)
-  if (mat.albedoColor) mat.albedoColor.a = 0.75
+  slot.alphaStep = setFadeStep(slot.entity, RIPPLE_ALPHA, RIPPLE_ALPHA, slot.alphaStep)
 }
 
 function tickRipples(dt: number) {
@@ -263,20 +259,18 @@ function tickRipples(dt: number) {
     if (t >= 1) {
       slot.active = false
       Transform.getMutable(slot.entity).scale = { x: 0.001, y: 0.001, z: 0.001 }
-      const mat = Material.getFlatMutable(slot.entity)
-      if (mat.albedoColor) mat.albedoColor.a = 0
+      slot.alphaStep = setFadeStep(slot.entity, 0, RIPPLE_ALPHA, slot.alphaStep)
       continue
     }
 
     const sc    = (1 - (1 - t) * (1 - t)) * RIPPLE_R_MAX
-    const alpha = (1 - t) * (1 - t) * 0.75
+    const alpha = (1 - t) * (1 - t) * RIPPLE_ALPHA
     Transform.getMutable(slot.entity).scale = { 
   x: sc, 
   y: sc, 
   z: sc 
 }
-    const mat = Material.getFlatMutable(slot.entity)
-    if (mat.albedoColor) mat.albedoColor.a = alpha
+    slot.alphaStep = setFadeStep(slot.entity, alpha, RIPPLE_ALPHA, slot.alphaStep)
   }
 }
 
@@ -316,8 +310,7 @@ export function ambientFXSystem(dt: number): void {
   y: sc, 
   z: sc 
 }
-    const mat = Material.getFlatMutable(ring.entity)
-    if (mat.albedoColor) mat.albedoColor.a = (1 - t) * (1 - t) * 0.85
+    ring.alphaStep = setFadeStep(ring.entity, (1 - t) * (1 - t) * SHOCK_ALPHA, SHOCK_ALPHA, ring.alphaStep)
   }
 
   // ── Fireflies — bloom only ───────────────────────────────────
