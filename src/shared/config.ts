@@ -585,8 +585,11 @@ export const BOX_CAP_DEFAULT       = 2   // TUNING
  *  tidied up — opened flower → their My flowers, growing seed → back to their pouch. */
 export const PLANTER_RESERVE_FREE    = 5                     // TUNING — at ~100 planters
 export const PLANTER_TIDY_MIN_AWAY_MS = 24 * 60 * 60 * 1000  // TUNING
-/** Keepsake collection size backstop (harvested + gifted flowers a player holds). */
-export const FLOWER_COLLECTION_CAP = 20
+/** Keepsake collection size — a TECHNICAL backstop, not a gameplay limit (KJ 2026-09-19:
+ *  "players can be hoarders"; was 20). The whole collection is stored and sent as one JSON
+ *  list (~85 B per flower) on every harvest / gift / join, so this only guards payload size:
+ *  500 ≈ 42 KB. Unbounded hoarding would need per-(species, tier) counts instead of a list. */
+export const FLOWER_COLLECTION_CAP = 500
 /** Another player watering your growing box shaves this off its timer… */
 export const BOX_WATER_SHAVE_MS    = Math.round(BOX_GROW_MS * 0.10)   // TUNING — 10% per water
 /** …at most this many times per box, one water per visitor. */

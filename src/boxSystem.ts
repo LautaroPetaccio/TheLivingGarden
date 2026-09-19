@@ -106,6 +106,7 @@ interface BoxView {
   balloonMover: Entity | null   // text parent: replays Bone.003's position (Tween)
   balloonPivot: Entity | null   // child of the mover: replays Bone.003's rotation (Tween)
   balloonAnimPending: boolean   // waiting for the balloon GLB to load before starting clip + text together
+  balloonLive:  boolean         // inside the balloon budget — its clip + text Tweens run
   owner:        string
   ownerName:    string
   rarityTier:   number
@@ -236,8 +237,7 @@ function setPlantVisual(v: BoxView, pos: PlanterPos): void {
  *  192 messages per tick and held the scene tick at ~13 fps (KJ debug panel 2026-09-19). */
 function setBalloonVisual(v: BoxView, pos: PlanterPos): void {
   if (!v.owner) { if (v.balloon !== null) hideBalloon(v); return }
-  if (v.balloon === null) createBalloon(v, pos)
-  else if (v.balloonMover !== null && !Tween.has(v.balloonMover)) v.balloonAnimPending = true   // replanted — restart clip + text together
+  if (v.balloon === null) createBalloon(v, pos)   // motion starts when balloonBudgetSystem picks it
   const tr = Transform.getMutable(v.balloon!)
   if (tr.scale.x !== BOX_MODEL_SCALE) tr.scale = { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE }
 }
@@ -246,8 +246,14 @@ function hideBalloon(v: BoxView): void {
   if (v.balloon === null) return
   const tr = Transform.getMutable(v.balloon)
   if (tr.scale.x !== 0) tr.scale = { x: 0, y: 0, z: 0 }
+  stopBalloonMotion(v)
+}
+
+/** Freeze a balloon: clip stopped, text Tweens removed (no per-frame write-back). */
+function stopBalloonMotion(v: BoxView): void {
+  v.balloonLive = false
   v.balloonAnimPending = false
-  if (Animator.has(v.balloon)) Animator.stopAllAnimations(v.balloon)
+  if (v.balloon !== null && Animator.has(v.balloon)) Animator.stopAllAnimations(v.balloon)
   for (const e of [v.balloonMover, v.balloonPivot]) {
     if (e === null) continue
     TweenSequence.deleteFrom(e)
@@ -277,7 +283,7 @@ function createBalloon(v: BoxView, pos: PlanterPos): void {
   v.balloonText = text
   v.balloonMover = mover
   v.balloonPivot = pivot
-  v.balloonAnimPending = true
+  v.balloonAnimPending = false   // balloonBudgetSystem starts it when it's near
 }
 
 /** Everything setPlantVisual depends on. boxState arrives on every watering too, and the
@@ -310,7 +316,7 @@ function refresh(v: BoxView): void {
   const pos = layout.get(v.boxId)!
   if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
   setBalloonVisual(v, pos)
-  if (v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, Date.now())
+  if (v.balloonText !== null) setBalloonText(v, Date.now())
   setLabel(v, labelFor(v))
   const pe = PointerEvents.getMutableOrNull(v.hit)?.pointerEvents[0]?.eventInfo
   if (pe) pe.hoverText = hoverFor(v)
@@ -326,7 +332,7 @@ function tryPlant(v: BoxView): void {
     showToast(`You're using all ${getBoxCap()} of your planters — harvest one to plant again`, TOAST_MS, false)
     return
   }
-  const tier = nextSeedTier()
+  const tier = adminUnlimited ? 0 : nextSeedTier()   // unlimited: the server rolls a random tier
   if (tier === null) {
     showToast('No seeds yet — catch some from a bloom', TOAST_MS, false)
     return
@@ -372,7 +378,7 @@ function createBox(p: PlanterPos & { id: string }): BoxView {
   Transform.create(hit, { parent: base, position: PLANTER_COLLIDER_CENTER, scale: PLANTER_COLLIDER_SIZE })
   MeshCollider.setBox(hit, ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS)
 
-  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, balloonLive: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
     { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
@@ -466,6 +472,10 @@ export function applyPlanterLayout(list: PlanterPose[]): void {
 
 /** Test panel: run the crowding rule once now (server picks the longest-away owner's planter). */
 export function adminTidyPlanter(): void { room.send('adminTidyPlanter', {}) }
+/** Test panel (admin): lift my planter cap + random-tier, seedless planting (server-checked);
+ *  the server replies with the new cap. */
+let adminUnlimited = false
+export function adminSetUnlimitedPlanters(on: boolean): void { adminUnlimited = on; room.send('adminUnlimitedPlanters', { on }) }
 
 export function demoSeedlings(): void {
   const demo = (boxId: string, rarityTier: number) => {
@@ -510,7 +520,50 @@ function boxTickSystem(dt: number): void {
   if (tickAccum < LABEL_TICK_MS) return
   tickAccum = 0
   const now = Date.now()
-  for (const v of views.values()) if (v.owner && v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, now)
+  for (const v of views.values()) if (v.balloonLive) setBalloonText(v, now)
+}
+
+/** Write a balloon's text only when it changed ("Ready to Harvest" never does; a countdown
+ *  changes once a minute at most). Was every owned balloon, every second: ~90 text rebuilds/s
+ *  with a full garden (KJ 17 fps, 2026-09-19). */
+function setBalloonText(v: BoxView, now: number): void {
+  if (v.balloonText === null) return
+  const text = balloonTextFor(v, now)
+  if (TextShape.get(v.balloonText).text !== text) TextShape.getMutable(v.balloonText).text = text
+}
+
+// Balloon budget: every planted box has a skinned, animated balloon whose text follows it via
+// 2 looping Tweens — and the explorer writes a looping-tweened entity's Transform back into the
+// scene EVERY frame. A full garden (~90 boxes) was ~180 inbound messages per tick + 90 animated
+// balloons (KJ 17 fps). Only the nearest BALLOON_LIVE within BALLOON_LIVE_M move; the rest
+// freeze in place (clip stopped, Tweens removed) until you walk up to them.
+const BALLOON_LIVE    = 8      // TUNING
+const BALLOON_LIVE_M  = 18     // TUNING — m
+const BALLOON_SCAN_MS = 500
+let balloonScanAccum = 0
+function balloonBudgetSystem(dt: number): void {
+  balloonScanAccum += dt * 1_000
+  if (balloonScanAccum < BALLOON_SCAN_MS) return
+  balloonScanAccum = 0
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!me) return
+  const near = new Set([...views.values()]
+    .filter(v => v.owner && v.balloon !== null && !deleted.has(v.boxId))
+    .map(v => { const p = layout.get(v.boxId)!; return { v, d: Math.hypot(p.x - me.x, p.z - me.z) } })
+    .filter(r => r.d <= BALLOON_LIVE_M)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, BALLOON_LIVE)
+    .map(r => r.v))
+  const now = Date.now()
+  for (const v of views.values()) {
+    if (near.has(v) && !v.balloonLive) {
+      v.balloonLive = true
+      v.balloonAnimPending = true   // balloonStartSystem starts clip + text together once loaded
+      setBalloonText(v, now)
+    } else if (!near.has(v) && v.balloonLive) {
+      stopBalloonMotion(v)
+    }
+  }
 }
 
 /** Bone.003's baked motion as looping renderer-side Tween sequences (one segment per track key). */
@@ -649,6 +702,7 @@ export function setupBoxSystem(): void {
   setupSignSystem()
   setupPlantVfx()
   engine.addSystem(boxTickSystem)
+  engine.addSystem(balloonBudgetSystem)
   engine.addSystem(balloonStartSystem)
   engine.addSystem(plantRevealSystem)
   engine.addSystem(plaqueHomeSystem)

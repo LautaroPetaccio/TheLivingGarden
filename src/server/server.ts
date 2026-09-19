@@ -731,8 +731,15 @@ function savePlayerJson(address: string, key: string): Promise<void> {
 
 const loadFlowers = (a: string) => loadPlayerJson<FlowerKeepsake[]>(a, 'flowers', () => [])
 const loadBoxCap  = (a: string) => loadPlayerJson<{ cap: number }>(a, 'boxCap', () => ({ cap: BOX_CAP_DEFAULT }))
+/** Admins with the test panel's "Unlimited planters" on (in memory only). */
+const unlimitedPlanters = new Set<string>()
+const UNLIMITED_CAP = 999
+const RARITY_TIER_COUNT = 8   // Common..Unique
 /** Effective planter cap: a stored cap (e.g. bought planters) never drops below the default. */
-async function planterCap(address: string): Promise<number> { return Math.max((await loadBoxCap(address)).cap, BOX_CAP_DEFAULT) }
+async function planterCap(address: string): Promise<number> {
+  if (unlimitedPlanters.has(address)) return UNLIMITED_CAP
+  return Math.max((await loadBoxCap(address)).cap, BOX_CAP_DEFAULT)
+}
 
 async function sendCollection(address: string): Promise<void> {
   const flowers = await loadFlowers(address)
@@ -1283,13 +1290,16 @@ export async function server(): Promise<void> {
       sendNotice(playerAddress, `You're using all ${cap} of your planters — harvest one to plant again`)
       return
     }
-    if ((pouch[data.rarityTier] ?? 0) <= 0) { sendPouch(playerAddress); sendNotice(playerAddress, 'No seeds — catch some from a bloom'); return }
+    // Admin unlimited: a RANDOM tier every time (test a mixed garden) and no seed needed or used
+    const unlimited = unlimitedPlanters.has(playerAddress)
+    const tier = unlimited ? Math.floor(Math.random() * RARITY_TIER_COUNT) : data.rarityTier
+    if (!unlimited && (pouch[tier] ?? 0) <= 0) { sendPouch(playerAddress); sendNotice(playerAddress, 'No seeds — catch some from a bloom'); return }
     // Consume the seed and claim the box synchronously — no await between check and claim
-    pouch[data.rarityTier] -= 1
+    if (!unlimited) pouch[tier] -= 1
     const now = Date.now()
     b.owner     = playerAddress
     b.ownerName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
-    b.rarityTier = data.rarityTier
+    b.rarityTier = tier
     b.plantedAt = now
     b.opensAt   = now + BOX_GROW_MS
     b.opened    = false
@@ -1298,7 +1308,7 @@ export async function server(): Promise<void> {
     b.waterers  = []
     b.lastWaterer = ''
     scheduleOpen(b)
-    console.log(`[Server] ${b.ownerName} planted a tier-${data.rarityTier} seed in ${b.boxId} (opens in ${Math.round(BOX_GROW_MS / 60_000)} min)`)
+    console.log(`[Server] ${b.ownerName} planted a tier-${tier} seed in ${b.boxId} (opens in ${Math.round(BOX_GROW_MS / 60_000)} min)`)
     sendBox(b)
     sendPouch(playerAddress)
     void savePouch(playerAddress)
@@ -1313,7 +1323,7 @@ export async function server(): Promise<void> {
     if (!b.opened) { sendNotice(playerAddress, 'Still growing — come back when it opens'); return }
     const flowers = await loadFlowers(playerAddress)
     if (!b.opened || b.owner !== playerAddress) return           // re-check after the await
-    if (flowers.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, 'Your collection is full — gift a flower first'); return }
+    if (flowers.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, `Your collection holds ${FLOWER_COLLECTION_CAP} flowers — gift one to make room`); return }
     const keepsake: FlowerKeepsake = { flower: b.flower, rarityTier: b.rarityTier, at: Date.now() }
     flowers.push(keepsake)
     const name = b.ownerName
@@ -1357,7 +1367,7 @@ export async function server(): Promise<void> {
     const theirs = await loadFlowers(to)
     const idx = Math.floor(data.flowerIndex)
     if (idx < 0 || idx >= mine.length) { sendNotice(playerAddress, 'You have no flower to give'); return }
-    if (theirs.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, 'Their collection is full'); return }
+    if (theirs.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, `Their collection already holds ${FLOWER_COLLECTION_CAP} flowers`); return }
     const fromName = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
     const toName   = leaderboard.get(to)?.displayName ?? to.slice(0, 8) + '…'
     const [gift] = mine.splice(idx, 1)
@@ -1403,6 +1413,15 @@ export async function server(): Promise<void> {
     if (bloomActive) await resetGarden()
     sendThreshold([address])
     console.log(`[Server] Admin reset bloom/sustain (requested by ${address})`)
+  })
+
+  // ── Message: adminUnlimitedPlanters (test panel) — no planter cap, seeds not consumed ──
+  onRoomMessage<{ on: boolean }>('adminUnlimitedPlanters', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (data.on) unlimitedPlanters.add(address); else unlimitedPlanters.delete(address)
+    await sendCollection(address)   // pushes the new cap to the client's own gate
+    sendNotice(address, data.on ? 'Unlimited planters ON — plant anywhere, random tier, no seeds used' : 'Unlimited planters OFF')
+    console.log(`[Server] Admin unlimited planters ${data.on ? 'ON' : 'OFF'} for ${address}`)
   })
 
   // ── Message: adminTidyPlanter (test panel) — run the crowding rule once, now ──

@@ -24,7 +24,7 @@ import {
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
-import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter } from './boxSystem'
+import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter, adminSetUnlimitedPlanters } from './boxSystem'
 import { vfxFlags, setVfxFlag } from './plantVfx'
 import { waterFxFlags } from './sparkleSystem'
 import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
@@ -66,6 +66,7 @@ const HEADER_H     = 46
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
 let overrideLimit = false                  // mirrors overrideDailyLimit
+let unlimitedPlanters = false              // server-side, in memory — off again after a server restart
 let clickboxMode  = getUseClickbox()       // mirrors useClickbox
 let trailActive   = false                  // sparkle trail toggle
 let flowerActive  = false                  // plant-in-hand toggle
@@ -203,6 +204,15 @@ export function TestPanelUi() {
           <ToggleButton
             value={overrideLimit}
             onChange={v => { overrideLimit = v; setOverrideDailyLimit(v) }}
+          />
+        </UiEntity>
+
+        {/* Unlimited planters (admin) */}
+        <UiEntity uiTransform={{ width: '100%', height: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 6 } }}>
+          <Label value="Unlimited planters (admin, random tier, no seeds used)" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton
+            value={unlimitedPlanters}
+            onChange={v => { unlimitedPlanters = v; adminSetUnlimitedPlanters(v) }}
           />
         </UiEntity>
 
