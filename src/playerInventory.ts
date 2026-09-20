@@ -52,9 +52,11 @@ export function getBoxCap(): number { return boxCap }
 export function setBoxCap(n: number): void { boxCap = n }
 
 // Gifting is owned by giftSystem; it registers itself here so the menu can use it.
-let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void; hold(flowerIndex: number): void } | null = null
+let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void; hold(flowerIndex: number): void; holdSeed(rarityTier: number): void } | null = null
 export function registerGiftApi(api: NonNullable<typeof giftApi>): void { giftApi = api }
 export function gardenersHere(): Gardener[] { return giftApi ? giftApi.gardenersHere() : [] }
 export function giveFlower(toAddress: string, flowerIndex: number): void { giftApi?.give(toAddress, flowerIndex) }
 /** Ask the server to put this keepsake in my hand (-1 = empty hand). One at a time. */
 export function holdFlower(flowerIndex: number): void { giftApi?.hold(flowerIndex) }
+/** Equip a seed of this tier into my hand, replacing whatever was there (-1 = default). */
+export function holdSeed(rarityTier: number): void { giftApi?.holdSeed(rarityTier) }

@@ -64,6 +64,10 @@ export const room = registerMessages({
   collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
   /** Hold one keepsake in your hand (by collection index), or -1 to put it away. */
   holdFlower:       Schemas.Map({ flowerIndex: Schemas.Number }),
+  /** Equip a seed of this rarity tier into your hand, REPLACING whatever was there —
+   *  a held keepsake included. -1 goes back to the default (the rarest seed you hold,
+   *  shown only when your hands are otherwise free). */
+  holdSeed:         Schemas.Map({ rarityTier: Schemas.Number }),
   /** Server → everyone: what a gardener holds (flower '' = empty hand). Also sent per holder on join.
    *  seedTier (v2): the rarest seed in their pouch, shown in the SAME hand when they hold no
    *  keepsake — a keepsake always wins, so the two can never collide. -1 = no seed to show. */

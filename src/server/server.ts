@@ -813,13 +813,25 @@ function pouchOf(address: string): SeedPouch | undefined {
   return undefined
 }
 
-/** The seed shown in a gardener's hand: the rarest tier they actually hold. -1 while a
- *  keepsake occupies the hand (a keepsake always wins, so the two can never collide) or
- *  the pouch is empty. */
+/** Seeds a gardener has EXPLICITLY equipped (lowercase key). An equip replaces whatever
+ *  was in the hand, a keepsake included — so equipping one of these clears heldFlowers,
+ *  and holding a keepsake clears this. The hand only ever holds one thing. */
+const heldSeeds = new Map<string, number>()   // address → rarity tier
+
+/** What goes in a gardener's hand, as a seed tier (-1 = no seed):
+ *    1. a seed they explicitly equipped, while they still have one of that tier
+ *    2. nothing, if a keepsake is in the hand
+ *    3. otherwise the rarest seed they hold — the pouch made visible by default */
 function handSeedTier(address: string): number {
-  if (heldFlowers.has(address.toLowerCase())) return -1
+  const key   = address.toLowerCase()
   const pouch = pouchOf(address)
   if (!pouch) return -1
+  const equipped = heldSeeds.get(key)
+  if (equipped !== undefined) {
+    if ((pouch[equipped] ?? 0) > 0) return equipped
+    heldSeeds.delete(key)        // planted the last one of that tier — fall through
+  }
+  if (heldFlowers.has(key)) return -1
   for (let tier = pouch.length - 1; tier >= 0; tier--) if ((pouch[tier] ?? 0) > 0) return tier
   return -1
 }
@@ -1167,6 +1179,8 @@ function playerJoinSystem(): void {
         testOverrides.delete(address)
         markSeen(address)
         void ensureFreePlanters()
+        heldSeeds.delete(address.toLowerCase())
+        shownSeedTier.delete(address.toLowerCase())
         clearHeld(address.toLowerCase())
         console.log(`[Server] Player disconnected: ${address}`)
       }
@@ -1545,8 +1559,22 @@ export async function server(): Promise<void> {
     if (idx < 0) { clearHeld(a); return }
     const f = (await loadFlowers(playerAddress))[idx]
     if (!f) { sendNotice(playerAddress, 'You no longer have that flower'); return }
+    heldSeeds.delete(a)          // a keepsake replaces an equipped seed — one thing per hand
     heldFlowers.set(a, { flower: f.flower, rarityTier: f.rarityTier })
     sendHeld(a)
+  })
+
+  // ── Message: holdSeed — equip a seed, replacing whatever is in the hand ──
+  onRoomMessage<{ rarityTier: number }>('holdSeed', async (data, playerAddress) => {
+    const a    = playerAddress.toLowerCase()
+    const tier = Math.floor(data.rarityTier)
+    if (tier < 0) { heldSeeds.delete(a); sendHeld(a); return }
+    const pouch = await loadPouch(playerAddress)
+    if ((pouch[tier] ?? 0) <= 0) { sendNotice(playerAddress, 'You have no seed of that kind'); return }
+    heldSeeds.set(a, tier)
+    heldFlowers.delete(a)   // not clearHeld(): that broadcasts too, and one send is enough
+    sendHeld(a)
+    console.log(`[Server] ${playerAddress.slice(0, 8)}… equipped a tier-${tier} seed`)
   })
 
   // ── Message: forceBloom ─────────────────────────────────────

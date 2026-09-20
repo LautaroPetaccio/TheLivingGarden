@@ -222,6 +222,7 @@ export function setupGiftSystem(): void {
     gardenersHere: () => [...tags.keys()].map(address => ({ address, name: getPlayer({ userId: address })?.name || `${address.slice(0, 6)}...` })),
     give: (toAddress, flowerIndex) => { console.log(`[Gift] menu gift #${flowerIndex} to ${toAddress}`); room.send('giftFlower', { toAddress, flowerIndex }); playSfx('gift') },
     hold: (flowerIndex) => { console.log(`[Gift] hold #${flowerIndex}`); room.send('holdFlower', { flowerIndex }) },
+    holdSeed: (rarityTier) => { console.log(`[Gift] equip seed tier ${rarityTier}`); room.send('holdSeed', { rarityTier }) },
   })
   engine.addSystem(tagScanSystem)
   console.log(`[Gift] ready · notice listeners=${room.listenerCount('notice')}`)

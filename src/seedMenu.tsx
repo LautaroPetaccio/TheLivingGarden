@@ -14,7 +14,7 @@
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
 import { PLANT_SPECIES, rarityTierById, plantSpeciesById } from './shared/config'
-import { setPreferredTier, nextSeedTier, getPouch, getFlowers, gardenersHere, giveFlower, getHeld, holdFlower } from './playerInventory'
+import { setPreferredTier, nextSeedTier, getPouch, getFlowers, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed } from './playerInventory'
 
 /** 128 px thumbnails made from each species' asset-pack thumbnail.png (assets/images/plantThumbs). */
 const thumbSrc = (flower: string) => `assets/images/plantThumbs/${flower}.png`
@@ -144,7 +144,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       <UiEntity uiTransform={{ display: total > 0 ? 'flex' : 'none', width: '100%', flexDirection: 'row', flexWrap: 'wrap' }}>
         {pouchGroups.map((g, i) => tile(
           `pouch-${g.tier}`, i, rarityTierById(g.tier).seedColor, `${rarityTierById(g.tier).name}  ${g.count}`,
-          next === g.tier, () => setPreferredTier(g.tier),
+          next === g.tier, () => { setPreferredTier(g.tier); holdSeed(g.tier) },
         ))}
       </UiEntity>
 
