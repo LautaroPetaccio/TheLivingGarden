@@ -24,6 +24,7 @@ import { getPouch } from './playerInventory'
 import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
 import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
 import { BloomFinaleUi } from './bloomFinale'
+import { InfoPanelUi, toggleInfo, isInfoOpen } from './infoPanel'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor } from './shared/config'
 
 // ---------------------------------------------------------------
@@ -384,6 +385,14 @@ function uiComponent() {
         <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: seedCount > 0 ? 1 : 0.55 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(12), height: px(12), margin: { left: px(10) }, borderRadius: px(6) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
       </UiEntity>
+      {/* ? — "how the garden works", beside the pouch so both live in one place */}
+      <UiEntity
+        uiTransform={{ width: px(CHIP_H), height: px(CHIP_H), margin: { left: px(GAP) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(CHIP_H / 2) }}
+        uiBackground={{ color: isInfoOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
+        onMouseDown={() => toggleInfo()}
+      >
+        <Label value="?" fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: 0.9 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+      </UiEntity>
       </UiEntity>
 
       {/* ═════ BANNER — top centre, opens on change, alpha fade only ═════ */}
@@ -436,6 +445,7 @@ function uiComponent() {
       </UiEntity>
 
       <BloomFinaleUi px={px} fs={fs} />
+      <InfoPanelUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
       <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
 
     </UiEntity>

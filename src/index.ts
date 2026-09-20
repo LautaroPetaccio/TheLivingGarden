@@ -1,5 +1,4 @@
 import { isServer } from '@dcl/sdk/network'
-import { engine, VisibilityComponent } from '@dcl/sdk/ecs'
 import { setupNotifications } from './notifications'
 import { setupWateringSystem } from './wateringSystem'
 import { setupOnboarding } from './onboarding'
@@ -26,10 +25,7 @@ export async function main() {
   setupOnboarding()
   setupBloomFinale()
 
-  // Hide Discord buttons — removed from the experience
-  for (const name of ['Discord Button', 'Discord Button_2']) {
-    const e = engine.getEntityOrNullByName(name)
-    if (e) VisibilityComponent.createOrReplace(e, { visible: false })
-  }
+  // Discord buttons are BACK (KJ 2026-09-20) — they carry their own link from the
+  // composite, and the info panel's last page links to the same server.
 
 }

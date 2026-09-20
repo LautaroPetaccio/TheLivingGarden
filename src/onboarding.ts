@@ -104,6 +104,17 @@ function showShell(visible: boolean): void {
   if (shell !== null) VisibilityComponent.getMutable(shell).visible = visible
 }
 
+/** Wear the gold shell on one planter. Used for the planter you should plant in AND the
+ *  one holding your opened flower — KJ 2026-09-20: the arrows point, but the highlight is
+ *  what actually makes the planter findable among ninety-six of them. */
+function shellOnPlanter(p: { x: number; z: number; rot: number }): void {
+  const e  = ensureShell()
+  const st = Transform.getMutable(e)
+  st.position = Vector3.create(p.x, 0, p.z)
+  st.rotation = Quaternion.fromEulerDegrees(0, p.rot, 0)
+  showShell(true)
+}
+
 function clearVisuals(): void {
   showChevrons(false)
   showShell(false)
@@ -136,11 +147,7 @@ function heldPlanter(from: Vector3, dt: number): Vector3 | null {
   if (heldBoxId) {
     const p = freePlanterPos(heldBoxId)
     if (p) {
-      const shellEntity = ensureShell()
-      const st = Transform.getMutable(shellEntity)
-      st.position = Vector3.create(p.x, 0, p.z)
-      st.rotation = Quaternion.fromEulerDegrees(0, p.rot, 0)
-      showShell(true)
+      shellOnPlanter(p)
       return Vector3.create(p.x, 0, p.z)
     }
     heldBoxId = ''            // someone planted in it — ask for another
@@ -238,7 +245,8 @@ function onboardingSystem(dt: number): void {
     if (repickIn <= 0) {
       repickIn = ONBOARDING_REPICK_S
       const box = myOpenedPlanter(player)
-      target = box ? Vector3.create(box.x, 0, box.z) : null
+      if (box) { shellOnPlanter(box); target = Vector3.create(box.x, 0, box.z) }
+      else { showShell(false); target = null }
     }
   } else {
     target = heldPlanter(player, dt)

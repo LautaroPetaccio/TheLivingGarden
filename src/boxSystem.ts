@@ -147,8 +147,8 @@ export function nearestFreePlanter(from: { x: number; z: number }): { boxId: str
 
 /** Onboarding (stage 4): one of MY planters holding an opened, unharvested flower —
  *  the nearest, so the tutorial points at whichever they are standing by. */
-export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number } | null {
-  let best: { boxId: string; x: number; z: number } | null = null
+export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
+  let best: { boxId: string; x: number; z: number; rot: number } | null = null
   let bestSq = Infinity
   for (const v of views.values()) {
     if (!isMine(v) || !v.opened || deleted.has(v.boxId)) continue
@@ -157,7 +157,7 @@ export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string
     const dx = p.x - from.x
     const dz = p.z - from.z
     const sq = dx * dx + dz * dz
-    if (sq < bestSq) { bestSq = sq; best = { boxId: v.boxId, x: p.x, z: p.z } }
+    if (sq < bestSq) { bestSq = sq; best = { boxId: v.boxId, x: p.x, z: p.z, rot: p.rot } }
   }
   return best
 }
