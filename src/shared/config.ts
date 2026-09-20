@@ -263,11 +263,66 @@ export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number; ro
   { id: 'box_95', x: 26.6, z: 47.7, rot: 270 },
   { id: 'box_96', x: 26.1, z: 48.2, rot: 270 },
 ]
+// ── Onboarding (v2) ──────────────────────────────────────────
+/** KJ's ground arrow (2026-09-20): 20 tris, gold emissive, no texture, lying flat in
+ *  the XZ plane — 2 m wide, 1.1 m deep. Used by the onboarding to point at the thing
+ *  the player should tap next. */
+export const ARROW_MODEL_SRC = 'assets/scene/Models/arrow/Arrow.glb'
+export const ARROW_SCALE     = 0.5
+/** Yaw applied AFTER aiming the arrow at its target. The model's own forward axis is
+ *  unverified in-world — if the arrow points away from what it should indicate, this
+ *  is the single value to flip (180 ↔ 0). */
+export const ARROW_FORWARD_YAW = 180
+/** Metres back from the target, toward the player, where the arrow sits — far enough
+ *  out that it lands on open ground rather than inside the plant. */
+export const ARROW_STANDOFF = 1.2
+/** Lift above the target's base so a flat decal doesn't z-fight with the ground. */
+export const ARROW_GROUND_LIFT = 0.05
+/** Gentle bob, driven from the onboarding system's own tick. Deliberately NOT a looping
+ *  Tween: the explorer writes every actively-tweened Transform back into the scene every
+ *  frame, which is what tanked scene tick fps in the 09-18 perf pass. */
+export const ARROW_BOB_AMPLITUDE = 0.08
+export const ARROW_BOB_PERIOD_MS = 1600
+/** How often the onboarding re-picks which plant to point at (seconds). */
+export const ONBOARDING_REPICK_S = 0.25
+/** Don't point at anything further away than this — better to show nothing than to
+ *  aim across the whole garden. */
+export const ONBOARDING_MAX_RANGE = 40
+/** How many chevrons make up the pointer trail, and how far apart they sit. The row
+ *  runs from the target back toward the player; a travelling bob moves the emphasis
+ *  along it so the direction reads from motion rather than from more geometry. */
+export const ARROW_CHEVRON_COUNT   = 4
+export const ARROW_CHEVRON_SPACING = 0.9
+/** Time for the pulse to travel the whole row. */
+export const ARROW_CHEVRON_WAVE_MS = 900
+
+/** Stage 1 line, shown under the banner until the server confirms the first water.
+ *  Names the floating water-drop marker rather than the plant's pose: the markers are
+ *  the affordance the GDD already commits to (§2, §6), they are on every plant that
+ *  needs water, and they read the same on all 38 species and on a phone. */
+export const ONBOARDING_WATER_HINT = 'Tap a plant with a water drop'
+/** Stage 2 line, shown from the first seed until the first planting. */
+export const ONBOARDING_PLANT_HINT = 'Tap the glowing planter to plant your seed'
+/** One-off toast when the first seed lands in the pouch. */
+export const ONBOARDING_SEED_TOAST = 'You caught a seed — plant it and it opens on a real-world timer'
+export const ONBOARDING_SEED_TOAST_MS = 7_000
+/** How long a tutorial planter is held for its player, and how often the client
+ *  re-asks while it has no reservation (someone else may have taken the last one). */
+export const PLANTER_RESERVE_TTL_MS   = 4 * 60_000
+export const PLANTER_RESERVE_RETRY_S  = 5
+
 /** KJ's planter template (2026-09-17): origin at the base, front (+z) faces the
  *  garden, rim at y≈1.1. 4,440 tris — decimate before ship. */
 export const BOX_MODEL_SRC   = 'assets/scene/Models/planterBox/planterBox.glb'
 export const BOX_MODEL_SCALE = 0.6
 export const BOX_MODEL_RIM_Y = 1.1 * BOX_MODEL_SCALE   // where the soil surface sits
+
+/** KJ's toon planter (2026-09-20): a 190-tri single-material proxy of planterBox.glb at
+ *  ~98% of its bounds, gold and emissive. Worn OVER the real planter, scaled up so it
+ *  reads as a rim rather than sitting inside the mesh. */
+export const TOON_HIGHLIGHT_SRC   = 'assets/scene/Models/planterBoxToon/planterBoxToon.glb'
+export const TOON_HIGHLIGHT_SCALE = BOX_MODEL_SCALE * 1.05
+
 /** KJ split the balloons out of the box template (2026-09-17) into their own GLB so
  *  they can animate independently — same origin/scale as the box, balloons rise to
  *  y≈3.1 in model space, so placing it at the box's own transform reconstructs the
@@ -296,6 +351,11 @@ export const SEED_MODEL_SRCS: ReadonlyArray<string> = [
   'assets/scene/Models/Seeds/UniqueSeed/uniqueSeed.glb',
 ]
 export const SEED_MODEL_HEIGHT = 0.94   // m at scale 1 — divide a wanted world height by this
+/** Seed carried in the hand (v2): the pouch made visible, so a gardener walking past
+ *  reads as carrying something rather than holding a number in a menu. The model is
+ *  SEED_MODEL_HEIGHT tall at scale 1 — this puts it at roughly a fist's width. */
+export const SEED_HAND_WORLD_H = 0.22
+export const SEED_HAND_SCALE   = SEED_HAND_WORLD_H / SEED_MODEL_HEIGHT
 export const seedModelSrc = (tier: number): string => SEED_MODEL_SRCS[Math.max(0, Math.min(SEED_MODEL_SRCS.length - 1, tier))]
 export const SEEDLING_MODEL_SRC_RARE   = 'assets/scene/Models/seedling/seedling_rare.glb'
 /** TUNING — GDD: overnight scale, "an evening plant opens by next morning" (~10 h).
@@ -399,8 +459,6 @@ export const PLANT_SPECIES: ReadonlyArray<PlantSpecies> = [
   { id: 'flower_red', name: 'Flower Red', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/flower_red/flower_red.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
   { id: 'flower_yellow', name: 'Flower Yellow', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/flower_yellow/flower_yellow.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
   { id: 'grass_long', name: 'Grass Long', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/grass_long/grass_long.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
-  { id: 'grass_long_2', name: 'Grass Long 2', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/grass_long_2/grass_long_2.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
-  { id: 'grass_medium', name: 'Grass Medium', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/grass_medium/grass_medium.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
   { id: 'mushroom_brown', name: 'Mushroom Brown', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/mushroom_brown/mushroom_brown.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: -0.0 },
   { id: 'vegetation_flowers', name: 'Vegetation Flowers', pack: 'voxels_pack', modelSrc: 'assets/scene/Models/plants/voxels_pack/vegetation_flowers/vegetation_flowers.glb', scale: 0.55, baseYOffset: 0.0, offsetX: 0.0, offsetZ: 0.0 },
   { id: 'cactus_1', name: 'Cactus 1', pack: 'western', modelSrc: 'assets/scene/Models/plants/western/cactus_1/cactus_1.glb', scale: 0.1296, baseYOffset: 0.0077, offsetX: -0.0201, offsetZ: -0.0142 },
@@ -481,9 +539,24 @@ export function rollTierAtLeast(minTier: number): number {
 export function rollPlantSpecies(): string {
   return PLANT_SPECIES[Math.floor(Math.random() * PLANT_SPECIES.length)].id
 }
-export function plantSpeciesById(id: string): PlantSpecies | null {
-  return PLANT_SPECIES.find(s => s.id === id) ?? null
+/** Species retired from the pool, mapped to the one that replaced them. KJ 2026-09-20:
+ *  the voxel pack shipped three near-identical grasses (grass_long, grass_long_2,
+ *  grass_medium) — one is enough, and each GLB costs its own texture.
+ *  Kept as ALIASES rather than deleted outright: flowers already grown and gifted carry
+ *  these ids in player Storage, and an unresolvable id has no model to render. */
+const RETIRED_SPECIES: Readonly<Record<string, string>> = {
+  grass_long_2: 'grass_long',
+  grass_medium: 'grass_long',
 }
+export function plantSpeciesById(id: string): PlantSpecies | null {
+  const key = RETIRED_SPECIES[id] ?? id
+  return PLANT_SPECIES.find(s => s.id === key) ?? null
+}
+
+/** How long the bloom finale card holds after a bloom ends, and the rarity tier at
+ *  which a gathered seed counts as "rare" on it (2 = Rare, the third of the eight). */
+export const BLOOM_FINALE_MS  = 9_000
+export const FINALE_RARE_TIER = 2
 
 // ── Test tooling ─────────────────────────────────────────────
 /** Wallets allowed to use test handlers that write PERMANENT data (lifetime board /

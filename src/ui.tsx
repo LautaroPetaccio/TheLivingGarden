@@ -23,6 +23,7 @@ import { engine, timers } from '@dcl/sdk/ecs'
 import { getPouch } from './playerInventory'
 import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
 import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
+import { BloomFinaleUi } from './bloomFinale'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor } from './shared/config'
 
 // ---------------------------------------------------------------
@@ -308,7 +309,12 @@ function uiComponent() {
   const isCount    = bannerState === 'countdown'
   const bannerH    = px(isBloom ? 96 : 122)
   const ringSize   = px(RING_SIZE)
-  const chipTop    = topPx + ringSize + px(GAP)
+  // Seed chip sits BOTTOM CENTRE (KJ 2026-09-20), like an inventory bar. Anchored on the
+  // MEASURED bottom inset rather than a fixed offset, so it rides above whatever the
+  // client owns down there — the phone's joystick and interaction cluster included.
+  // Measured relative to the device-inset container, same as topPx: summing the two
+  // pushed the phone's ring 14% in.
+  const bottomPx   = Math.round(Math.max(0, sa.bottom - ins.bottom) * currentVirtualH) + px(EDGE)
   const gardeners  = Math.max(1, playerCount)
   const watered    = Math.round(bannerHealth * TOTAL_PLANTS)
   const need       = Math.max(0, BLOOM_THRESHOLD - watered)
@@ -363,11 +369,11 @@ function uiComponent() {
         </UiEntity>
       </UiEntity>
 
-      {/* ═════ SEED CHIP — under the ring; always there (dim when empty) so the menu and
+      {/* ═════ SEED CHIP — bottom centre, always there (dim when empty) so the menu and
           your flower collection are always one tap away ═════ */}
+      <UiEntity uiTransform={{ positionType: 'absolute', position: { bottom: bottomPx, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
       <UiEntity
         uiTransform={{
-          positionType: 'absolute', position: { top: chipTop, right: pct(rightPct) },
           height: px(CHIP_H), flexDirection: 'row', alignItems: 'center',
           padding: { left: px(14), right: px(16) }, borderRadius: px(CHIP_H / 2),
         }}
@@ -377,6 +383,7 @@ function uiComponent() {
         <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(8) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
         <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: seedCount > 0 ? 1 : 0.55 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(12), height: px(12), margin: { left: px(10) }, borderRadius: px(6) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
+      </UiEntity>
       </UiEntity>
 
       {/* ═════ BANNER — top centre, opens on change, alpha fade only ═════ */}
@@ -428,7 +435,8 @@ function uiComponent() {
         </UiEntity>
       </UiEntity>
 
-      <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} rightPct={pct(rightPct)} belowChipPx={chipTop + px(CHIP_H) + px(GAP)} />
+      <BloomFinaleUi px={px} fs={fs} />
+      <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
 
     </UiEntity>
     </UiEntity>

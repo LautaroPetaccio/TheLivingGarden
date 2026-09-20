@@ -42,7 +42,11 @@ const RAISED = { r: 1, g: 1, b: 1, a: 0.08 }
 const CREAM  = { r: 0.957, g: 0.918, b: 0.824, a: 1 }
 const DIM    = { r: 0.83,  g: 0.82,  b: 0.78,  a: 1 }
 const MOSS   = { r: 0.18,  g: 0.49,  b: 0.34,  a: 1 }
-const PAGE_TILES = 8   // 2 rows of 4
+const TILE_COLS  = 4
+/** Everything above the flower grid (title, pouch tiles, divider, headings, pager),
+ *  in virtual px — used to work out how many grid rows actually fit on this canvas. */
+const PANEL_CHROME_H = 430
+const FLOWER_ROW_H   = 126
 
 interface Group { key: string; flower: string; rarityTier: number; count: number; lastIndex: number }
 function groupFlowers(): Group[] {
@@ -63,22 +67,27 @@ function groupPouch(): TierGroup[] {
   return out.sort((a, b) => b.tier - a.tier)   // rarest first
 }
 
-export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) => number; mobile: boolean; topPx: number; rightPct: `${number}%`; belowChipPx: number }) {
+export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) => number; mobile: boolean; topPx: number; aboveChipPx: number; maxW: number; maxH: number }) {
   if (!open) return null
   const { px, fs, mobile } = props
-  const W      = px(mobile ? 640 : 440)
+  // Clamp to the canvas: a fixed virtual width overflowed its parent on a narrow window
+  // and the 4-column row silently wrapped to 3 (KJ 2026-09-20).
+  const W      = Math.max(px(300), Math.min(px(mobile ? 640 : 440), props.maxW - px(24)))
   const PAD    = px(18)
   const pouchGroups = groupPouch()
   const total  = pouchGroups.reduce((a, g) => a + g.count, 0)
   const next   = nextSeedTier()
   const groups = groupFlowers()
-  const pages  = Math.max(1, Math.ceil(groups.length / PAGE_TILES))
+  // Rows that fit the height, so the pager never lands off the bottom edge.
+  const rows       = Math.max(1, Math.min(2, Math.floor((props.maxH - px(PANEL_CHROME_H)) / px(FLOWER_ROW_H))))
+  const pageTiles  = rows * TILE_COLS
+  const pages  = Math.max(1, Math.ceil(groups.length / pageTiles))
   page         = Math.min(page, pages - 1)   // collection shrank (gift / tidy) — stay in range
-  const shown  = groups.slice(page * PAGE_TILES, (page + 1) * PAGE_TILES)
+  const shown  = groups.slice(page * pageTiles, (page + 1) * pageTiles)
   const speciesFound = new Set(getFlowers().map(f => f.flower)).size
   const sel    = groups.find(g => g.key === selectedKey) ?? null
   const here   = giftMode ? gardenersHere() : []
-  const tileW  = Math.floor((W - PAD * 2 - px(8) * 3) / 4)
+  const tileW  = Math.floor((W - PAD * 2 - px(8) * (TILE_COLS - 1)) / TILE_COLS)
   const held   = getHeld()
   const isHeld = (g: Group) => !!held && held.flower === g.flower && held.rarityTier === g.rarityTier
 
@@ -89,7 +98,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const tile = (key: string, i: number, tierColor: { r: number; g: number; b: number }, label: string, active: boolean, onClick: () => void) => (
     <UiEntity
       key={key}
-      uiTransform={{ width: tileW, height: px(78), margin: { right: (i % 4) === 3 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: px(12) }}
+      uiTransform={{ width: tileW, height: px(78), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: px(12) }}
       uiBackground={{ color: active ? { ...MOSS, a: 0.55 } : RAISED }}
       onMouseDown={onClick}
     >
@@ -103,7 +112,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const flowerTile = (g: Group, i: number) => (
     <UiEntity
       key={g.key}
-      uiTransform={{ width: tileW, height: px(118), margin: { right: (i % 4) === 3 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(6) }, borderRadius: px(12) }}
+      uiTransform={{ width: tileW, height: px(118), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(6) }, borderRadius: px(12) }}
       uiBackground={{ color: g.key === selectedKey ? { ...MOSS, a: 0.55 } : RAISED }}
       onMouseDown={() => { selectedKey = selectedKey === g.key ? '' : g.key; giftMode = false }}
     >
@@ -191,7 +200,10 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
     </UiEntity>
   )
 
+  // Phone: a centred sheet from the top (both thumbs stay free). Desktop: rises from the
+  // seed chip, which now sits bottom centre — a panel still docked top right would have
+  // opened nowhere near the control that opens it.
   return mobile
     ? <UiEntity uiTransform={{ positionType: 'absolute', position: { top: props.topPx, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>{panel}</UiEntity>
-    : <UiEntity uiTransform={{ positionType: 'absolute', position: { top: props.belowChipPx, right: props.rightPct } }}>{panel}</UiEntity>
+    : <UiEntity uiTransform={{ positionType: 'absolute', position: { bottom: props.aboveChipPx, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>{panel}</UiEntity>
 }

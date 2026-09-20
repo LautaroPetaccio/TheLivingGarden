@@ -1747,10 +1747,17 @@ export function forceResetBloom(): void {
 }
 
 export function forceTriggerBloom(variant = ''): void {
-  if (isBloomActive()) return
+  // Both guards below used to fail in TOTAL SILENCE — the button did nothing and said
+  // nothing, which is exactly what KJ hit on the deployed world (2026-09-20).
+  if (isBloomActive()) {
+    console.log('[TestPanel] Force bloom ignored — this client already thinks a bloom is active')
+    showToast('Force bloom: a bloom is already running here', 4000, false)
+    return
+  }
   if (room.isReady()) {
     room.send('forceBloom', { variant })
   } else {
+    console.log('[TestPanel] Force bloom: room not ready — falling back to a LOCAL-only bloom')
     // Local fallback — room not connected yet (common in local preview)
     triggerBloomEvent()
   }

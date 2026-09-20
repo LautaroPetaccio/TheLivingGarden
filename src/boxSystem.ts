@@ -127,6 +127,33 @@ const synced   = new Set<string>()   // boxes that have had their first boxState
 let   pouch: number[] = []   // counts per rarity tier, from pouchUpdate
 let   tickAccum = 0
 
+/** Onboarding (Phase 2): the free planter nearest a point, and where it stands right
+ *  now — `layout`, not BOX_POSITIONS, because the planter editor can have moved it.
+ *  Null when every planter is taken. */
+export function nearestFreePlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
+  let best: { boxId: string; x: number; z: number; rot: number } | null = null
+  let bestSq = Infinity
+  for (const v of views.values()) {
+    if (v.owner || deleted.has(v.boxId)) continue
+    const p = layout.get(v.boxId)
+    if (!p) continue
+    const dx = p.x - from.x
+    const dz = p.z - from.z
+    const sq = dx * dx + dz * dz
+    if (sq < bestSq) { bestSq = sq; best = { boxId: v.boxId, x: p.x, z: p.z, rot: p.rot } }
+  }
+  return best
+}
+
+/** Where one planter stands, for the highlight shell to sit exactly on it. Null once
+ *  the planter is taken or deleted — the caller should stop pointing at it. */
+export function freePlanterPos(boxId: string): { x: number; z: number; rot: number } | null {
+  const v = views.get(boxId)
+  if (!v || v.owner || deleted.has(boxId)) return null
+  const p = layout.get(boxId)
+  return p ? { x: p.x, z: p.z, rot: p.rot } : null
+}
+
 function localId(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 function isMine(v: BoxView): boolean { return !!v.owner && v.owner.toLowerCase() === localId() }
 function myBoxCount(): number { let n = 0; for (const v of views.values()) if (isMine(v)) n++; return n }

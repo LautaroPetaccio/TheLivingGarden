@@ -64,14 +64,31 @@ export const room = registerMessages({
   collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
   /** Hold one keepsake in your hand (by collection index), or -1 to put it away. */
   holdFlower:       Schemas.Map({ flowerIndex: Schemas.Number }),
-  /** Server → everyone: what a gardener holds (flower '' = empty hand). Also sent per holder on join. */
-  heldFlower:       Schemas.Map({ address: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
+  /** Server → everyone: what a gardener holds (flower '' = empty hand). Also sent per holder on join.
+   *  seedTier (v2): the rarest seed in their pouch, shown in the SAME hand when they hold no
+   *  keepsake — a keepsake always wins, so the two can never collide. -1 = no seed to show. */
+  heldFlower:       Schemas.Map({ address: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number, seedTier: Schemas.Number }),
   /** Server → receiver of a gift. */
   giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
   /** Server → player: short feedback toast (rejections and confirmations). Broadcast when untargeted. */
   notice:           Schemas.Map({ text: Schemas.String }),
   /** Server → all / joining player: every tribute plant (Phase 5b). json = TributeRecord[]. */
   tributesUpdate:   Schemas.Map({ json: Schemas.String }),
+
+  // ── v2: onboarding ───────────────────────────────────────
+  /** Server → player: which of the two onboarding firsts this gardener has already
+   *  done. Persisted per wallet (player Storage 'onboarding'), so the lesson never
+   *  replays for someone who has done it — and a gardener who watered last visit but
+   *  never got as far as planting still gets the planting half next time.
+   *  Sent on full sync and again after each first. */
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean }),
+  /** Client → server: hold this empty planter for me while the tutorial points at it.
+   *  The CLIENT picks which one — the scene server has no avatar positions, so "nearest
+   *  free planter" can only be computed where the player is. */
+  reserveBox:       Schemas.Map({ boxId: Schemas.String }),
+  /** Server → player: the planter now held for them. boxId '' = request refused (taken,
+   *  already held by someone else, or it would have used up the last free planter). */
+  boxReserved:      Schemas.Map({ boxId: Schemas.String, expiresAt: Schemas.Int64 }),
 
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */
@@ -110,6 +127,14 @@ export const room = registerMessages({
   /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
    *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
+  /** Server → each gardener present when a bloom ENDS: what the garden just did, and
+   *  what they did in it. Sent per player (the you* fields differ) right before the
+   *  cycle counters are cleared. The during-bloom contributor names are untouched —
+   *  this is the closing beat, so a bloom finishes on a result instead of just stopping. */
+  bloomSummary:     Schemas.Map({
+    gardeners: Schemas.Number, waters: Schemas.Number, seeds: Schemas.Number, rares: Schemas.Number,
+    youWaters: Schemas.Number, youSeeds: Schemas.Number, youRares: Schemas.Number,
+  }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),
   /** Top-10 boards — sent to all on water, to joining player on join.
