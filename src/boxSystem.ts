@@ -145,6 +145,23 @@ export function nearestFreePlanter(from: { x: number; z: number }): { boxId: str
   return best
 }
 
+/** Onboarding (stage 4): one of MY planters holding an opened, unharvested flower —
+ *  the nearest, so the tutorial points at whichever they are standing by. */
+export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number } | null {
+  let best: { boxId: string; x: number; z: number } | null = null
+  let bestSq = Infinity
+  for (const v of views.values()) {
+    if (!isMine(v) || !v.opened || deleted.has(v.boxId)) continue
+    const p = layout.get(v.boxId)
+    if (!p) continue
+    const dx = p.x - from.x
+    const dz = p.z - from.z
+    const sq = dx * dx + dz * dz
+    if (sq < bestSq) { bestSq = sq; best = { boxId: v.boxId, x: p.x, z: p.z } }
+  }
+  return best
+}
+
 /** Where one planter stands, for the highlight shell to sit exactly on it. Null once
  *  the planter is taken or deleted — the caller should stop pointing at it. */
 export function freePlanterPos(boxId: string): { x: number; z: number; rot: number } | null {

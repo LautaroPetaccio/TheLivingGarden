@@ -25,6 +25,7 @@ import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter, adminSetUnlimitedPlanters } from './boxSystem'
+import { adminResetOnboarding } from './onboarding'
 import { vfxFlags, setVfxFlag } from './plantVfx'
 import { waterFxFlags } from './sparkleSystem'
 import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
@@ -280,6 +281,16 @@ export function TestPanelUi() {
           onMouseDown={() => adminGrantWaters(100)}
         >
           <Label value="Grant +100 lifetime waters (flair / tribute)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Replays the whole tutorial — without this, whoever builds it can never see it
+            again after doing it once (KJ 2026-09-20). */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_WATER }}
+          onMouseDown={adminResetOnboarding}
+        >
+          <Label value="Reset MY onboarding (replay the tutorial)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* 100-planter performance test — local only */}

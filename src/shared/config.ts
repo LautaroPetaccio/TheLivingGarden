@@ -303,6 +303,14 @@ export const ARROW_CHEVRON_WAVE_MS = 900
 export const ONBOARDING_WATER_HINT = 'Tap a plant with a water drop'
 /** Stage 2 line, shown from the first seed until the first planting. */
 export const ONBOARDING_PLANT_HINT = 'Tap the glowing planter to plant your seed'
+/** Stage 3 — fired once, the moment the first seed is planted: closes the loop by
+ *  pointing the player back at the verb that starts the whole thing again. */
+export const ONBOARDING_LOOP_TOAST    = 'Planted! Now water the garden to start a bloom and collect more seeds'
+export const ONBOARDING_LOOP_TOAST_MS = 10_000
+/** Stage 4 — their own flower has opened and is standing in its planter. */
+export const ONBOARDING_HARVEST_HINT  = 'Your flower opened — tap it to keep it, or leave it on show'
+/** Stage 5 — shown only while another gardener is actually here. */
+export const ONBOARDING_GIFT_HINT     = 'Tap a gardener to give them one of your flowers'
 /** One-off toast when the first seed lands in the pouch. */
 export const ONBOARDING_SEED_TOAST = 'You caught a seed — plant it and it opens on a real-world timer'
 export const ONBOARDING_SEED_TOAST_MS = 7_000

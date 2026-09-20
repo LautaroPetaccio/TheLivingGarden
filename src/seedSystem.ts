@@ -214,7 +214,7 @@ function despawnSeed(id: string): void {
   seeds.delete(id)
 }
 
-/** Remove every live seed — used on scene teardown safety paths. */
+/** Remove every live seed — scene teardown, and the end of a bloom. */
 export function clearAllSeeds(): void {
   for (const id of [...seeds.keys()]) despawnSeed(id)
 }
@@ -357,6 +357,11 @@ export function setupSeedSystem(): void {
   room.onMessage('seedSpawned', (data) => {
     spawnSeed(data)
   })
+
+  // The bloom is over: seeds nobody caught are gone. Their own SEED_LIFETIME_MS (2 min)
+  // outlives the bloom — the last trickle wave lands 1 min before the end — so without
+  // this they kept floating over an already-reset, droopy garden (KJ 2026-09-20).
+  room.onMessage('bloomReset', () => clearAllSeeds())
 
   room.onMessage('seedGathered', (data) => {
     // Sent to the gatherer only (per-player pickup); guard keeps a stray duplicate

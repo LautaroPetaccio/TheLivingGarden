@@ -26,7 +26,8 @@ import { Quaternion, Vector3 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { PlantData } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
-import { nearestFreePlanter, freePlanterPos } from './boxSystem'
+import { nearestFreePlanter, freePlanterPos, myOpenedPlanter } from './boxSystem'
+import { getFlowers, gardenersHere } from './playerInventory'
 import { showPersistent, hidePersistent, showToast } from './notifications'
 import {
   ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW, ARROW_STANDOFF, ARROW_GROUND_LIFT,
@@ -34,15 +35,20 @@ import {
   ARROW_CHEVRON_COUNT, ARROW_CHEVRON_SPACING, ARROW_CHEVRON_WAVE_MS,
   TOON_HIGHLIGHT_SRC, TOON_HIGHLIGHT_SCALE,
   ONBOARDING_REPICK_S, ONBOARDING_MAX_RANGE,
-  ONBOARDING_WATER_HINT, ONBOARDING_PLANT_HINT,
+  ONBOARDING_WATER_HINT, ONBOARDING_PLANT_HINT, ONBOARDING_HARVEST_HINT, ONBOARDING_GIFT_HINT,
   ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS,
+  ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS,
   PLANTER_RESERVE_RETRY_S,
 } from './shared/config'
 
-type Stage = 'none' | 'water' | 'plant'
+type Stage = 'none' | 'water' | 'plant' | 'harvest' | 'gift'
 
-let watered = true          // assume done until the server says otherwise — never nag on a
-let planted = true          // dropped message
+// All four assume DONE until the server says otherwise, so a dropped message never
+// nags a veteran with a tutorial they finished long ago.
+let watered   = true
+let planted   = true
+let harvested = true
+let gifted    = true
 let hasSeeds = false
 let stage: Stage = 'none'
 let seedToastShown = false
@@ -182,6 +188,10 @@ function drawTrail(player: Vector3, to: Vector3): void {
 function currentStage(): Stage {
   if (!watered) return 'water'
   if (!planted && hasSeeds) return 'plant'
+  // Only once their own flower is actually standing open in a planter.
+  if (!harvested && myOpenedPlanter({ x: 0, z: 0 }) !== null) return 'harvest'
+  // Gifting needs someone to give TO — never nag a player gardening alone.
+  if (harvested && !gifted && getFlowers().length > 0 && gardenersHere().length > 0) return 'gift'
   return 'none'
 }
 
@@ -213,11 +223,22 @@ function onboardingSystem(dt: number): void {
   const player = Transform.getOrNull(engine.PlayerEntity)?.position
   if (!player) return
 
+  if (stage === 'gift') {
+    // No trail: the target is another player, who moves. The line is the whole lesson.
+    showChevrons(false)
+    showShell(false)
+    showPersistent(ONBOARDING_GIFT_HINT)
+    return
+  }
+
+  repickIn -= dt
   if (stage === 'water') {
-    repickIn -= dt
+    if (repickIn <= 0) { repickIn = ONBOARDING_REPICK_S; target = nearestDroopyPlant(player) }
+  } else if (stage === 'harvest') {
     if (repickIn <= 0) {
       repickIn = ONBOARDING_REPICK_S
-      target = nearestDroopyPlant(player)
+      const box = myOpenedPlanter(player)
+      target = box ? Vector3.create(box.x, 0, box.z) : null
     }
   } else {
     target = heldPlanter(player, dt)
@@ -228,13 +249,33 @@ function onboardingSystem(dt: number): void {
 
   // Re-assert every tick: the persistent pill is shared, and a bloom start or a garden
   // reset calls hidePersistent() from the watering system.
-  showPersistent(stage === 'water' ? ONBOARDING_WATER_HINT : ONBOARDING_PLANT_HINT)
+  showPersistent(stage === 'water' ? ONBOARDING_WATER_HINT : stage === 'harvest' ? ONBOARDING_HARVEST_HINT : ONBOARDING_PLANT_HINT)
+}
+
+/** Test panel: wipe my record on the server so the whole tutorial replays. */
+export function adminResetOnboarding(): void {
+  room.send('adminResetOnboarding', {})
+}
+
+let watchAccum = 0
+function stageWatchSystem(dt: number): void {
+  watchAccum += dt
+  if (watchAccum < 1) return
+  watchAccum = 0
+  applyStage()
 }
 
 export function setupOnboarding(): void {
   room.onMessage('onboardingState', (data) => {
-    watered = !!data.watered
-    planted = !!data.planted
+    // Stage 3 is a one-off beat, not a stage: the moment their first seed goes in, point
+    // them back at the verb that starts the whole loop again. Fires only on the
+    // false→true transition, so it never replays on a later join.
+    const justPlanted = !planted && !!data.planted
+    watered   = !!data.watered
+    planted   = !!data.planted
+    harvested = !!data.harvested
+    gifted    = !!data.gifted
+    if (justPlanted) showToast(ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS)
     applyStage()
   })
   room.onMessage('pouchUpdate', (data) => {
@@ -248,6 +289,9 @@ export function setupOnboarding(): void {
     if (!heldBoxId) showShell(false)
     else console.log(`[Onboarding] planter ${heldBoxId} held for this gardener`)
   })
+  // A box opening or a gardener arriving can start a stage, and neither sends
+  // onboardingState — so re-evaluate on a slow tick rather than only on messages.
+  engine.addSystem(stageWatchSystem)
   engine.addSystem(onboardingSystem)
   console.log(`[Onboarding] ready · onboardingState listeners=${room.listenerCount('onboardingState')}`)
 }

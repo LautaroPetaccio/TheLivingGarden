@@ -742,18 +742,21 @@ const loadFlowers = (a: string) => loadPlayerJson<FlowerKeepsake[]>(a, 'flowers'
 // ── Onboarding (v2): the two firsts the in-world tutorial waits on. Persisted per
 // wallet so the lesson never replays for a gardener who has done it — and a gardener
 // who watered last visit but never got as far as planting still gets taught planting.
-interface OnboardingRecord { watered: boolean; planted: boolean }
+interface OnboardingRecord { watered: boolean; planted: boolean; harvested: boolean; gifted: boolean }
 async function loadOnboarding(address: string): Promise<OnboardingRecord> {
-  const o = await loadPlayerJson<OnboardingRecord>(address, 'onboarding', () => ({ watered: false, planted: false }))
+  const o = await loadPlayerJson<OnboardingRecord>(address, 'onboarding', () => ({ watered: false, planted: false, harvested: false, gifted: false }))
   // Migrate on load: a record written before a field existed reads back undefined,
-  // and an undefined in a Schemas.Boolean field throws inside the event bus.
-  o.watered = !!o.watered
-  o.planted = !!o.planted
+  // and an undefined in a Schemas.Boolean field throws inside the event bus. The
+  // harvested/gifted pair was added 2026-09-20, so early records DO hit this.
+  o.watered   = !!o.watered
+  o.planted   = !!o.planted
+  o.harvested = !!o.harvested
+  o.gifted    = !!o.gifted
   return o
 }
 async function sendOnboarding(address: string): Promise<void> {
   const o = await loadOnboarding(address)
-  room.send('onboardingState', { watered: o.watered, planted: o.planted }, { to: [address] })
+  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted }, { to: [address] })
 }
 // ── Tutorial planter reservations (Phase 2). In memory only: a server restart just
 // means the tutorial re-asks. The CLIENT chooses which planter (the server has no
@@ -1053,6 +1056,7 @@ async function resetGarden(): Promise<void> {
   console.log('[Server] Resetting garden...')
   cancelBloomSustain()
   cancelSeedWaves()
+  activeSeeds.clear()   // ungathered seeds die with the bloom — and a joiner must not be sent them
   cancelGoldenSeed()
   sendBloomSummary()          // must precede the clears below — it reads the cycle tallies
   cycleContributors.clear()   // the next bloom's length counts the next cycle's waterers
@@ -1498,6 +1502,7 @@ export async function server(): Promise<void> {
     void saveBoxes()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
+    void markOnboarding(playerAddress, 'harvested')
     sendNotice(playerAddress, `Harvested your ${plantSpeciesById(keepsake.flower)?.name ?? keepsake.flower} — your planter is free again`)
   })
 
@@ -1549,6 +1554,7 @@ export async function server(): Promise<void> {
     void sendCollection(playerAddress)
     void sendCollection(to)
     room.send('giftReceived', { from: fromName, flower: gift.flower, rarityTier: gift.rarityTier }, { to: [to] })
+    void markOnboarding(playerAddress, 'gifted')
     sendNotice(playerAddress, `You gave your ${plantSpeciesById(gift.flower)?.name ?? gift.flower} to ${toName}`)
   })
 
@@ -1711,6 +1717,17 @@ export async function server(): Promise<void> {
     sendTributes([address])
     sendAllHeld([address])
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
+  })
+
+  // ── Message: adminResetOnboarding (test panel) ───────────────
+  onRoomMessage<Record<string, never>>('adminResetOnboarding', async (_data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    const o = await loadOnboarding(address)
+    o.watered = o.planted = o.harvested = o.gifted = false
+    await savePlayerJson(address, 'onboarding')
+    await sendOnboarding(address)
+    sendNotice(address, 'Onboarding reset — the tutorial will replay from the first water')
+    console.log(`[Server] Onboarding reset for ${address}`)
   })
 
   // ── Message: setTestOverride ─────────────────────────────────

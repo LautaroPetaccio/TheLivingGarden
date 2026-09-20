@@ -85,7 +85,7 @@ export const room = registerMessages({
    *  replays for someone who has done it — and a gardener who watered last visit but
    *  never got as far as planting still gets the planting half next time.
    *  Sent on full sync and again after each first. */
-  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean }),
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean }),
   /** Client → server: hold this empty planter for me while the tutorial points at it.
    *  The CLIENT picks which one — the scene server has no avatar positions, so "nearest
    *  free planter" can only be computed where the player is. */
@@ -149,6 +149,9 @@ export const room = registerMessages({
 
   // ── Test-panel only — parked at the tail (see header note) ──
   // Expected casualties of the position cap; verify with the test panel.
+  /** Test-panel only — wipe MY onboarding record so the whole tutorial replays. Without
+   *  this, whoever built the tutorial can never see it again after doing it once. */
+  adminResetOnboarding: Schemas.Map({}),
   /** Test-panel only — tells the server to bypass the daily limit for this player. */
   setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
   /** Test-panel only — triggers bloom on the server so all clients sync correctly.

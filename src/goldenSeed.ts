@@ -108,6 +108,9 @@ function goldenSystem(): void {
 /** Register — call after wateringSystem's room.clear() (seedSystem does). */
 export function setupGoldenSeed(): void {
   room.onMessage('goldenSeed', (data) => spawn(data))
+  // Same as the ordinary seeds: uncaught, it used to hang around past the bloom on its
+  // own endsAt rather than leaving with the spectacle.
+  room.onMessage('bloomReset', () => despawn())
   room.onMessage('seedGathered', (data) => {
     if (g === null || data.seedId !== g.id) return
     const mine = data.byAddress.toLowerCase() === (getPlayer()?.userId ?? '').toLowerCase()
