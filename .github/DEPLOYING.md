@@ -8,7 +8,9 @@ human to approve before anything is signed or uploaded.
 
 1. **Inspect.** Checks that the world name you typed matches `scene.json`, installs,
    runs the tests and the build, then reports what the deploy would do:
-   - whether a **new place entry** will be created, or one already exists
+   - whether the world is known to the places service, and whether this deploy
+     **changes who can find it** (listing is set from `placesConfig.optOut` in
+     `scene.json` during the deploy itself)
    - how many scenes the world holds now, and whether this deploy replaces them
    - whether the deploying wallet is allowed to deploy to that world
 

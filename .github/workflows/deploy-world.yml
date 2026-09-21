@@ -4,9 +4,9 @@ name: Deploy world
 # the world holds, so it should never ride on a push.
 #
 # The run happens in two stages. `inspect` verifies the scene and reports what the
-# deploy would do — most importantly whether a NEW place entry gets created. Nothing
-# is signed or uploaded in that stage. `deploy` then waits for a human to approve it
-# before it runs, through the environment's protection rule.
+# deploy would do — most importantly whether it changes who can find the world, and
+# which scenes it replaces. Nothing is signed or uploaded in that stage. `deploy` then
+# waits for a human to approve it, through the environment's protection rule.
 #
 # One-time setup, see .github/DEPLOYING.md:
 #   - Environment `world-deploy` with at least one required reviewer (the approval gate)
@@ -45,7 +45,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       world: ${{ steps.check.outputs.world }}
-      creates_place: ${{ steps.check.outputs.creates_place }}
+      world_registered: ${{ steps.check.outputs.world_registered }}
+      listed_after: ${{ steps.check.outputs.listed_after }}
+      listing_changes: ${{ steps.check.outputs.listing_changes }}
       existing_scenes: ${{ steps.check.outputs.existing_scenes }}
       permission: ${{ steps.check.outputs.permission }}
     steps:
@@ -87,9 +89,14 @@ jobs:
           DEPLOYER_ADDRESS: ${{ vars.DEPLOYER_ADDRESS }}
         run: node scripts/check-world-deployment.mjs
 
-      - name: Flag a new place for the reviewer
-        if: steps.check.outputs.creates_place == 'true'
-        run: echo "::warning::Approving this run registers a NEW place for ${{ steps.check.outputs.world }}."
+      - name: Flag a listing change for the reviewer
+        if: steps.check.outputs.listing_changes == 'true'
+        run: |
+          if [ "${{ steps.check.outputs.listed_after }}" = "true" ]; then
+            echo "::warning::After this deploy ${{ steps.check.outputs.world }} becomes publicly listed."
+          else
+            echo "::warning::After this deploy ${{ steps.check.outputs.world }} stops being publicly listed."
+          fi
 
   deploy:
     name: Deploy (requires approval)
@@ -138,5 +145,5 @@ jobs:
             echo ""
             echo "- Commit \`${{ github.sha }}\`"
             echo "- Target \`${{ inputs.target_content }}\`"
-            echo "- New place registered: ${{ needs.inspect.outputs.creates_place }}"
+            echo "- Publicly listed: ${{ needs.inspect.outputs.listed_after }}"
           } >> "$GITHUB_STEP_SUMMARY"
