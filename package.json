@@ -16,8 +16,9 @@
   },
   "devDependencies": {
     "@dcl/gltf-validator-ts": "^1.0.19",
-    "@dcl/js-runtime": "7.29.1-35039347300.commit-dffaede",
-    "@dcl/sdk": "7.29.1-35039347300.commit-dffaede"
+    "@dcl/js-runtime": "7.29.1-35154657340.commit-e2bbcc9",
+    "@dcl/sdk": "7.29.1-35154657340.commit-e2bbcc9",
+    "@dcl/sdk-commands": "7.29.1-35154657340.commit-e2bbcc9"
   },
   "engines": {
     "node": ">=16.0.0",
