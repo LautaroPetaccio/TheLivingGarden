@@ -166,6 +166,14 @@ export const room = registerMessages({
   /** Test-panel only — wipe MY onboarding record so the whole tutorial replays. Without
    *  this, whoever built the tutorial can never see it again after doing it once. */
   adminResetOnboarding: Schemas.Map({}),
+  /** Tribute plot editor. Empty json = "send me the saved draft"; otherwise save this one.
+   *  A DRAFT only — deploys read TRIBUTE_HERO_PLOTS, never this. */
+  adminTributeDraft: Schemas.Map({ json: Schemas.String }),
+  tributeDraft:      Schemas.Map({ json: Schemas.String }),
+  /** Plant layout editor — the 38 plants players water. Same draft/bake contract as the
+   *  planter and tribute tools: deploys read PLANT_LAYOUT, never this. */
+  adminPlantDraft:   Schemas.Map({ json: Schemas.String }),
+  plantDraft:        Schemas.Map({ json: Schemas.String }),
   /** Test-panel only — tells the server to bypass the daily limit for this player. */
   setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
   /** Test-panel only — triggers bloom on the server so all clients sync correctly.

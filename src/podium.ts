@@ -18,14 +18,15 @@
 // =============================================================
 
 import {
-  engine, Transform, AvatarShape, TextShape, MeshCollider, ColliderLayer,
+  engine, Transform, AvatarShape, TextShape, MeshCollider, MeshRenderer, Material,
+  MaterialTransparencyMode, ColliderLayer,
   VisibilityComponent, pointerEventsSystem, InputAction, Billboard, BillboardMode, Entity,
 } from '@dcl/sdk/ecs'
 import { Quaternion, Vector3, Color4 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import {
   PODIUM_SLOTS, PODIUM_ROTATION_Y, PODIUM_COUNT,
-  PODIUM_LABEL_Y, PODIUM_PAGE_OFFSET,
+  PODIUM_LABEL_Y, PODIUM_PAGE_OFFSET, PODIUM_PAGE_SIZE, PODIUM_PAGE_Y, PODIUM_PAGE_COLOR,
 } from './shared/config'
 
 interface BoardEntry { displayName: string; count: number; tier: number; address?: string }
@@ -104,21 +105,41 @@ function pageTarget(dir: -1 | 1): void {
 }
 
 function makePageButton(dir: -1 | 1): void {
-  const e = engine.addEntity()
   // Just outside whichever marker is furthest that way, so the pagers follow the markers
   // rather than a spacing constant that no longer exists.
   const xs = PODIUM_SLOTS.map(p => p.x)
   const endX = dir > 0 ? Math.max(...xs) : Math.min(...xs)
   const z = PODIUM_SLOTS.reduce((a, p) => a + p.z, 0) / PODIUM_SLOTS.length
-  Transform.create(e, {
-    position: Vector3.create(endX + dir * PODIUM_PAGE_OFFSET, PODIUM_SLOTS[0].y + 1.2, z),
-    scale: Vector3.create(0.8, 2.2, 0.8),
+  const at = Vector3.create(endX + dir * PODIUM_PAGE_OFFSET, PODIUM_SLOTS[0].y + PODIUM_PAGE_Y, z)
+
+  // Was a bare CL_POINTER box with no MeshRenderer — a working button nobody could see
+  // (KJ 2026-09-21). Now an emissive panel facing the same way as the avatars, with its
+  // own label, so it reads as a control rather than an invisible hotspot.
+  const e = engine.addEntity()
+  Transform.create(e, { position: at, rotation: podiumRotation(), scale: Vector3.create(PODIUM_PAGE_SIZE.x, PODIUM_PAGE_SIZE.y, PODIUM_PAGE_SIZE.z) })
+  MeshRenderer.setBox(e)
+  Material.setPbrMaterial(e, {
+    albedoColor: Color4.create(PODIUM_PAGE_COLOR.r, PODIUM_PAGE_COLOR.g, PODIUM_PAGE_COLOR.b, 0.92),
+    emissiveColor: PODIUM_PAGE_COLOR,
+    emissiveIntensity: 1.1,
+    transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND,
+    castShadows: false,
   })
   MeshCollider.setBox(e, ColliderLayer.CL_POINTER)
   pointerEventsSystem.onPointerDown(
     { entity: e, opts: { button: InputAction.IA_POINTER, hoverText: dir > 0 ? 'Next gardeners' : 'Previous gardeners', maxDistance: 8 } },
     () => pageTarget(dir),
   )
+
+  // Label on its own entity: a TextShape on the panel would inherit the panel's scale and
+  // come out squashed by the 0.08 depth.
+  const cap = engine.addEntity()
+  Transform.create(cap, { position: Vector3.create(at.x, at.y + PODIUM_PAGE_SIZE.y * 0.85, at.z) })
+  TextShape.create(cap, {
+    text: dir > 0 ? 'Next' : 'Prev', fontSize: 1.4,
+    textColor: Color4.create(0.98, 0.9, 0.7, 1), outlineWidth: 0.14, outlineColor: Color4.Black(),
+  })
+  Billboard.create(cap, { billboardMode: BillboardMode.BM_Y })
 }
 
 function build(): void {

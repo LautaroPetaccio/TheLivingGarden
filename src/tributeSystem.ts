@@ -26,7 +26,7 @@ import {
   pointerEventsSystem,
   InputAction,
 } from '@dcl/sdk/ecs'
-import { Color4 } from '@dcl/sdk/math'
+import { Color4, Quaternion } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { TRIBUTE_PLOTS, TRIBUTE_HERO_PLOTS, TRIBUTE_REGISTER_POS, TRIBUTE_MILESTONE, TRIBUTE_MODEL_FOUNDING, TRIBUTE_MODEL_STANDARD } from './shared/config'
 import { showToast } from './notifications'
@@ -81,7 +81,7 @@ function plaqueText(t: TributeRecord): string {
 function createView(t: TributeRecord): TributeView {
   const pos  = TRIBUTE_PLOTS[t.plot] ?? TRIBUTE_PLOTS[0]
   const root = engine.addEntity()
-  Transform.create(root, { position: { x: pos.x, y: 0, z: pos.z } })
+  Transform.create(root, { position: { x: pos.x, y: 0, z: pos.z }, rotation: Quaternion.fromEulerDegrees(0, pos.rot ?? 0, 0) })
 
   const src = t.founding ? TRIBUTE_MODEL_FOUNDING : TRIBUTE_MODEL_STANDARD
   if (src) {

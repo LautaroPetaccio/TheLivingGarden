@@ -165,103 +165,64 @@ export function plantDecayMs(plantId: string, gardeners: number): number {
 // Storage 'planterDraft'), 96 planters. TEMPORARY positions: KJ will re-lay them out.
 // rot = degrees about Y; 0 = front (sign side) faces +z. Ids are stable: box_1..box_8
 // kept their records (planted seeds moved onto these first eight spots).
+// BAKED 2026-09-21 from KJ's in-world planter editor (planterLayoutTool). 96 -> 51:
+// box_7..box_49 and box_91..box_96 removed, box_97..box_100 added. KJ is laying ONE SIDE
+// out first and will mirror it across afterwards, so the current list is deliberately
+// lopsided — do not "fix" the asymmetry. A planted planter that leaves this list is not
+// lost: loadBoxes collects it into orphanedBoxes and tidyPlanter returns the contents to
+// its owner at startup.
 export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number; rot: number }> = [
-  { id: 'box_1', x: 29.8, z: 20.4, rot: 0 },
-  { id: 'box_2', x: 27.9, z: 20.5, rot: 0 },
-  { id: 'box_3', x: 26.2, z: 20.2, rot: 0 },
-  { id: 'box_4', x: 24.6, z: 21.1, rot: 0 },
+  { id: 'box_1', x: 29, z: 19.4, rot: 180 },
+  { id: 'box_2', x: 27.1, z: 19.4, rot: 180 },
+  { id: 'box_3', x: 25, z: 19.5, rot: 180 },
+  { id: 'box_4', x: 22.7, z: 19.4, rot: 180 },
   { id: 'box_5', x: 22.4, z: 20.9, rot: 0 },
-  { id: 'box_6', x: 21.1, z: 20.8, rot: 0 },
-  { id: 'box_7', x: 30.2, z: 27.2, rot: 180 },
-  { id: 'box_8', x: 28.9, z: 27.3, rot: 180 },
-  { id: 'box_9', x: 27, z: 27.6, rot: 180 },
-  { id: 'box_10', x: 25.7, z: 27.8, rot: 180 },
-  { id: 'box_11', x: 24, z: 27.9, rot: 180 },
-  { id: 'box_12', x: 22.5, z: 28.1, rot: 180 },
-  { id: 'box_13', x: 21.3, z: 28.2, rot: 180 },
-  { id: 'box_14', x: 1.8, z: 36.2, rot: 90 },
-  { id: 'box_15', x: 1.9, z: 38.4, rot: 90 },
-  { id: 'box_16', x: 2, z: 40.7, rot: 90 },
-  { id: 'box_17', x: 1.4, z: 42.5, rot: 90 },
-  { id: 'box_18', x: 1.9, z: 45.5, rot: 90 },
-  { id: 'box_19', x: 1.6, z: 47.8, rot: 90 },
-  { id: 'box_20', x: 1.5, z: 48.9, rot: 90 },
-  { id: 'box_21', x: 1.3, z: 49.8, rot: 90 },
-  { id: 'box_22', x: 2.7, z: 51.9, rot: 180 },
-  { id: 'box_23', x: 3.9, z: 52.1, rot: 180 },
-  { id: 'box_24', x: 5.1, z: 52.2, rot: 180 },
-  { id: 'box_25', x: 6.6, z: 52.6, rot: 180 },
-  { id: 'box_26', x: 8.5, z: 52.8, rot: 180 },
-  { id: 'box_27', x: 10.2, z: 52.3, rot: 180 },
-  { id: 'box_28', x: 17, z: 52.3, rot: 180 },
-  { id: 'box_29', x: 18.3, z: 52.4, rot: 180 },
-  { id: 'box_30', x: 20.2, z: 52.6, rot: 180 },
-  { id: 'box_31', x: 21.4, z: 52.7, rot: 180 },
-  { id: 'box_32', x: 23.5, z: 52.9, rot: 180 },
-  { id: 'box_33', x: 25.6, z: 53, rot: 180 },
-  { id: 'box_34', x: 28.1, z: 53.2, rot: 180 },
-  { id: 'box_35', x: 29.9, z: 53.3, rot: 180 },
-  { id: 'box_36', x: 30.6, z: 50.5, rot: 270 },
-  { id: 'box_37', x: 30.8, z: 49, rot: 270 },
-  { id: 'box_38', x: 30.8, z: 47.1, rot: 270 },
-  { id: 'box_39', x: 31, z: 46, rot: 270 },
-  { id: 'box_40', x: 31.3, z: 44.7, rot: 270 },
-  { id: 'box_41', x: 30.9, z: 42.7, rot: 270 },
-  { id: 'box_42', x: 31, z: 41.4, rot: 270 },
-  { id: 'box_43', x: 31.1, z: 40.2, rot: 270 },
-  { id: 'box_44', x: 30.2, z: 38.9, rot: 270 },
-  { id: 'box_45', x: 30.6, z: 37.4, rot: 270 },
-  { id: 'box_46', x: 30.8, z: 35.9, rot: 270 },
-  { id: 'box_47', x: 31, z: 33.6, rot: 270 },
-  { id: 'box_48', x: 30, z: 32, rot: 270 },
-  { id: 'box_49', x: 30.3, z: 30.3, rot: 270 },
-  { id: 'box_50', x: 1.7, z: 11.3, rot: 90 },
-  { id: 'box_51', x: 2.1, z: 9.6, rot: 90 },
-  { id: 'box_52', x: 2.2, z: 8.1, rot: 90 },
-  { id: 'box_53', x: 1.8, z: 6.6, rot: 90 },
-  { id: 'box_54', x: 1.6, z: 5.2, rot: 90 },
-  { id: 'box_55', x: 2, z: 1.7, rot: 90 },
-  { id: 'box_56', x: 1.5, z: 0, rot: 90 },
-  { id: 'box_57', x: 1.3, z: -2.1, rot: 90 },
-  { id: 'box_58', x: 2.9, z: -4.6, rot: 0 },
-  { id: 'box_59', x: 4.9, z: -4.7, rot: 0 },
-  { id: 'box_60', x: 7.4, z: -4.7, rot: 0 },
-  { id: 'box_61', x: 9.3, z: -4.2, rot: 0 },
-  { id: 'box_62', x: 11.8, z: -4.4, rot: 0 },
+  { id: 'box_6', x: 22.8, z: 21.2, rot: 0 },
+  { id: 'box_50', x: 5.4, z: 10.1, rot: 270 },
+  { id: 'box_51', x: 5.4, z: 8.3, rot: 270 },
+  { id: 'box_52', x: 1.2, z: 6.9, rot: 90 },
+  { id: 'box_53', x: 1.3, z: 5.1, rot: 90 },
+  { id: 'box_54', x: 1.3, z: 2.7, rot: 90 },
+  { id: 'box_55', x: 1.3, z: 1, rot: 90 },
+  { id: 'box_56', x: 5.7, z: -1.9, rot: 270 },
+  { id: 'box_57', x: 7.6, z: -2.1, rot: 180 },
+  { id: 'box_58', x: 9.1, z: -1.9, rot: 90 },
+  { id: 'box_59', x: 5.2, z: -6.6, rot: 0 },
+  { id: 'box_60', x: 7, z: -6.6, rot: 0 },
+  { id: 'box_61', x: 8.8, z: -6.7, rot: 0 },
+  { id: 'box_62', x: 11.1, z: -5.9, rot: 0 },
   { id: 'box_63', x: 17.7, z: -4.6, rot: 0 },
   { id: 'box_64', x: 19.5, z: -4.6, rot: 0 },
-  { id: 'box_65', x: 21.4, z: -4.3, rot: 0 },
-  { id: 'box_66', x: 23.4, z: -4.7, rot: 0 },
-  { id: 'box_67', x: 25.6, z: -4.6, rot: 0 },
-  { id: 'box_68', x: 27.9, z: -4.6, rot: 0 },
-  { id: 'box_69', x: 30, z: -4.7, rot: 0 },
-  { id: 'box_70', x: 30.7, z: -2.3, rot: 270 },
-  { id: 'box_71', x: 31, z: -0.4, rot: 270 },
-  { id: 'box_72', x: 31.2, z: 1.1, rot: 270 },
-  { id: 'box_73', x: 30.6, z: 2.6, rot: 270 },
+  { id: 'box_65', x: 21, z: -5.8, rot: 0 },
+  { id: 'box_66', x: 22.9, z: -6.7, rot: 0 },
+  { id: 'box_67', x: 26.2, z: -1.9, rot: 90 },
+  { id: 'box_68', x: 29, z: -6.6, rot: 0 },
+  { id: 'box_69', x: 30.7, z: -5.6, rot: 0 },
+  { id: 'box_70', x: 30.7, z: -1.8, rot: 270 },
+  { id: 'box_71', x: 30.8, z: 0, rot: 270 },
+  { id: 'box_72', x: 30.9, z: 1.8, rot: 270 },
+  { id: 'box_73', x: 26.3, z: 8.3, rot: 180 },
   { id: 'box_74', x: 30.8, z: 3.7, rot: 270 },
-  { id: 'box_75', x: 30.9, z: 4.8, rot: 270 },
-  { id: 'box_76', x: 31.1, z: 6, rot: 270 },
-  { id: 'box_77', x: 31.4, z: 7, rot: 270 },
-  { id: 'box_78', x: 31.6, z: 8.3, rot: 270 },
-  { id: 'box_79', x: 31.1, z: 10, rot: 270 },
-  { id: 'box_80', x: 31.1, z: 11.7, rot: 270 },
-  { id: 'box_81', x: 31.3, z: 13.1, rot: 270 },
-  { id: 'box_82', x: 31.6, z: 14.7, rot: 270 },
-  { id: 'box_83', x: 31.5, z: 16.6, rot: 270 },
-  { id: 'box_84', x: 30.6, z: 18.4, rot: 270 },
-  { id: 'box_85', x: 25.5, z: 0.7, rot: 0 },
-  { id: 'box_86', x: 26.2, z: 1.2, rot: 0 },
-  { id: 'box_87', x: 26.8, z: 1.7, rot: 0 },
-  { id: 'box_88', x: 26.7, z: 16.9, rot: 270 },
-  { id: 'box_89', x: 26.7, z: 17.5, rot: 270 },
-  { id: 'box_90', x: 27.6, z: 15.1, rot: 270 },
-  { id: 'box_91', x: 26.6, z: 32.1, rot: 270 },
-  { id: 'box_92', x: 25.9, z: 31.4, rot: 270 },
-  { id: 'box_93', x: 25.4, z: 31.2, rot: 270 },
-  { id: 'box_94', x: 27.8, z: 46.5, rot: 270 },
-  { id: 'box_95', x: 26.6, z: 47.7, rot: 270 },
-  { id: 'box_96', x: 26.1, z: 48.2, rot: 270 },
+  { id: 'box_75', x: 30.9, z: 5.4, rot: 270 },
+  { id: 'box_76', x: 24.5, z: 10.1, rot: 180 },
+  { id: 'box_77', x: 30.9, z: 7.4, rot: 270 },
+  { id: 'box_78', x: 22.7, z: 10, rot: 180 },
+  { id: 'box_79', x: 30.9, z: 9.3, rot: 270 },
+  { id: 'box_80', x: 26.4, z: 10.1, rot: 90 },
+  { id: 'box_81', x: 26.4, z: 12, rot: 90 },
+  { id: 'box_82', x: 24.5, z: 14, rot: 0 },
+  { id: 'box_83', x: 30.9, z: 15.4, rot: 270 },
+  { id: 'box_84', x: 30.8, z: 17.2, rot: 270 },
+  { id: 'box_85', x: 22.9, z: -2, rot: 270 },
+  { id: 'box_86', x: 26.1, z: 0, rot: 90 },
+  { id: 'box_87', x: 24.4, z: -1.7, rot: 180 },
+  { id: 'box_88', x: 22.6, z: 13.9, rot: 0 },
+  { id: 'box_89', x: 20.9, z: 13.9, rot: 270 },
+  { id: 'box_90', x: 26.3, z: 13.8, rot: 0 },
+  { id: 'box_97', x: 5.9, z: -0.1, rot: 270 },
+  { id: 'box_98', x: 20.8, z: 12, rot: 270 },
+  { id: 'box_99', x: 20.9, z: 21.2, rot: 270 },
+  { id: 'box_100', x: 20.9, z: 19.5, rot: 270 },
 ]
 // ── Onboarding (v2) ──────────────────────────────────────────
 /** KJ's ground arrow (2026-09-20): 20 tris, gold emissive, no texture, lying flat in
@@ -310,6 +271,16 @@ export const ARROW_WAVE_LENGTH = 5.4
 /** The bottom-of-screen dev line (fps + canvas/safe-area calibration). OFF since
  *  2026-09-21 - KJ: "this is the tool tip we wanted to remove". Flip to true for a perf or
  *  safe-area pass; the numbers are still in the [UI] boot log either way. */
+/** How far a droopy plant's water drop is VISIBLE (metres, in / out for hysteresis).
+ *  The drops are the brightest thing in the frame after the sky — a value study of KJ's
+ *  2026-09-21 screenshot posterised them to pure white blobs, a dozen-plus at once — so
+ *  showing every one across a 30x58 m garden turns the affordance into wallpaper. Near
+ *  ones still point; distant ones let the garden be looked at. The droopy POSE is still
+ *  the tell at range, which is what GDD 6 relies on anyway. Wider than ANIM_RANGE: a drop
+ *  you can see should bob, but a drop can stop bobbing before it stops being useful. */
+export const DROP_RANGE     = 20
+export const DROP_RANGE_OUT = 24
+
 export const SHOW_DEV_OVERLAY = false
 
 /** Almanac milestones — the "big goal for others to achieve" Fin asked for (2026-09-21).
@@ -692,18 +663,22 @@ export const PODIUM_SLOTS: ReadonlyArray<{ x: number; y: number; z: number }> = 
   { x: 16.907, y: 0.979, z: -6.714 },   // Armature.002   (local x -8.907)
   { x: 18.794, y: 0.979, z: -6.714 },   // Armature.003   (local x -10.794)
 ]
-/** Euler Y, taken from the markers: all four carry GLB yaw 180, and an X-mirror maps a
- *  yaw to its negation, so 180 → -180 ≡ 180. That faces -Z, i.e. out of the stand toward
- *  anyone walking up to it rather than back into the planters — which is how the mannequin
- *  in KJ's screenshot is facing. ONE CONSTANT TO FLIP (180 ↔ 0) if it reads backwards. */
-export const PODIUM_ROTATION_Y = 180
+/** Euler Y. The markers carry GLB yaw 180 and I reasoned an X-mirror would preserve it;
+ *  KJ checked in-world 2026-09-21 and they faced backwards, so the import lands them at 0.
+ *  0 = facing +Z, out of the stand and into the garden. */
+export const PODIUM_ROTATION_Y = 0
 /** How many top gardeners stand on it — one per marker. 0 disables the whole thing, the
  *  escape hatch if four skinned avatars cost too much frame rate on the iMac. */
 export const PODIUM_COUNT      = PODIUM_SLOTS.length
 /** Name plate height above the rail. */
 export const PODIUM_LABEL_Y    = 2.3
 /** Tap targets that page through the board sit this far out past the end pods. */
-export const PODIUM_PAGE_OFFSET = 1.5
+export const PODIUM_PAGE_OFFSET = 0.75
+/** The page buttons were collider-only and therefore invisible (KJ 2026-09-21). They now
+ *  render a small emissive panel with a label on it, at roughly chest height on the rail. */
+export const PODIUM_PAGE_SIZE   = { x: 0.55, y: 0.55, z: 0.08 }
+export const PODIUM_PAGE_Y      = 1.15   // above the rail top
+export const PODIUM_PAGE_COLOR  = { r: 0.98, g: 0.78, b: 0.46 }
 
 // ── Test tooling ─────────────────────────────────────────────
 /** Wallets allowed to use test handlers that write PERMANENT data (lifetime board /
@@ -770,17 +745,21 @@ export const WEEKLY_RESET_MS = 7 * 24 * 60 * 60 * 1000
 export const TRIBUTE_MILESTONE = 1000   // TUNING — GDD "TBD: threshold, ~1,000"
 /** Fixed memorial-bed plots, filled in the order tributes are earned (never placed
  *  dynamically — clutter would cheapen the founding rose). Add plots when the bed fills. */
-export const TRIBUTE_HERO_PLOTS: ReadonlyArray<{ x: number; z: number }> = [
-  { x: 4.5, z: 21.5 }, { x: 5.7, z: 21.5 }, { x: 6.9,  z: 21.5 }, { x: 8.1,  z: 21.5 },
-  { x: 9.3, z: 21.5 }, { x: 10.5, z: 21.5 }, { x: 11.7, z: 21.5 }, { x: 12.9, z: 21.5 },
+export interface TributePlot { x: number; z: number; rot: number }
+/** `rot` = Euler Y of the rose standing there. Placed in-world with the tribute editor
+ *  (src/tributeLayoutTool.ts, test panel) and baked back here — the stored draft is only
+ *  ever a draft, deploys read this list. */
+export const TRIBUTE_HERO_PLOTS: ReadonlyArray<TributePlot> = [
+  { x: 4.5, z: 21.5, rot: 0 }, { x: 5.7,  z: 21.5, rot: 0 }, { x: 6.9,  z: 21.5, rot: 0 }, { x: 8.1,  z: 21.5, rot: 0 },
+  { x: 9.3, z: 21.5, rot: 0 }, { x: 10.5, z: 21.5, rot: 0 }, { x: 11.7, z: 21.5, rot: 0 }, { x: 12.9, z: 21.5, rot: 0 },
 ]
 /** Overflow plots once the hero bed is full — rendered COMPACT (one model, hover text,
  *  no plaque). Left EMPTY on purpose: the plants run along the garden's edges and the
  *  Blender layout is about to change, so these come from the new layout export, not
  *  from a generated row. Until then, tribute #9+ is register-only. */
-export const TRIBUTE_HEDGE_PLOTS: ReadonlyArray<{ x: number; z: number }> = []
+export const TRIBUTE_HEDGE_PLOTS: ReadonlyArray<TributePlot> = []
 /** All plant-bearing plots, hero first. A record with plot −1 lives on the register only. */
-export const TRIBUTE_PLOTS: ReadonlyArray<{ x: number; z: number }> = [...TRIBUTE_HERO_PLOTS, ...TRIBUTE_HEDGE_PLOTS]
+export const TRIBUTE_PLOTS: ReadonlyArray<TributePlot> = [...TRIBUTE_HERO_PLOTS, ...TRIBUTE_HEDGE_PLOTS]
 /** The permanent roll of every tribute (one text entity, paged) — in front of the bed. */
 export const TRIBUTE_REGISTER_POS = { x: 8.7, y: 1.25, z: 20.3 } as const
 export interface FoundingTribute { displayName: string; address: string; note: string }

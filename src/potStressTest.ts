@@ -12,10 +12,12 @@
 // production.
 // =============================================================
 
-import { engine, Entity, Transform, MeshRenderer, GltfContainer, ColliderLayer, Material, TextShape, PointerEvents, PointerEventType, InputAction, Animator, timers } from '@dcl/sdk/ecs'
+import { engine, Entity, Transform, MeshRenderer, GltfContainer, ColliderLayer, Material, TextShape, PointerEvents, PointerEventType, InputAction, Animator, timers, VisibilityComponent, GltfNodeModifiers } from '@dcl/sdk/ecs'
 import { Color4 } from '@dcl/sdk/math'
 import { BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS } from './shared/config'
 import { createSign, moveSign, removeSign, setupSignSystem, Sign } from './signs'
+import { setAllPlantersVisible } from './boxSystem'
+import { setDropsSuppressed, setAllPlantsVisible } from './wateringSystem'
 
 const COLS = 10, ROWS = 10
 const SPACING = 1.4                        // same pitch as the real planter row
@@ -34,11 +36,82 @@ let rehomeAccum = 0
 let fps = 0, frames = 0, acc = 0
 function fpsSystem(dt: number): void {
   frames++; acc += dt
-  if (acc >= 1) { fps = Math.round(frames / acc); frames = 0; acc = 0 }
+  if (acc >= 1) {
+    fps = Math.round(frames / acc); frames = 0; acc = 0
+    recent.push(fps); if (recent.length > WINDOW) recent.shift()
+  }
 }
 let meterStarted = false
 export function startFpsMeter(): void { if (!meterStarted) { meterStarted = true; engine.addSystem(fpsSystem) } }
 export function getFps(): number { return fps }
+
+// ── Perf toggles (2026-09-21) ────────────────────────────────
+// An asset audit said scene.glb is 317k tris / 41 MB (78% of all geometry, 59% of it
+// textures) and that ~26k tris are invisible collider capsules. That ranks the suspects
+// by SIZE, which is a proxy, not proof — a GPU eats triangles more easily than it eats
+// draw calls, shadow passes or texture bandwidth. These toggles turn each suspect off so
+// the frame rate answers instead. Everything here is client-only and reversible.
+//
+// GltfNodeModifiers cannot hide a node (it only carries castShadows and material), so
+// individual trees inside scene.glb are not separable — the environment is all or nothing.
+// Its SHADOWS and its COLLIDERS are separable, and both are prime suspects on their own.
+export type PerfToggle = 'env' | 'envShadows' | 'envColliders' | 'plants' | 'planters' | 'drops'
+const off = new Set<PerfToggle>()
+export function isPerfOff(t: PerfToggle): boolean { return off.has(t) }
+export function perfLabel(t: PerfToggle): string {
+  const l: Record<PerfToggle, string> = {
+    env:          'Environment  (317k tris)',
+    envShadows:   'Env shadows',
+    envColliders: 'Env colliders  (~26k tris)',
+    plants:       'Plants  (38)',
+    planters:     'Planters  (51)',
+    drops:        'Water drops',
+  }
+  return l[t]
+}
+
+const sceneEntity = (): Entity | null => engine.getEntityOrNullByName('scene.glb')
+
+export function setPerfOff(t: PerfToggle, isOff: boolean): void {
+  if (isOff) off.add(t); else off.delete(t)
+  const on = !isOff
+  const env = sceneEntity()
+  switch (t) {
+    case 'env':
+      if (env === null) { console.log('[Perf] scene.glb entity not found'); return }
+      if (VisibilityComponent.has(env)) VisibilityComponent.getMutable(env).visible = on
+      else VisibilityComponent.create(env, { visible: on })
+      break
+    case 'envShadows':
+      if (env === null) return
+      // path '' targets the whole GLB — the single-root convention this project already
+      // uses for the planters' castShadows override.
+      GltfNodeModifiers.createOrReplace(env, { modifiers: [{ path: '', castShadows: on }] })
+      break
+    case 'envColliders': {
+      if (env === null) return
+      const g = GltfContainer.getMutableOrNull(env)
+      if (!g) return
+      const mask = on ? (ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER) : ColliderLayer.CL_NONE
+      g.visibleMeshesCollisionMask = mask
+      g.invisibleMeshesCollisionMask = on ? ColliderLayer.CL_PHYSICS : ColliderLayer.CL_NONE
+      break
+    }
+    case 'plants':   setAllPlantsVisible(on); break
+    case 'planters': setAllPlantersVisible(on); break
+    case 'drops':    setDropsSuppressed(isOff); break
+  }
+  console.log(`[Perf] ${t} ${isOff ? 'OFF' : 'ON'}  (fps now ${fps}, take the reading after ~5 s)`)
+}
+
+// A one-second counter jitters too much to compare two configurations. This averages a
+// rolling window so a toggle's effect is readable rather than guessed at.
+const WINDOW = 5
+const recent: number[] = []
+export function getFpsAvg(): number {
+  return recent.length === 0 ? 0 : Math.round(recent.reduce((a, b) => a + b, 0) / recent.length)
+}
+export function resetFpsAvg(): void { recent.length = 0 }
 export function getTestPotCount(): number { return pots.length }
 
 function rehomeSystem(dt: number): void {

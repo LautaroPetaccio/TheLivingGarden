@@ -42,8 +42,7 @@ import {
   GltfContainerLoadingState,
   Tween,
   TweenSequence,
-  timers,
-} from '@dcl/sdk/ecs'
+  timers, VisibilityComponent } from '@dcl/sdk/ecs'
 import { Quaternion } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
@@ -167,6 +166,18 @@ export function myOpenedPlanters(from: { x: number; z: number }): { boxId: strin
 /** The nearest of them — the one the tutorial trail points at. */
 export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
   return myOpenedPlanters(from)[0] ?? null
+}
+
+/** Perf test (potStressTest): hide/show every planter — base, plant, balloon and plaque —
+ *  so its cost can be measured against a frame rate instead of estimated from tri counts. */
+export function setAllPlantersVisible(visible: boolean): void {
+  for (const v of views.values()) {
+    for (const e of [v.base, v.plant, v.balloon, v.balloonText]) {
+      if (e === null || e === undefined) continue
+      if (VisibilityComponent.has(e)) VisibilityComponent.getMutable(e).visible = visible
+      else VisibilityComponent.create(e, { visible })
+    }
+  }
 }
 
 /** Where one planter stands, for the highlight shell to sit exactly on it. Null once

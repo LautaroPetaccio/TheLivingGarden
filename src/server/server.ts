@@ -1749,6 +1749,53 @@ export async function server(): Promise<void> {
     await tidyPlanter(b)
   })
 
+  // ── Message: adminPlantDraft (plant layout editor) — save / load the draft ──
+  // The console block below is what gets baked into shared/layout.ts PLANT_LAYOUT.
+  onRoomMessage<{ json: string }>('adminPlantDraft', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (!data.json) {
+      let saved = ''
+      try { saved = (await Storage.get<string>('plantDraft')) ?? '' } catch { /* none yet */ }
+      room.send('plantDraft', { json: saved }, { to: [address] })
+      return
+    }
+    try {
+      const map = JSON.parse(data.json) as Record<string, { x: number; y: number; z: number; rotY: number; scale: number }>
+      const names = Object.keys(map)
+      if (typeof map !== 'object' || names.length === 0 || names.length > 300) throw new Error('not a map of 1..300 plants')
+      await setWorld('plantDraft', data.json)
+      const ts = names.map(n => `  '${n}': { x: ${map[n].x}, y: ${map[n].y}, z: ${map[n].z}, rotY: ${map[n].rotY}, scale: ${map[n].scale} },`).join('\n')
+      console.log(`[Server] Plant draft saved: ${names.length} plants — bake into shared/layout.ts PLANT_LAYOUT:\n${ts}`)
+      room.send('plantDraft', { json: data.json }, { to: [address] })   // ack — the client warns without it
+    } catch (err) {
+      sendNotice(address, 'Plant draft rejected')
+      console.error('[Server] adminPlantDraft rejected:', err)
+    }
+  })
+
+  // ── Message: adminTributeDraft (tribute plot editor) — save / load the draft ──
+  // Baked into TRIBUTE_HERO_PLOTS by hand afterwards; this Storage copy only survives
+  // restarts. The console line below is the one that actually gets baked.
+  onRoomMessage<{ json: string }>('adminTributeDraft', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (!data.json) {
+      let saved = ''
+      try { saved = (await Storage.get<string>('tributeDraft')) ?? '' } catch { /* none yet */ }
+      room.send('tributeDraft', { json: saved }, { to: [address] })
+      return
+    }
+    try {
+      const list = JSON.parse(data.json)
+      if (!Array.isArray(list) || list.length > 100) throw new Error('not a list of ≤ 100 plots')
+      await setWorld('tributeDraft', data.json)
+      const ts = list.map((p: { x: number; z: number; rot: number }) => `  { x: ${p.x}, z: ${p.z}, rot: ${p.rot} },`).join('\n')
+      console.log(`[Server] Tribute draft saved: ${list.length} plots — bake into TRIBUTE_HERO_PLOTS:\n${ts}`)
+    } catch (err) {
+      sendNotice(address, 'Tribute draft rejected')
+      console.error('[Server] adminTributeDraft rejected:', err)
+    }
+  })
+
   // ── Message: adminPlanterDraft (planter layout tool) — save / load the draft layout ──
   // Baked into BOX_POSITIONS by hand afterwards; this Storage copy only survives restarts.
   onRoomMessage<{ json: string }>('adminPlanterDraft', async (data, address) => {

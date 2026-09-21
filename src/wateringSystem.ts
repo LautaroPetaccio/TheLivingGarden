@@ -56,7 +56,7 @@ import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersiste
 import { clockSync } from './shared/clockSync'
 import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
-import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS } from './shared/config'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS, DROP_RANGE, DROP_RANGE_OUT } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
@@ -167,15 +167,13 @@ const CLICKBOX_H_PER_SCALE = 1.9  // m of box height per unit of plant scale
 const CLICKBOX_H_MIN   = 0.9    // m — short plants still need a finger-sized target
 
 // ── In-world text labels ──────────────────────────────────────
-const FONT_PCT_LABEL      = 6    // Image_2–5 + wateringPercentage entity
-const FONT_BLOOM_LABEL    = 2  // Image_6–9 bloom countdown
+const FONT_BLOOM_LABEL    = 2  // BloomCountdown / BloomResetTime signs (×4 each)
 const FONT_WATERED_BY     = 1.2  // "Watered by" label above each plant
 const WATERED_BY_Y        = 2.5  // local Y above plant pivot
 // TextShape has no emissiveIntensity — colour only.
 const TEXT_LABEL_COLOR    = { r: 1.0, g: 0.78, b: 0.5, a: 1 }  // gold/amber
 const WATERED_BY_COLOR    = { r: 1.0, g: 0.95, b: 0.8, a: 1 }  // soft warm white / cream
-const SCALE_PCT_LABEL   = 0.6   // uniform scale applied to Image_2–5 + wateringPercentage
-const SCALE_BLOOM_LABEL = 1.4   // uniform scale applied to Image_6–9
+const SCALE_BLOOM_LABEL = 1.4   // uniform scale applied to BloomCountdown / BloomResetTime
 
 // ── Contributor thank-you label (above bloom model during the bloom event) ───
 const CONTRIBUTOR_LABEL_FONT = 1.5      // world-space font size
@@ -218,8 +216,6 @@ export const PlantData = engine.defineComponent('plant-data', {
 // Module-level state
 // ---------------------------------------------------------------
 
-let percentageEntity:    Entity
-const wateringLabels:       Entity[] = []   // Image_2–5 placed in Creator Hub
 const bloomCountdownLabels: Entity[] = []   // BloomCountdown, _2, _3, _4 — 60s sustain countdown
 const bloomResetLabels:     Entity[] = []   // BloomResetTime, _2, _3, _4 — bloom reset countdown
 let hoverSoundEntity:    Entity
@@ -306,6 +302,11 @@ function glbReady(e: Entity, pending: Set<Entity>): boolean {
 }
 
 function plantAnimatorInitSystem(): void {
+  // All three queues drain within seconds of load, but the spreads below allocate three
+  // arrays EVERY FRAME whether or not there is anything in them — ~180 throwaway arrays a
+  // second, for the whole session, to do nothing. The sets are the state that says whether
+  // there is work; ask them first.
+  if (pendingPlantAnimators.size === 0 && pendingDropAnimators.size === 0 && pendingRoseAnimators.size === 0) return
   for (const entity of [...pendingPlantAnimators]) {
     if (!glbReady(entity, pendingPlantAnimators)) continue
     pendingPlantAnimators.delete(entity)
@@ -325,7 +326,7 @@ function plantAnimatorInitSystem(): void {
   for (const drop of [...pendingDropAnimators]) {
     if (!glbReady(drop, pendingDropAnimators)) continue
     pendingDropAnimators.delete(drop)
-    Animator.createOrReplace(drop, { states: [{ clip: DROP_BOB_CLIP, playing: shownDrops.has(drop), loop: true, speed: 0.85 + Math.random() * 0.3 }] })
+    Animator.createOrReplace(drop, { states: [{ clip: DROP_BOB_CLIP, playing: shownDrops.has(drop) && nearPlants.has(drop), loop: true, speed: 0.85 + Math.random() * 0.3 }] })
   }
   for (const rose of [...pendingRoseAnimators]) {
     if (!glbReady(rose, pendingRoseAnimators)) continue
@@ -361,6 +362,76 @@ function hidePlant(entity: Entity) {
 }
 const isShown = (e: Entity): boolean => VisibilityComponent.getOrNull(e)?.visible !== false
 
+// ── Animation budget (2026-09-21) ────────────────────────────
+// Every plant carries THREE looping clips at rest: its own idle, the UnhealthyRose
+// overlay's idle, and the water drop's bob. At 38 plants that is 114 clips running every
+// frame whether or not you can see them — DCL does not cull animation for you, and it is
+// the dominant per-frame cost in the garden. Anything that multiplies the plant count
+// multiplies that, so idles now only run within ANIM_RANGE of the player.
+// Hysteresis (ANIM_RANGE_OUT > ANIM_RANGE) stops a plant thrashing on the boundary while
+// you stand next to it; the sweep is throttled because it is O(plants).
+const ANIM_RANGE      = 18      // m — start playing
+const ANIM_RANGE_OUT  = 22      // m — stop playing
+const ANIM_SWEEP_S    = 0.5     // s between sweeps
+const nearPlants = new Set<Entity>()   // plant / rose / drop entities currently animating
+let animSweepIn = 0
+
+/** Re-assert the idle a plant and its rose should be playing, given its watered state. */
+function resumeIdles(entity: Entity): void {
+  const healthy = (PlantData.getOrNull(entity)?.isWatered ?? false) || isBloomActive() || bloomActive
+  if (Animator.has(entity) && isShown(entity)) {
+    Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
+  }
+  const rose = roseMap.get(entity)
+  if (rose !== undefined && Animator.has(rose) && isShown(rose)) {
+    Animator.playSingleAnimation(rose, ANIM_UNHEALTHY_IDLE, true)
+  }
+}
+
+function animBudgetSystem(dt: number): void {
+  animSweepIn -= dt
+  if (animSweepIn > 0) return
+  animSweepIn = ANIM_SWEEP_S
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!me) return
+  const inSq = ANIM_RANGE * ANIM_RANGE, outSq = ANIM_RANGE_OUT * ANIM_RANGE_OUT
+  const dInSq = DROP_RANGE * DROP_RANGE, dOutSq = DROP_RANGE_OUT * DROP_RANGE_OUT
+  for (const [entity] of engine.getEntitiesWith(PlantData)) {
+    const p = Transform.getOrNull(entity)?.position
+    if (!p) continue
+    const dx = p.x - me.x, dz = p.z - me.z
+    const sq = dx * dx + dz * dz
+
+    // Drops get their own, wider band — and their own hysteresis, so the fade never
+    // chatters while you stand on the boundary.
+    const dWas = dropInRange.has(entity)
+    const dNow = dWas ? sq < dOutSq : sq < dInSq
+    if (dNow !== dWas) {
+      if (dNow) dropInRange.add(entity); else dropInRange.delete(entity)
+      applyDropVisibility(entity)
+    }
+
+    const was = nearPlants.has(entity)
+    const now = was ? sq < outSq : sq < inSq      // hysteresis
+    if (now === was) continue
+
+    const rose = roseMap.get(entity)
+    const drop = waterDropMap.get(entity)
+    if (now) {
+      nearPlants.add(entity)
+      if (rose !== undefined) nearPlants.add(rose)
+      if (drop !== undefined) nearPlants.add(drop)
+      resumeIdles(entity)
+    } else {
+      nearPlants.delete(entity)
+      if (rose !== undefined) { nearPlants.delete(rose); if (Animator.has(rose)) Animator.stopAllAnimations(rose) }
+      if (drop !== undefined) nearPlants.delete(drop)
+      if (Animator.has(entity)) Animator.stopAllAnimations(entity)
+    }
+    if (drop !== undefined) applyDropBob(drop)
+  }
+}
+
 // The bob is BAKED into waterDrop_bob.glb (clip 'Bob', node translation ±0.065 m,
 // one 5.7 s sine period — generated from waterDrop.glb, geometry untouched). It used to be a
 // looping Tween, and the explorer writes a looping-tweened entity's Transform back to the scene
@@ -371,15 +442,37 @@ const shownDrops   = new Set<Entity>()   // drops currently showing (their bob s
 
 function setDropBob(drop: Entity, on: boolean): void {
   if (on) shownDrops.add(drop); else shownDrops.delete(drop)
-  const a = Animator.getMutableOrNull(drop)
-  const st = a?.states[0]
-  if (st && st.playing !== on) st.playing = on
+  applyDropBob(drop)
 }
 
+/** The bob plays only when the drop is BOTH shown and near enough to matter. Two
+ *  independent gates, so the distance system can never lose track of whether a drop is
+ *  meant to be visible at all. */
+function applyDropBob(drop: Entity): void {
+  const want = shownDrops.has(drop) && nearPlants.has(drop)
+  const st = Animator.getMutableOrNull(drop)?.states[0]
+  if (st && st.playing !== want) st.playing = want
+}
+
+// What GAMEPLAY wants — "this plant needs water, so it should carry a drop". Whether the
+// drop is actually on screen is a separate question (distance), and the two are combined
+// in applyDropVisibility. Keeping them apart means the nine call sites below can go on
+// expressing intent without knowing where the player is standing.
+const dropWanted = new Set<Entity>()
+
 function setDropFade(plantEntity: Entity, direction: 'in' | 'out') {
+  if (direction === 'in') dropWanted.add(plantEntity); else dropWanted.delete(plantEntity)
+  applyDropVisibility(plantEntity)
+}
+
+/** Show the drop only if gameplay wants it AND it is near enough to be worth showing. */
+function applyDropVisibility(plantEntity: Entity): void {
   const drop = waterDropMap.get(plantEntity)
   if (!drop) return
-  if (direction === 'in') {
+  const show = !dropsSuppressed && dropWanted.has(plantEntity) && dropInRange.has(plantEntity)
+  if (dropShown.has(plantEntity) === show) return      // already in that state — no re-tween
+  if (show) dropShown.add(plantEntity); else dropShown.delete(plantEntity)
+  if (show) {
     setDropBob(drop, true)
     Tween.setScale(drop,
       { x: 0.001, y: 0.001, z: 0.001 },
@@ -397,6 +490,28 @@ function setDropFade(plantEntity: Entity, direction: 'in' | 'out') {
     setDropBob(drop, false)
   }
 }
+const dropInRange = new Set<Entity>()   // plants whose drop is close enough to render
+
+/** Perf test: force every drop off, regardless of range or gameplay state. */
+let dropsSuppressed = false
+export function setDropsSuppressed(off: boolean): void {
+  dropsSuppressed = off
+  for (const [entity] of engine.getEntitiesWith(PlantData)) applyDropVisibility(entity)
+}
+
+/** Perf test: hide/show every plant AND its anchor (the anchor owns the rose, drop,
+ *  labels and click box, so hiding the plant alone leaves most of the cost on screen). */
+export function setAllPlantsVisible(visible: boolean): void {
+  for (const name of plantNames()) {
+    const pair = plantMovePair(name)
+    if (!pair) continue
+    for (const e of [pair.plant, pair.anchor]) {
+      if (VisibilityComponent.has(e)) VisibilityComponent.getMutable(e).visible = visible
+      else VisibilityComponent.create(e, { visible })
+    }
+  }
+}
+const dropShown   = new Set<Entity>()   // plants whose drop is currently tweened IN
 
 
 // ---------------------------------------------------------------
@@ -488,10 +603,6 @@ function updateSceneAssets() {
   setVisible(_centerTextProgress, inCountdown)
   // Phase 3 — bloom: bloom GLB + reset countdown text labels
   setVisible(_centerTextBloom, inBloom)
-
-  // Health % text labels are replaced by the GLB models — always hidden
-  setVisible(percentageEntity, false)
-  for (const e of wateringLabels) setVisible(e, false)
 
   if (inCountdown && aboveThreshold) {
     // Only refresh while above threshold; below threshold = paused / frozen at last value
@@ -624,9 +735,6 @@ function computeWateredCount(): number {
 function updateProgressText() {
   const count  = computeWateredCount()
   const pct    = Math.round((count / TOTAL_PLANTS) * 100)
-  const pctStr = `${pct}%`
-  TextShape.getMutable(percentageEntity).text = pctStr
-  for (const e of wateringLabels) TextShape.getMutable(e).text = pctStr
   updateProgressBars(count, TOTAL_PLANTS)
   updateGroundLights(count)
   updateBannerHealth(count / TOTAL_PLANTS)
@@ -703,6 +811,18 @@ function resizeClickboxes(): void {
 
 const plantRegistry     = new Map<Entity, { clickTarget: Entity; plantName: string; clickboxEntity: Entity | null; anchor: Entity }>()
 const plantNameToEntity = new Map<string, Entity>()
+
+/** Plant layout editor (plantLayoutTool.ts): every plant by name, and the pair of entities
+ *  that have to move together. The ANCHOR is a sibling that mirrors the plant's transform
+ *  and owns every derived child (rose, water drop, labels, click box), so moving the plant
+ *  alone would leave its drop and click box behind. */
+export function plantNames(): string[] { return [...plantNameToEntity.keys()].sort() }
+export function plantMovePair(name: string): { plant: Entity; anchor: Entity } | null {
+  const plant = plantNameToEntity.get(name)
+  if (plant === undefined) return null
+  const reg = plantRegistry.get(plant)
+  return reg ? { plant, anchor: reg.anchor } : null
+}
 
 function enablePlantClick(entity: Entity) {
   const info = plantRegistry.get(entity)
@@ -1179,21 +1299,13 @@ function setScale(entity: Entity, s: number): void {
 }
 
 export function setupWateringSystem(): void {
-  // ── Percentage text (entity "wateringPercentage" in Creator Hub) ──
-  percentageEntity = engine.getEntityOrNullByName('wateringPercentage') ?? engine.addEntity()
-  setScale(percentageEntity, SCALE_PCT_LABEL)
-  TextShape.createOrReplace(percentageEntity, { text: '0%', fontSize: FONT_PCT_LABEL, textColor: TEXT_LABEL_COLOR })
-
-  // ── Watering progress labels — Image_2 through Image_5 ──
-  for (let i = 2; i <= 5; i++) {
-    const e = engine.getEntityOrNullByName(`Image_${i}`)
-    if (!e) { console.log(`[WateringSystem] Image_${i} not found`); continue }
-    MeshRenderer.deleteFrom(e)
-    Material.deleteFrom(e)
-    setScale(e, SCALE_PCT_LABEL)
-    TextShape.createOrReplace(e, { text: '0%', fontSize: FONT_PCT_LABEL, textColor: TEXT_LABEL_COLOR })
-    wateringLabels.push(e)
-  }
+  // The in-world "N%" health text (Creator Hub entities `wateringPercentage` and
+  // `Image_2`..`Image_5`) was retired 2026-09-21. None of those entities exist in the
+  // composite any more — health reads from the GardenHealth sign art plus
+  // progressBarsSystem and the HUD ring. The old code logged four "not found" warnings
+  // every boot, and `wateringPercentage`'s `?? engine.addEntity()` fallback quietly built
+  // an orphan entity at the scene origin, carrying a live TextShape that was then hidden
+  // on every update. If those signs ever come back, rebuild this from git history.
 
   // ── Bloom countdown labels — 60s sustain countdown (shown pre-bloom) ──
   for (const name of ['BloomCountdown', 'BloomCountdown_2', 'BloomCountdown_3', 'BloomCountdown_4']) {
@@ -1298,6 +1410,7 @@ export function setupWateringSystem(): void {
     if (rose) pendingRoseAnimators.add(rose)
   }
   engine.addSystem(plantAnimatorInitSystem)
+  engine.addSystem(animBudgetSystem)   // idles only run near the player
 
   setupPetalSystem()
   setupSparkleSystem()

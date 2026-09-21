@@ -29,6 +29,9 @@ import { adminResetOnboarding } from './onboarding'
 import { vfxFlags, setVfxFlag } from './plantVfx'
 import { waterFxFlags } from './sparkleSystem'
 import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
+import { isPerfOff, setPerfOff, perfLabel, getFpsAvg, resetFpsAvg, PerfToggle } from './potStressTest'
+import { isPlantToolOn, setPlantTool, plantToolCount, plantSelectedInfo, plantIsCarrying, plantSelectNearest, plantPickUpOrDrop, plantNudge, plantRotateLeft, plantRotateRight, plantSnap90, plantExport } from './plantLayoutTool'
+import { isTributeToolOn, setTributeTool, tributeCount, tributeSelectedInfo, tributeIsCarrying, tributeSelectNearest, tributePickUpOrDrop, tributeNudge, tributeRotateLeft, tributeRotateRight, tributeSnap90, tributeFaceMe, tributeExport } from './tributeLayoutTool'
 import {
   adminSpawnLocalSeed,
   adminSpawnSeedLadder,
@@ -349,6 +352,79 @@ export function TestPanelUi() {
         </UiEntity>
         <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
           <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={layoutExport} last />
+        </UiEntity>
+
+        {/* PERF — turn one suspect off at a time and read the 5 s average. The asset
+            audit ranks by size; this ranks by what the frame rate actually does. */}
+        <UiEntity uiTransform={{ width: '100%', height: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 2 } }}>
+          <Label value="PERF - isolate a cost" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <Label value={`${getFpsAvg()} fps avg`} fontSize={12} color={MUTED} />
+        </UiEntity>
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Reset average" color={BTN_OFF} onClick={resetFpsAvg} last />
+        </UiEntity>
+        {(['env', 'envShadows', 'envColliders', 'plants', 'planters', 'drops'] as PerfToggle[]).map(t => (
+          <UiEntity key={`perf-${t}`} uiTransform={{ width: '100%', height: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 2 } }}>
+            <Label value={perfLabel(t)} fontSize={11} color={isPerfOff(t) ? MUTED : WHITE} uiTransform={{ flexGrow: 1 }} />
+            <ToggleButton value={!isPerfOff(t)} onChange={(on: boolean) => { setPerfOff(t, !on); resetFpsAvg() }} />
+          </UiEntity>
+        ))}
+
+        {/* Plant layout editor — the 38 plants players WATER. Moves each plant AND its
+            anchor (which owns the water drop, labels and click box), then bakes into
+            shared/layout.ts PLANT_LAYOUT. */}
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value={isPlantToolOn() ? `Plant editor  (${plantToolCount()})` : 'Plant editor'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={isPlantToolOn()} onChange={setPlantTool} />
+        </UiEntity>
+        <Label value={plantSelectedInfo()} fontSize={11} color={MUTED} uiTransform={{ display: isPlantToolOn() ? 'flex' : 'none', width: '100%', height: 18, margin: { bottom: 4 } }} />
+        <UiEntity uiTransform={{ display: isPlantToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Select nearest" color={BTN_OFF} onClick={plantSelectNearest} />
+          <SeedBtn label={plantIsCarrying() ? "Drop" : "Pick up"} color={BTN_ON} onClick={plantPickUpOrDrop} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isPlantToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Nudge fwd" color={BTN_OFF} onClick={() => plantNudge('fwd')} />
+          <SeedBtn label="Nudge back" color={BTN_OFF} onClick={() => plantNudge('back')} />
+          <SeedBtn label="Nudge left" color={BTN_OFF} onClick={() => plantNudge('left')} />
+          <SeedBtn label="Nudge right" color={BTN_OFF} onClick={() => plantNudge('right')} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isPlantToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Up" color={BTN_OFF} onClick={() => plantNudge('up')} />
+          <SeedBtn label="Down" color={BTN_OFF} onClick={() => plantNudge('down')} />
+          <SeedBtn label="Turn -15" color={BTN_OFF} onClick={plantRotateLeft} />
+          <SeedBtn label="Turn +15" color={BTN_OFF} onClick={plantRotateRight} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isPlantToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <SeedBtn label="Snap 90" color={BTN_OFF} onClick={plantSnap90} />
+          <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={plantExport} last />
+        </UiEntity>
+
+        {/* Tribute plot editor — same verbs as the planter editor. Edits the PLOTS, not
+            the planted roses: only the founding rose exists in-world, so ghost roses stand
+            at every plot while this is on (KJ 2026-09-21). */}
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value={isTributeToolOn() ? `Tribute editor  (${tributeCount()})` : 'Tribute editor'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={isTributeToolOn()} onChange={setTributeTool} />
+        </UiEntity>
+        <Label value={tributeSelectedInfo()} fontSize={11} color={MUTED} uiTransform={{ display: isTributeToolOn() ? 'flex' : 'none', width: '100%', height: 18, margin: { bottom: 4 } }} />
+        <UiEntity uiTransform={{ display: isTributeToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Select nearest" color={BTN_OFF} onClick={tributeSelectNearest} />
+          <SeedBtn label={tributeIsCarrying() ? "Drop" : "Pick up"} color={BTN_ON} onClick={tributePickUpOrDrop} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isTributeToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Nudge fwd" color={BTN_OFF} onClick={() => tributeNudge('fwd')} />
+          <SeedBtn label="Nudge back" color={BTN_OFF} onClick={() => tributeNudge('back')} />
+          <SeedBtn label="Nudge left" color={BTN_OFF} onClick={() => tributeNudge('left')} />
+          <SeedBtn label="Nudge right" color={BTN_OFF} onClick={() => tributeNudge('right')} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isTributeToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Turn -15" color={BTN_OFF} onClick={tributeRotateLeft} />
+          <SeedBtn label="Turn +15" color={BTN_OFF} onClick={tributeRotateRight} />
+          <SeedBtn label="Snap 90" color={BTN_OFF} onClick={tributeSnap90} />
+          <SeedBtn label="Face me" color={BTN_OFF} onClick={tributeFaceMe} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isTributeToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={tributeExport} last />
         </UiEntity>
 
         {/* Crowding rule (GDD §3.1) — tidy the longest-away owner's planter now */}
