@@ -21,3 +21,5 @@ README.md
 src
 scripts
 test
+jest.config.js
+tsconfig.test.json

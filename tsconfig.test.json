@@ -1,0 +1,9 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "module": "commonjs",
+    "esModuleInterop": true,
+    "types": ["@dcl/js-runtime", "jest"]
+  },
+  "include": ["src", "test"]
+}
