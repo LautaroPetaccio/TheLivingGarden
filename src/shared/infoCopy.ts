@@ -15,17 +15,18 @@
 // =============================================================
 
 import {
-  RARITY_TIERS, BOX_GROW_MS, BOX_CAP_DEFAULT, BOX_WATER_MAX,
+  RARITY_TIERS, BOX_GROW_MS, BOX_CAP_DEFAULT, BOX_WATER_MAX, growMsForTier, formatGrowTime,
   GUARANTEED_RARE_AT_CONTRIBUTORS, DECAY_FULL_GARDENERS,
 } from './config'
 
 export const DISCORD_URL = 'https://discord.gg/gn8hTCYVPJ'
 
+/** The ladder's two ends, so the copy states the RANGE rather than one number — and
+ *  still never types a value (KJ's rule for this file). */
 function growTime(): string {
-  const mins = Math.round(BOX_GROW_MS / 60_000)
-  if (mins < 60) return `${mins} minute${mins === 1 ? '' : 's'}`
-  const hrs = Math.round(mins / 60)
-  return `${hrs} hour${hrs === 1 ? '' : 's'}`
+  const lo = formatGrowTime(growMsForTier(0))
+  const hi = formatGrowTime(growMsForTier(RARITY_TIERS.length - 1))
+  return lo === hi ? lo : `${lo} for a ${RARITY_TIERS[0].name}, up to ${hi} for a ${RARITY_TIERS[RARITY_TIERS.length - 1].name}`
 }
 
 export interface InfoSection { title: string; lines: string[] }

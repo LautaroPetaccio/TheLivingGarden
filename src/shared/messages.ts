@@ -85,7 +85,18 @@ export const room = registerMessages({
    *  replays for someone who has done it — and a gardener who watered last visit but
    *  never got as far as planting still gets the planting half next time.
    *  Sent on full sync and again after each first. */
-  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean }),
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, pouchOpened: Schemas.Boolean }),
+  /** Client → server: I opened the seed pouch for the first time. Ends the tutorial stage
+   *  that pulses the chip (Fin 2026-09-21 never noticed the pouch existed). */
+  markPouchOpened:  Schemas.Map({}),
+  /** Server → one player: every species they have ever REVEALED, as a JSON string[] of
+   *  species ids. The Almanac's source of truth, deliberately separate from `flowers`:
+   *  a flower left on show in its planter (GDD 3.1) is discovered but not kept. */
+  discoveredUpdate: Schemas.Map({ listJson: Schemas.String }),
+  /** Server → one player: an Almanac milestone just paid out. Celebration only — the
+   *  client DERIVES which rungs are earned from the species count it already has, so
+   *  nothing here needs re-sending on join. */
+  milestoneReached: Schemas.Map({ title: Schemas.String, species: Schemas.Number, seedTier: Schemas.Number, planters: Schemas.Number }),
   /** Client → server: hold this empty planter for me while the tutorial points at it.
    *  The CLIENT picks which one — the scene server has no avatar positions, so "nearest
    *  free planter" can only be computed where the player is. */
@@ -120,7 +131,10 @@ export const room = registerMessages({
   /** Broadcast when a plant's watered state changes (water or expiry).
    *  expiresInMs: server-computed time until this plant dries (0 when not watered) —
    *  decay scales with gardeners present, so the client must not guess it. */
-  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number, tier: Schemas.Number }),
+  /** `tier` is the lifetime-waters FLAIR tier; `almanac` is how many Almanac milestone
+   *  rungs the waterer has claimed (0 = none). Two different ladders, both shown beside
+   *  the name — one for care given, one for flowers found. */
+  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number, tier: Schemas.Number, almanac: Schemas.Number }),
   /** Broadcast when the bloom threshold is reached.
    *  scale: bloomScaleFor(gardeners) (0–1] — 1 = full-garden bloom, below 1 = the
    *  smaller, quieter scaled bloom. variant: BLOOM_VARIANTS id rolled by the server (v2 Phase 6). */

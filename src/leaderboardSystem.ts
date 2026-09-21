@@ -18,7 +18,7 @@ import {
   MaterialTransparencyMode,
 } from '@dcl/sdk/ecs'
 import { Quaternion, Color4 } from '@dcl/sdk/math'
-import { flairIcon } from './shared/config'
+import { flairIcon, almanacTitleByRank } from './shared/config'
 
 // ===============================================================
 // ██████╗  ██████╗  █████╗ ██████╗ ██████╗     ██████╗ ██████╗ ███╗   ██╗███████╗██╗ ██████╗
@@ -77,7 +77,7 @@ const LB_COLOR_SCORE  = { r: 0.6, g: 1,    b: 0.6, a: 1 }  // soft green
 // ── Mock data ─────────────────────────────────────────────────
 // Shown immediately on load until the server sends real data.
 // Replace or reorder freely — only LB_ENTRIES rows are displayed.
-export interface BoardEntry { displayName: string; count: number; tier?: number }
+export interface BoardEntry { displayName: string; count: number; tier?: number; almanac?: number }
 export interface BoardData  { weekly: BoardEntry[]; allTime: BoardEntry[]; weeklyResetAt: number }
 
 const LB_MOCK_DATA: BoardEntry[] = [
@@ -215,7 +215,13 @@ export function updateLeaderboardDisplay(data: BoardData): void {
       const entry          = entries[i]
       const { name, score } = getLabels(b, i)
       if (!name || !score) continue
-      TextShape.getMutable(name).text  = entry ? `${i + 1}.  ${entry.displayName}` : ''
+      // The Almanac title rides beside the name, so "how can another player tell?" has an
+      // answer for the collection ladder as well as the watering one (GDD §4.2).
+      // INLINE, never a second line: rows are LB_STEP_Y (0.175) apart at font 1.2 and the
+      // labels are middle-aligned, so a wrapped name grows into the rows above and below.
+      // First word only, so "Keeper of the Garden" cannot run into the score column.
+      const title = almanacTitleByRank(entry?.almanac ?? 0).split(' ')[0]
+      TextShape.getMutable(name).text  = entry ? `${i + 1}.  ${entry.displayName}${title ? `  ·  ${title}` : ''}` : ''
       const icon = flairIcons[b * LB_ENTRIES + i]
       if (icon) setRowFlair(icon, entry?.tier ?? 0)
       TextShape.getMutable(score).text = entry ? `${entry.count}` : ''

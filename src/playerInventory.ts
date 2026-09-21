@@ -46,10 +46,43 @@ export function heldFlowerIndex(): number | null {
   return null
 }
 
+/** Species this gardener has ever REVEALED, and at which rarities — server-owned (Storage
+ *  key 'discovered'), pushed on join and whenever one is added. Deliberately not derived
+ *  from `flowers`: a flower left on show in its planter is discovered but not kept, and
+ *  the Almanac counts the former. Wire format is `${species}|${tier}` per entry, because
+ *  species and rarity are rolled independently; a bare species id (written in the first
+ *  hours of this key) still registers the species, just with no rarity against it. */
+let discovered = new Map<string, Set<number>>()
+export function getDiscovered(): ReadonlyMap<string, ReadonlySet<number>> { return discovered }
+export function setDiscovered(entries: string[]): void {
+  const next = new Map<string, Set<number>>()
+  for (const e of entries) {
+    const bar = e.lastIndexOf('|')
+    const id  = bar === -1 ? e : e.slice(0, bar)
+    const t   = bar === -1 ? NaN : Number(e.slice(bar + 1))
+    if (!id) continue
+    const set = next.get(id) ?? new Set<number>()
+    if (Number.isInteger(t)) set.add(t)
+    next.set(id, set)
+  }
+  discovered = next
+}
+
 export function getFlowers(): Keepsake[] { return flowers }
 export function setFlowers(list: Keepsake[]): void { flowers = list }
 export function getBoxCap(): number { return boxCap }
 export function setBoxCap(n: number): void { boxCap = n }
+
+// Onboarding stage 3 (pouch) crosses the same seam as gifting: the tutorial SETS the
+// hint, the HUD reads it, and the HUD calls back the first time the pouch is opened.
+// It lives here rather than the HUD importing onboarding directly, because that would
+// close a ui -> onboarding -> notifications -> ui import cycle.
+let pouchHint = false
+let pouchOpenedCb: (() => void) | null = null
+export function getPouchHint(): boolean { return pouchHint }
+export function setPouchHint(on: boolean): void { pouchHint = on }
+export function registerPouchOpened(fn: () => void): void { pouchOpenedCb = fn }
+export function notePouchOpened(): void { pouchOpenedCb?.() }
 
 // Gifting is owned by giftSystem; it registers itself here so the menu can use it.
 let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void; hold(flowerIndex: number): void; holdSeed(rarityTier: number): void } | null = null

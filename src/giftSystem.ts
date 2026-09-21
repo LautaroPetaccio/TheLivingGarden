@@ -39,7 +39,7 @@ import { Quaternion } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
-import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex } from './playerInventory'
+import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex, setDiscovered } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
 import { rarityTierById, plantSpeciesById, withArticle, seedModelSrc, SEED_HAND_SCALE } from './shared/config'
 import { isBloomFlowerActive } from './bloomFlowerSystem'
@@ -194,6 +194,13 @@ function tagScanSystem(dt: number): void {
 
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupGiftSystem(): void {
+  room.onMessage('discoveredUpdate', (data) => {
+    let ids: string[] = []
+    try { ids = JSON.parse(data.listJson) } catch { ids = [] }
+    setDiscovered(ids)
+    console.log(`[Gift] discovered: ${ids.length} species`)
+  })
+
   room.onMessage('collectionUpdate', (data) => {
     let list: Keepsake[] = []
     try { list = JSON.parse(data.flowersJson) } catch { list = [] }

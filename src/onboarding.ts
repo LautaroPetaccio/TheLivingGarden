@@ -21,40 +21,48 @@
 // room.clear() — a handler registered before that clear is silently wiped.
 // =============================================================
 
-import { engine, Transform, GltfContainer, VisibilityComponent, ColliderLayer, Entity } from '@dcl/sdk/ecs'
-import { Quaternion, Vector3 } from '@dcl/sdk/math'
+import { engine, Transform, GltfContainer, VisibilityComponent, ColliderLayer, Entity, MeshRenderer, Material, MaterialTransparencyMode } from '@dcl/sdk/ecs'
+import { Quaternion, Vector3, Color4 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { PlantData } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
-import { nearestFreePlanter, freePlanterPos, myOpenedPlanter } from './boxSystem'
-import { getFlowers, gardenersHere } from './playerInventory'
+import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters } from './boxSystem'
+import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened } from './playerInventory'
 import { showPersistent, hidePersistent, showToast } from './notifications'
 import {
   ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW, ARROW_STANDOFF, ARROW_GROUND_LIFT,
   ARROW_BOB_AMPLITUDE, ARROW_BOB_PERIOD_MS,
-  ARROW_CHEVRON_COUNT, ARROW_CHEVRON_SPACING, ARROW_CHEVRON_WAVE_MS,
+  ARROW_CHEVRON_MAX, ARROW_CHEVRON_SPACING, ARROW_WAVE_SPEED, ARROW_WAVE_LENGTH,
+  BEACON_HEIGHT, BEACON_RADIUS, BEACON_COLOR, BEACON_ALPHA, BEACON_INTENSITY,
   TOON_HIGHLIGHT_SRC, TOON_HIGHLIGHT_SCALE,
   ONBOARDING_REPICK_S, ONBOARDING_MAX_RANGE,
   ONBOARDING_WATER_HINT, ONBOARDING_PLANT_HINT, ONBOARDING_HARVEST_HINT, ONBOARDING_GIFT_HINT,
+  ONBOARDING_POUCH_HINT,
   ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS,
   ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS,
   PLANTER_RESERVE_RETRY_S,
 } from './shared/config'
 
-type Stage = 'none' | 'water' | 'plant' | 'harvest' | 'gift'
+type Stage = 'none' | 'water' | 'plant' | 'pouch' | 'harvest' | 'gift'
 
 // All four assume DONE until the server says otherwise, so a dropped message never
 // nags a veteran with a tutorial they finished long ago.
-let watered   = true
-let planted   = true
-let harvested = true
-let gifted    = true
+let watered     = true
+let planted     = true
+let harvested   = true
+let gifted      = true
+let pouchOpened = true
 let hasSeeds = false
 let stage: Stage = 'none'
 let seedToastShown = false
 
 let chevrons: Entity[] = []
-let shell: Entity | null = null
+// Shells and beacons are POOLS, not singletons: a gardener at the planter cap can have
+// more than one flower standing open and wants every one of them marked, not just the
+// nearest (Fin 2026-09-21). The plant stage still only ever marks the one held for them.
+let shells:  Entity[] = []
+let beacons: Entity[] = []
+let beaconTargets: Vector3[] = []
 
 let target: Vector3 | null = null   // what the trail points at
 let heldBoxId = ''                  // planter the server is holding for us ('' = none)
@@ -66,7 +74,7 @@ let elapsed  = 0
 
 function ensureChevrons(): Entity[] {
   if (chevrons.length === 0) {
-    for (let i = 0; i < ARROW_CHEVRON_COUNT; i++) {
+    for (let i = 0; i < ARROW_CHEVRON_MAX; i++) {
       const e = engine.addEntity()
       Transform.create(e, { scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
       // No colliders: a decal on the ground must not swallow a tap meant for a plant.
@@ -82,42 +90,87 @@ function ensureChevrons(): Entity[] {
   return chevrons
 }
 
-function ensureShell(): Entity {
-  if (shell === null) {
-    shell = engine.addEntity()
-    Transform.create(shell, { scale: Vector3.create(TOON_HIGHLIGHT_SCALE, TOON_HIGHLIGHT_SCALE, TOON_HIGHLIGHT_SCALE) })
-    GltfContainer.create(shell, {
+function ensureShells(n: number): Entity[] {
+  while (shells.length < n) {
+    const e = engine.addEntity()
+    Transform.create(e, { scale: Vector3.create(TOON_HIGHLIGHT_SCALE, TOON_HIGHLIGHT_SCALE, TOON_HIGHLIGHT_SCALE) })
+    GltfContainer.create(e, {
       src: TOON_HIGHLIGHT_SRC,
       visibleMeshesCollisionMask: ColliderLayer.CL_NONE,
       invisibleMeshesCollisionMask: ColliderLayer.CL_NONE,
     })
-    VisibilityComponent.create(shell, { visible: false })
+    VisibilityComponent.create(e, { visible: false })
+    shells.push(e)
   }
-  return shell
+  return shells
+}
+
+/** A column of light standing on the current target, tall enough to clear the planting
+ *  and read from the far side of the garden. Created on first use; only ever moved. */
+function ensureBeacons(n: number): Entity[] {
+  while (beacons.length < n) {
+    const e = engine.addEntity()
+    Transform.create(e)
+    MeshRenderer.setCylinder(e, BEACON_RADIUS, BEACON_RADIUS)
+    Material.setPbrMaterial(e, {
+      albedoColor:       Color4.create(BEACON_COLOR.r, BEACON_COLOR.g, BEACON_COLOR.b, BEACON_ALPHA),
+      emissiveColor:     BEACON_COLOR,
+      emissiveIntensity: BEACON_INTENSITY,
+      transparencyMode:  MaterialTransparencyMode.MTM_ALPHA_BLEND,
+      castShadows:       false,
+    })
+    VisibilityComponent.create(e, { visible: false })
+    beacons.push(e)
+  }
+  return beacons
+}
+
+/** Stand a column of light on each target. Created on first use; only ever moved. */
+function beaconsOn(targets: ReadonlyArray<Vector3>): void {
+  const pool = ensureBeacons(targets.length)
+  for (let i = 0; i < pool.length; i++) {
+    const on = i < targets.length
+    VisibilityComponent.getMutable(pool[i]).visible = on
+    if (!on) continue
+    // The primitive cylinder is one unit tall, centred on its origin.
+    const t = Transform.getMutable(pool[i])
+    t.position = Vector3.create(targets[i].x, targets[i].y + BEACON_HEIGHT / 2, targets[i].z)
+    t.scale    = Vector3.create(1, BEACON_HEIGHT, 1)
+  }
+}
+
+function showBeacons(visible: boolean): void {
+  for (const e of beacons) VisibilityComponent.getMutable(e).visible = visible
 }
 
 function showChevrons(visible: boolean): void {
   for (const e of chevrons) VisibilityComponent.getMutable(e).visible = visible
 }
 
-function showShell(visible: boolean): void {
-  if (shell !== null) VisibilityComponent.getMutable(shell).visible = visible
+function showShells(visible: boolean): void {
+  for (const e of shells) VisibilityComponent.getMutable(e).visible = visible
 }
 
-/** Wear the gold shell on one planter. Used for the planter you should plant in AND the
- *  one holding your opened flower — KJ 2026-09-20: the arrows point, but the highlight is
- *  what actually makes the planter findable among ninety-six of them. */
-function shellOnPlanter(p: { x: number; z: number; rot: number }): void {
-  const e  = ensureShell()
-  const st = Transform.getMutable(e)
-  st.position = Vector3.create(p.x, 0, p.z)
-  st.rotation = Quaternion.fromEulerDegrees(0, p.rot, 0)
-  showShell(true)
+/** Wear the gold shell on these planters — the one you should plant in, or EVERY one of
+ *  yours holding an opened flower. KJ 2026-09-20: the arrows point, but the highlight is
+ *  what actually makes a planter findable among ninety-six of them. */
+function shellsOnPlanters(ps: ReadonlyArray<{ x: number; z: number; rot: number }>): void {
+  const pool = ensureShells(ps.length)
+  for (let i = 0; i < pool.length; i++) {
+    const on = i < ps.length
+    VisibilityComponent.getMutable(pool[i]).visible = on
+    if (!on) continue
+    const t = Transform.getMutable(pool[i])
+    t.position = Vector3.create(ps[i].x, 0, ps[i].z)
+    t.rotation = Quaternion.fromEulerDegrees(0, ps[i].rot, 0)
+  }
 }
 
 function clearVisuals(): void {
   showChevrons(false)
-  showShell(false)
+  showShells(false)
+  showBeacons(false)
+  beaconTargets = []
   hidePersistent()
 }
 
@@ -147,11 +200,11 @@ function heldPlanter(from: Vector3, dt: number): Vector3 | null {
   if (heldBoxId) {
     const p = freePlanterPos(heldBoxId)
     if (p) {
-      shellOnPlanter(p)
+      shellsOnPlanters([p])
       return Vector3.create(p.x, 0, p.z)
     }
     heldBoxId = ''            // someone planted in it — ask for another
-    showShell(false)
+    showShells(false)
   }
   if (retryIn <= 0) {
     retryIn = PLANTER_RESERVE_RETRY_S
@@ -163,8 +216,10 @@ function heldPlanter(from: Vector3, dt: number): Vector3 | null {
 
 // ── The trail ─────────────────────────────────────────────────
 
-/** Lay the chevrons from `to` back toward the player, all aimed at `to`, with the
- *  pulse running along the row so the eye is pulled toward the target. */
+/** Lay the chevrons from `to` all the way back to the player's feet, every one aimed at
+ *  `to`, with a pulse running along the row so the eye is pulled toward the target. The
+ *  row spans the WHOLE distance: up to ARROW_CHEVRON_MAX chevrons at the nominal
+ *  spacing, and beyond that the gaps stretch rather than the trail stopping short. */
 function drawTrail(player: Vector3, to: Vector3): void {
   const row = ensureChevrons()
   let dx = player.x - to.x
@@ -174,19 +229,24 @@ function drawTrail(player: Vector3, to: Vector3): void {
   const yaw = Math.atan2(-dx, -dz) * 180 / Math.PI + ARROW_FORWARD_YAW
   const rotation = Quaternion.fromEulerDegrees(0, yaw, 0)
 
-  // Don't run the row past the player when they are standing on top of the target.
-  const span = Math.min(len, ARROW_STANDOFF + ARROW_CHEVRON_SPACING * (ARROW_CHEVRON_COUNT - 1))
+  // From the standoff out to the player's feet, never past them: standing on the target
+  // leaves a single chevron at the standoff.
+  const span    = Math.max(0, len - ARROW_STANDOFF)
+  const count   = Math.max(1, Math.min(ARROW_CHEVRON_MAX, Math.round(span / ARROW_CHEVRON_SPACING) + 1))
+  const spacing = count > 1 ? span / (count - 1) : 0
 
   for (let i = 0; i < row.length; i++) {
-    const frac = row.length === 1 ? 0 : i / (row.length - 1)
-    const out  = ARROW_STANDOFF + (span - ARROW_STANDOFF) * frac
-    // Phase runs from the far chevron to the near one, so the pulse travels toward `to`.
-    const phase = (elapsed * 1000 / ARROW_CHEVRON_WAVE_MS) - frac
+    const visible = i < count
+    VisibilityComponent.getMutable(row[i]).visible = visible
+    if (!visible) continue
+    const out = ARROW_STANDOFF + spacing * i
+    // Fixed metres/second toward `to`, so the ripple reads the same on a 4 m trail and a
+    // 40 m one. Subtracting `out` makes it travel down the row toward the target.
+    const phase = (elapsed * ARROW_WAVE_SPEED - out) / ARROW_WAVE_LENGTH
     const bob   = (Math.sin(phase * Math.PI * 2) + 1) * 0.5 * ARROW_BOB_AMPLITUDE
     const t = Transform.getMutable(row[i])
     t.position = Vector3.create(to.x + dx * out, to.y + ARROW_GROUND_LIFT + bob, to.z + dz * out)
     t.rotation = rotation
-    VisibilityComponent.getMutable(row[i]).visible = out <= len + 0.01
   }
 }
 
@@ -195,6 +255,10 @@ function drawTrail(player: Vector3, to: Vector3): void {
 function currentStage(): Stage {
   if (!watered) return 'water'
   if (!planted && hasSeeds) return 'plant'
+  // Straight after the first planting: Fin 2026-09-21 never noticed the pouch existed, so
+  // the seeds and the whole flower collection behind it were invisible. No trail - the
+  // target is a HUD chip, not a place; the UI pulses it while this stage is live.
+  if (planted && !pouchOpened) return 'pouch'
   // Only once their own flower is actually standing open in a planter.
   if (!harvested && myOpenedPlanter({ x: 0, z: 0 }) !== null) return 'harvest'
   // Gifting needs someone to give TO — never nag a player gardening alone.
@@ -206,6 +270,7 @@ function applyStage(): void {
   const next = currentStage()
   if (next === stage) return
   stage = next
+  setPouchHint(stage === 'pouch')   // the HUD pulses the chip off this
   repickIn = 0
   retryIn  = 0
   target   = null
@@ -230,34 +295,55 @@ function onboardingSystem(dt: number): void {
   const player = Transform.getOrNull(engine.PlayerEntity)?.position
   if (!player) return
 
-  if (stage === 'gift') {
-    // No trail: the target is another player, who moves. The line is the whole lesson.
+  if (stage === 'gift' || stage === 'pouch') {
+    // No trail: gift's target is another player, who moves, and pouch's is a HUD chip.
+    // The line (plus, for pouch, the chip's own pulse) is the whole lesson.
     showChevrons(false)
-    showShell(false)
-    showPersistent(ONBOARDING_GIFT_HINT)
+    showShells(false)
+    showBeacons(false)
+    showPersistent(stage === 'pouch' ? ONBOARDING_POUCH_HINT : ONBOARDING_GIFT_HINT)
     return
   }
 
   repickIn -= dt
   if (stage === 'water') {
-    if (repickIn <= 0) { repickIn = ONBOARDING_REPICK_S; target = nearestDroopyPlant(player) }
+    if (repickIn <= 0) {
+      repickIn = ONBOARDING_REPICK_S
+      target = nearestDroopyPlant(player)
+      beaconTargets = target ? [target] : []
+    }
   } else if (stage === 'harvest') {
     if (repickIn <= 0) {
       repickIn = ONBOARDING_REPICK_S
-      const box = myOpenedPlanter(player)
-      if (box) { shellOnPlanter(box); target = Vector3.create(box.x, 0, box.z) }
-      else { showShell(false); target = null }
+      // EVERY flower of theirs that is standing open gets a shell and a beacon; the trail
+      // walks them to the nearest, because they can only go to one at a time.
+      const mine = myOpenedPlanters(player)
+      shellsOnPlanters(mine)
+      beaconTargets = mine.map(b => Vector3.create(b.x, 0, b.z))
+      target = mine.length > 0 ? Vector3.create(mine[0].x, 0, mine[0].z) : null
     }
   } else {
     target = heldPlanter(player, dt)
+    beaconTargets = target ? [target] : []
   }
 
-  if (!target) { showChevrons(false); hidePersistent(); return }
+  if (!target) { showChevrons(false); showBeacons(false); hidePersistent(); return }
   drawTrail(player, target)
+  beaconsOn(beaconTargets)
 
   // Re-assert every tick: the persistent pill is shared, and a bloom start or a garden
   // reset calls hidePersistent() from the watering system.
   showPersistent(stage === 'water' ? ONBOARDING_WATER_HINT : stage === 'harvest' ? ONBOARDING_HARVEST_HINT : ONBOARDING_PLANT_HINT)
+}
+
+/** Registered with playerInventory, so the HUD can report the first open without
+ *  importing this module. Cheap to call again: the server ignores a step that is already
+ *  true, and the local flag stops the stage without waiting for the round trip. */
+function markPouchOpened(): void {
+  if (pouchOpened) return
+  pouchOpened = true
+  room.send('markPouchOpened', {})
+  applyStage()
 }
 
 /** Test panel: wipe my record on the server so the whole tutorial replays. */
@@ -279,10 +365,11 @@ export function setupOnboarding(): void {
     // them back at the verb that starts the whole loop again. Fires only on the
     // false→true transition, so it never replays on a later join.
     const justPlanted = !planted && !!data.planted
-    watered   = !!data.watered
-    planted   = !!data.planted
-    harvested = !!data.harvested
-    gifted    = !!data.gifted
+    watered     = !!data.watered
+    planted     = !!data.planted
+    harvested   = !!data.harvested
+    gifted      = !!data.gifted
+    pouchOpened = !!data.pouchOpened
     if (justPlanted) showToast(ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS)
     applyStage()
   })
@@ -294,11 +381,12 @@ export function setupOnboarding(): void {
   })
   room.onMessage('boxReserved', (data) => {
     heldBoxId = data.boxId
-    if (!heldBoxId) showShell(false)
+    if (!heldBoxId) showShells(false)
     else console.log(`[Onboarding] planter ${heldBoxId} held for this gardener`)
   })
   // A box opening or a gardener arriving can start a stage, and neither sends
   // onboardingState — so re-evaluate on a slow tick rather than only on messages.
+  registerPouchOpened(markPouchOpened)
   engine.addSystem(stageWatchSystem)
   engine.addSystem(onboardingSystem)
   console.log(`[Onboarding] ready · onboardingState listeners=${room.listenerCount('onboardingState')}`)

@@ -46,7 +46,7 @@ import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, triggerBloo
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { flairIcon, bloomSustainMs, bloomVariantById, bloomFxLevel, withArticle } from './shared/config'
+import { flairIcon, almanacTitleByRank, bloomSustainMs, bloomVariantById, bloomFxLevel, withArticle } from './shared/config'
 import { setBloomSparklePalette } from './sparkleSystem'
 import { setAmbientPalette } from './ambientFX'
 import { startMoonlight, stopMoonlight } from './moonlight'
@@ -275,6 +275,11 @@ function setLabelFlair(plant: Entity, tier: number): void {
   })
 }
 const wateredByNames    = new Map<Entity, string>()   // entity → display name
+// entity → the waterer's Almanac title, '' for most people. Text rather than an icon,
+// unlike the flair tier: there is no art for the four rungs, and the title IS the reward,
+// so it has to be readable. It only appears once someone has found 10 species, which is
+// what keeps it off nearly every label and stops the garden turning into a wall of text.
+const wateredByTitles   = new Map<Entity, string>()
 
 const bloomContributors = new Set<string>()           // unique waterer names this bloom cycle
 let   contributorLabelEntity: Entity | null = null
@@ -1046,7 +1051,8 @@ function refreshWateredByLabels(): void {
     if (!pd?.isWatered || !name) continue
     // Only write when the text changes — any TextShape write rebuilds that label's mesh,
     // and "2m ago" mostly doesn't change between 5 s refreshes.
-    const text = `Watered by ${name}\n${formatTimeAgo(pd.wateredAt)}`
+    const title = wateredByTitles.get(entity) ?? ''
+    const text = `Watered by ${name}${title ? `\n${title}` : ''}\n${formatTimeAgo(pd.wateredAt)}`
     if (TextShape.get(labelEntity).text === text) continue
     const ts = TextShape.getMutable(labelEntity)
     ts.text      = text
@@ -1546,6 +1552,7 @@ export function setupWateringSystem(): void {
     const wateredByLabel = wateredByLabelMap.get(entity)
     if (data.isWatered && data.wateredBy) {
       wateredByNames.set(entity, data.wateredBy)
+      wateredByTitles.set(entity, almanacTitleByRank(data.almanac))
       setLabelFlair(entity, data.tier)   // flair icon above the label (GDD §5)
       bloomContributors.add(data.wateredBy)   // tracks everyone who contributed this cycle
     } else {

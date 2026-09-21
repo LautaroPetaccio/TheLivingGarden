@@ -51,6 +51,7 @@ import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL
 import { showToast } from './notifications'
 import { attachPlantVfx, attachSeedlingVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
+import { showDiscovery } from './discoveryCard'
 import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
 import { createSign, moveSign, setupSignSystem, Sign } from './signs'
 import { BALLOON_TEXT_TRACK } from './balloonTextTrack'
@@ -145,21 +146,27 @@ export function nearestFreePlanter(from: { x: number; z: number }): { boxId: str
   return best
 }
 
-/** Onboarding (stage 4): one of MY planters holding an opened, unharvested flower —
- *  the nearest, so the tutorial points at whichever they are standing by. */
-export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
-  let best: { boxId: string; x: number; z: number; rot: number } | null = null
-  let bestSq = Infinity
+/** Onboarding (stage 4): EVERY planter of mine holding an opened, unharvested flower,
+ *  nearest first. All of them, not just the nearest — a gardener at the planter cap can
+ *  have several standing open and wants to find them all (Fin 2026-09-21: "we wanted 2
+ *  and had 1 when we were looking for our plants"). */
+export function myOpenedPlanters(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number }[] {
+  const mine: { boxId: string; x: number; z: number; rot: number; sq: number }[] = []
   for (const v of views.values()) {
     if (!isMine(v) || !v.opened || deleted.has(v.boxId)) continue
     const p = layout.get(v.boxId)
     if (!p) continue
     const dx = p.x - from.x
     const dz = p.z - from.z
-    const sq = dx * dx + dz * dz
-    if (sq < bestSq) { bestSq = sq; best = { boxId: v.boxId, x: p.x, z: p.z, rot: p.rot } }
+    mine.push({ boxId: v.boxId, x: p.x, z: p.z, rot: p.rot, sq: dx * dx + dz * dz })
   }
-  return best
+  mine.sort((a, b) => a.sq - b.sq)
+  return mine.map(m => ({ boxId: m.boxId, x: m.x, z: m.z, rot: m.rot }))
+}
+
+/** The nearest of them — the one the tutorial trail points at. */
+export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
+  return myOpenedPlanters(from)[0] ?? null
 }
 
 /** Where one planter stands, for the highlight shell to sit exactly on it. Null once
@@ -188,7 +195,11 @@ function labelFor(v: BoxView): string {
     return have > 0 ? `Empty planter\nTap to plant (${have} seeds)` : 'Empty planter\nCatch a bloom seed'
   }
   const tierName = rarityTierById(v.rarityTier).name
-  const who = isMine(v) ? 'Your' : `${v.ownerName}'s`
+  // Always the owner's NAME, never "Your" (Fin 2026-09-21). The label is read by everyone
+  // standing near the planter, so "KJ's Tulip" is what it says to its owner too; the
+  // server sends ownerName for every box, and 'Your' only survives as a fallback for a
+  // record that somehow arrived without one. Direct-address TOASTS keep "Your".
+  const who = v.ownerName ? `${v.ownerName}'s` : 'Your'
   if (v.opened) return `${who} ${flowerName(v)}${v.rarityTier > 0 ? `\n${tierName}` : ''}`
   const watered = v.waters > 0 ? `\nwatered x${v.waters} by ${v.lastWaterer}` : ''
   return `${who} ${v.rarityTier > 0 ? `${tierName} ` : ''}seed${watered}`
@@ -727,10 +738,13 @@ export function setupBoxSystem(): void {
     if (live && !wasOwned && v.owner) playSfx('plant', at)
     if (live && !wasOpened && v.opened) playSfx('flowerOpen', at)
     if (live && wasMine && wasOpened && !v.owner) playSfx('harvest')
-    if (!wasOpened && v.opened && isMine(v)) {
-      const tierName = rarityTierById(v.rarityTier).name
-      showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` ${withArticle(tierName, true)} one!` : ''} Harvest it, or leave it on show.`, TOAST_MS, false)
-    } else if (!wasMine && isMine(v) && !v.opened) {
+    // `live` matters here: the join/resync snapshot arrives with opened=true and
+    // wasOpened=false for every planter already standing open, so an ungated branch
+    // replays the whole beat on every rejoin. It was only a toast before; as a card it
+    // would be a faceful of "you discovered" for flowers opened days ago.
+    if (live && !wasOpened && v.opened && isMine(v)) {
+      showDiscovery(v.flower, v.rarityTier)
+    } else if (live && !wasMine && isMine(v) && !v.opened) {
       showToast('Seed planted — come back when it opens', TOAST_MS, false)
     }
   })

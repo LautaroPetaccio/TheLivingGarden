@@ -20,12 +20,13 @@ import { readCanvasInfo, getSafeArea, getScreenInsets, pct } from './safeArea'
 import { isMobile } from '@dcl/sdk/platform'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, timers } from '@dcl/sdk/ecs'
-import { getPouch } from './playerInventory'
+import { getPouch, getPouchHint, notePouchOpened } from './playerInventory'
 import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
 import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
 import { BloomFinaleUi } from './bloomFinale'
+import { DiscoveryCardUi, MilestoneCardUi } from './discoveryCard'
 import { InfoPanelUi, toggleInfo, isInfoOpen } from './infoPanel'
-import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor } from './shared/config'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor, SHOW_DEV_OVERLAY } from './shared/config'
 
 // ---------------------------------------------------------------
 // State
@@ -155,8 +156,11 @@ const TINT_SEED  = { r: 0.62, g: 0.88, b: 0.80 }
 // 1080-units (× U × M at render)
 const RING_SIZE  = 132
 const RING_FONT  = 30
-const CHIP_H     = 46
-const CHIP_FONT  = 22
+// Sized up ~1.6x on 2026-09-21: Fin did not notice the chip at the old 46, and it is the
+// only way into the seeds and the whole flower collection. KJ kept it bottom centre.
+const CHIP_H     = 72
+const CHIP_FONT  = 30
+const CHIP_GLYPH = 40
 const BANNER_W   = 680
 const BANNER_PAD = 18
 const TITLE_FONT = 22
@@ -321,6 +325,10 @@ function uiComponent() {
   const need       = Math.max(0, BLOOM_THRESHOLD - watered)
   const pctLabel   = `${Math.round(bannerHealth * 100)}%`
   const ringLabel  = isBloom ? (bloomRemainingLabel || pctLabel) : pctLabel
+  // Tutorial stage 3 pulses the chip until it is opened once. ALPHA only - a size tween
+  // on the mobile (Godot) client is the thing we never do.
+  const pouchHint  = getPouchHint() && !isSeedMenuOpen()
+  const hintAlpha  = 0.45 + 0.45 * (Math.sin(Date.now() / 420) * 0.5 + 0.5)
 
   const title = isBloom ? (bannerBloomLabel || 'The Garden is in Full Bloom!')
               : isCount ? `Hold 80% for ${bannerCountdown} to wake the bloom`
@@ -348,12 +356,12 @@ function uiComponent() {
 
       {/* ── Test Panel — MOUNTED for v2 dev; comment out before production deploys ── */}
       <TestPanelUi />
-      {/* Dev calibration line (remove with the test panel) */}
+      {/* Dev calibration line — SHOW_DEV_OVERLAY, off by default (KJ 2026-09-21) */}
       <Label
         value={`${getFps()} fps${getTestPotCount() > 0 ? ` with ${getTestPotCount()} test planters` : ''} | ${getCanvasCalibration()}`}
         fontSize={fs(11)}
         color={{ r: 1, g: 1, b: 1, a: 0.7 }}
-        uiTransform={{ positionType: 'absolute', position: { left: '30%', bottom: 4 }, width: '40%', height: fs(16) }}
+        uiTransform={{ display: SHOW_DEV_OVERLAY ? 'flex' : 'none', positionType: 'absolute', position: { left: '30%', bottom: 4 }, width: '40%', height: fs(16) }}
       />
 
       {/* ═════ HEALTH RING — top right, the resting HUD. Tap to open the banner. ═════ */}
@@ -376,14 +384,14 @@ function uiComponent() {
       <UiEntity
         uiTransform={{
           height: px(CHIP_H), flexDirection: 'row', alignItems: 'center',
-          padding: { left: px(14), right: px(16) }, borderRadius: px(CHIP_H / 2),
+          padding: { left: px(20), right: px(22) }, borderRadius: px(CHIP_H / 2),
         }}
-        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
-        onMouseDown={() => toggleSeedMenu()}
+        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : pouchHint ? { ...GOLD, a: hintAlpha } : DARK }}
+        onMouseDown={() => { notePouchOpened(); toggleSeedMenu() }}
       >
-        <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(8) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
+        <UiEntity uiTransform={{ width: px(CHIP_GLYPH), height: px(CHIP_GLYPH), margin: { right: px(12) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
         <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: seedCount > 0 ? 1 : 0.55 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
-        <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(12), height: px(12), margin: { left: px(10) }, borderRadius: px(6) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
+        <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(18), height: px(18), margin: { left: px(14) }, borderRadius: px(9) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
       </UiEntity>
       {/* ? — "how the garden works", beside the pouch so both live in one place */}
       <UiEntity
@@ -445,6 +453,8 @@ function uiComponent() {
       </UiEntity>
 
       <BloomFinaleUi px={px} fs={fs} />
+      <DiscoveryCardUi px={px} fs={fs} mobile={mobile} />
+      <MilestoneCardUi px={px} fs={fs} mobile={mobile} />
       <InfoPanelUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
       <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
 
