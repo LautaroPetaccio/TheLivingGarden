@@ -13,10 +13,34 @@
 
 import { Storage } from '@dcl/sdk/server'
 
-/** Outcome of a read: a value, null when the key holds nothing, or a failure. */
+/** Outcome of a read: a value, null when the key holds nothing, or a failure.
+ *  `version` is the shape version the value was written with; 0 for a value
+ *  stored before versioning, so a caller can migrate on the way in. */
 export type LoadResult<T> =
-  | { ok: true; value: T | null }     // null = the key holds nothing
-  | { ok: false }                     // the read threw and returned no answer
+  | { ok: true; value: T | null; version: number }   // null = the key holds nothing
+  | { ok: false }                                    // the read threw and returned no answer
+
+// ---------------------------------------------------------------
+// Shape versions
+// ---------------------------------------------------------------
+
+/** Every value is written as this envelope: `v` is the shape version of `d`.
+ *  Values written before versioning are bare payloads and read back as version 0,
+ *  so nothing stored has to be rewritten before it can be read. */
+interface Envelope { v: number; d: unknown }
+
+/** Version stamped on a value stored before this envelope existed. */
+export const LEGACY_VERSION = 0
+
+function isEnvelope(x: unknown): x is Envelope {
+  return !!x && typeof x === 'object' && !Array.isArray(x)
+    && typeof (x as Envelope).v === 'number' && 'd' in (x as Envelope)
+}
+
+function unwrap<T>(stored: unknown): { value: T | null; version: number } {
+  if (isEnvelope(stored)) return { value: (stored.d ?? null) as T | null, version: stored.v }
+  return { value: (stored ?? null) as T | null, version: LEGACY_VERSION }
+}
 
 // ---------------------------------------------------------------
 // Pacing
@@ -66,9 +90,9 @@ function queuedWrite<T>(write: () => Promise<T>): Promise<T> {
 // ---------------------------------------------------------------
 
 /** Reads through a slot, reporting a rejected read as a failure. */
-async function load<T>(read: () => Promise<T | null>): Promise<LoadResult<T>> {
+async function load<T>(read: () => Promise<unknown>): Promise<LoadResult<T>> {
   try {
-    return { ok: true, value: await withSlot(read) }
+    return { ok: true, ...unwrap<T>(await withSlot(read)) }
   } catch {
     return { ok: false }   // get() rejects when the realm lookup fails
   }
@@ -76,12 +100,12 @@ async function load<T>(read: () => Promise<T | null>): Promise<LoadResult<T>> {
 
 /** Reads a scene-scoped key, shared by everyone in the world. */
 export function loadScene<T>(key: string): Promise<LoadResult<T>> {
-  return load<T>(() => Storage.get<T>(key))
+  return load<T>(() => Storage.get<unknown>(key))
 }
 
 /** Reads a key held against one player's address. */
 export function loadPlayer<T>(address: string, key: string): Promise<LoadResult<T>> {
-  return load<T>(() => Storage.player.get<T>(address, key))
+  return load<T>(() => Storage.player.get<unknown>(address, key))
 }
 
 // ---------------------------------------------------------------
@@ -93,8 +117,9 @@ const RETRY_MAX_MS  = 30_000
 
 /** Write-through for a single storage key: hold, coalesce, retry. */
 export interface KeyWriter {
-  /** Queue the current state. The SDK coalesces and orders the writes; this adds
-   *  retry with backoff so a failed save is not silently lost. */
+  /** Queue the current state, stamped with the writer's shape version. The SDK
+   *  coalesces and orders the writes; this adds retry with backoff so a failed
+   *  save is not silently lost. */
   save(snapshot: unknown): void
   /** Allow writes. Saves before this are held, so a blob is never written back
    *  before it has been read. */
@@ -104,7 +129,7 @@ export interface KeyWriter {
 }
 
 /** Builds a writer over `write`. `label` names the key in retry logs. */
-function createWriter(label: string, write: (value: unknown) => Promise<boolean>): KeyWriter {
+function createWriter(label: string, version: number, write: (value: unknown) => Promise<boolean>): KeyWriter {
   let enabled    = false
   let writing    = false
   let hasPending = false
@@ -153,7 +178,7 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
 
   return {
     save(snapshot) {
-      pending    = snapshot
+      pending    = { v: version, d: snapshot } satisfies Envelope
       hasPending = true
       if (retryTimer !== null) { clearTimeout(retryTimer); retryTimer = null }
       void flush()
@@ -168,12 +193,12 @@ function createWriter(label: string, write: (value: unknown) => Promise<boolean>
   }
 }
 
-/** Writer for a scene-scoped key. */
-export function createSceneWriter(key: string): KeyWriter {
-  return createWriter(key, value => Storage.set(key, value))
+/** Writer for a scene-scoped key. `version` stamps every value it writes. */
+export function createSceneWriter(key: string, version: number): KeyWriter {
+  return createWriter(key, version, value => Storage.set(key, value))
 }
 
 /** Writer for a key held against one player's address. */
-export function createPlayerWriter(address: string, key: string): KeyWriter {
-  return createWriter(`${key}@${address.slice(0, 8)}`, value => Storage.player.set(address, key, value))
+export function createPlayerWriter(address: string, key: string, version: number): KeyWriter {
+  return createWriter(`${key}@${address.slice(0, 8)}`, version, value => Storage.player.set(address, key, value))
 }

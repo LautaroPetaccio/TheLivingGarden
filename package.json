@@ -12,13 +12,15 @@
     "upgrade-sdk:next": "npm install --save-dev @dcl/sdk@next",
     "server-logs": "sdk-commands sdk-server-logs",
     "postinstall": "node patch-node-modules.cjs",
-    "check-glb": "node check-glb.cjs"
+    "check-glb": "node check-glb.cjs",
+    "test": "node scripts/run-tests.mjs"
   },
   "devDependencies": {
     "@dcl/gltf-validator-ts": "^1.0.19",
     "@dcl/js-runtime": "7.29.1-35154657340.commit-e2bbcc9",
     "@dcl/sdk": "7.29.1-35154657340.commit-e2bbcc9",
-    "@dcl/sdk-commands": "7.29.1-35154657340.commit-e2bbcc9"
+    "@dcl/sdk-commands": "7.29.1-35154657340.commit-e2bbcc9",
+    "esbuild": "^0.18.20"
   },
   "engines": {
     "node": ">=16.0.0",

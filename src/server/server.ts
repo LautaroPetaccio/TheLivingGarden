@@ -99,14 +99,30 @@ const cycleSeedsBy  = new Map<string, { seeds: number; rares: number }>()       
 // write in flight across every key — the preview storage service reads and rewrites
 // the whole file per PUT, so concurrent writes to different keys erase each other
 // (2026-09-17: a harvest's 'boxes' write lost to its own 'flowers' write).
-const plantsWriter       = createSceneWriter('plants')
-const leaderboardWriter  = createSceneWriter('leaderboard')
-const lifetimeWriter     = createSceneWriter('lifetime')
-const resetAtWriter      = createSceneWriter('leaderboardResetAt')
-const tributesWriter     = createSceneWriter('tributes')
-const boxesWriter        = createSceneWriter('boxes')
-const lastSeenWriter     = createSceneWriter('lastSeen')
-const planterDraftWriter = createSceneWriter('planterDraft')   // admin overwrite target, never merged
+//
+// Every value carries a shape version. Bump a key's version here when its stored
+// shape changes, and handle the older one where it is read: persistence.ts reports
+// the version each value was written with, and a value stored before versioning
+// reads back as LEGACY_VERSION.
+const V = {
+  plants: 1, leaderboard: 1, lifetimeTop: 1, leaderboardResetAt: 1,
+  tributes: 1, boxes: 1, lastSeen: 1, planterDraft: 1,
+} as const
+
+/** Shape version per player-scoped key, stamped when its writer is created. */
+const PLAYER_KEY_VERSION: Record<string, number> = {
+  seeds: 1, flowers: 1, boxCap: 1, lifetime: 1,
+  onboarding: 1, discovered: 1, milestones: 1, keptSafe: 1,
+}
+
+const plantsWriter       = createSceneWriter('plants',             V.plants)
+const leaderboardWriter  = createSceneWriter('leaderboard',        V.leaderboard)
+const lifetimeTopWriter  = createSceneWriter('lifetimeTop',        V.lifetimeTop)
+const resetAtWriter      = createSceneWriter('leaderboardResetAt', V.leaderboardResetAt)
+const tributesWriter     = createSceneWriter('tributes',           V.tributes)
+const boxesWriter        = createSceneWriter('boxes',              V.boxes)
+const lastSeenWriter     = createSceneWriter('lastSeen',           V.lastSeen)
+const planterDraftWriter = createSceneWriter('planterDraft',       V.planterDraft)   // admin overwrite target, never merged
 
 const RELOAD_INTERVAL_MS = 30_000
 
@@ -123,7 +139,14 @@ function scheduleReload(label: string, load: () => Promise<boolean>): void {
 }
 
 // ── Leaderboard ──────────────────────────────────────────────
-interface LeaderboardEntry { displayName: string; total: number }
+interface LeaderboardEntry {
+  displayName: string
+  total: number
+  /** Flair tier at the time this entry last changed. Stored on WEEKLY entries so the
+   *  board still shows the right flair for a gardener who is offline and outside the
+   *  lifetime top-N, whose lifetime total the server therefore does not hold. */
+  tier?: number
+}
 const leaderboard = new Map<string, LeaderboardEntry>()  // address → entry
 
 // ---------------------------------------------------------------
@@ -208,7 +231,16 @@ function savePlantStates(): void {
 // `leaderboard` is THIS WEEK's board (resets); `lifetime` never resets and is the
 // source of milestone flair (GDD §4.3 hook 2, §5 recognition — the v1 complaint
 // was 1,000+ waters vanishing on reset).
+// A gardener's lifetime total lives in THEIR OWN player record, not in a scene blob.
+// The blob was rewritten in full on every water and grew with every player who ever
+// watered, so its cost climbed with the population on the hottest path. What stays
+// scene-level is `lifetimeTop`: the top LIFETIME_TOP_N gardeners, so the all-time
+// board still works for players who are offline. The old `lifetime` blob is read once
+// at boot as a floor and never written again — a gardener's record is seeded from it
+// the first time they load.
 const lifetime = new Map<string, LeaderboardEntry>()   // address → entry, never reset
+const LIFETIME_TOP_N = 50
+let lifetimeTopJson = ''                                // last top-N written, to skip no-op saves
 let weeklyResetAt = 0                                   // epoch ms when the weekly board next clears
 
 interface BoardRecord extends LeaderboardEntry { address: string }
@@ -218,8 +250,8 @@ function mergeBoard(board: Map<string, LeaderboardEntry>, records: unknown): voi
   if (!Array.isArray(records)) return
   for (const r of records as BoardRecord[]) {
     const live = board.get(r.address)
-    if (live) live.total += r.total
-    else board.set(r.address, { displayName: r.displayName, total: r.total })
+    if (live) { live.total += r.total; live.tier = r.tier ?? live.tier }
+    else board.set(r.address, { displayName: r.displayName, total: r.total, tier: r.tier })
   }
 }
 
@@ -230,31 +262,34 @@ let boardsMerged = false
 /** Load (or late-load) both boards, the reset clock and the tributes. False when a read failed. */
 async function loadLeaderboard(): Promise<boolean> {
   if (boardsMerged) return loadTributes()   // boards are already in; only tributes were missing
-  const [board, life, resetAt] = await Promise.all([
+  const [board, legacy, top, resetAt] = await Promise.all([
     loadScene<BoardRecord[]>('leaderboard'),
-    loadScene<BoardRecord[]>('lifetime'),
+    loadScene<BoardRecord[]>('lifetime'),      // legacy blob: read as a floor, never written
+    loadScene<BoardRecord[]>('lifetimeTop'),
     loadScene<number>('leaderboardResetAt'),
   ])
-  if (!board.ok || !life.ok || !resetAt.ok) {
+  if (!board.ok || !legacy.ok || !top.ok || !resetAt.ok) {
     console.error('[Server] leaderboard: load failed — saves held until a reload succeeds')
     return false
   }
   boardsMerged = true
   leaderboardWriter.enable()
-  lifetimeWriter.enable()
+  lifetimeTopWriter.enable()
   resetAtWriter.enable()
 
   mergeBoard(leaderboard, board.value)
   console.log(`[Server] Loaded leaderboard: ${leaderboard.size} players`)
-  if (life.value !== null) {
-    mergeBoard(lifetime, life.value)
-    console.log(`[Server] Loaded lifetime board: ${lifetime.size} players`)
+  // Both are floors, never sums: the top-N is derived from records that were
+  // themselves seeded from the legacy blob, so adding them would double-count.
+  seedLifetime(legacy.value)
+  seedLifetime(top.value)
+  if (lifetime.size > 0) {
+    console.log(`[Server] Lifetime: ${lifetime.size} gardener(s) known (legacy blob + top ${LIFETIME_TOP_N})`)
   } else {
-    // First run after the Phase 5 upgrade: the current weekly totals are the best
-    // floor we have for lifetime — never start veterans from zero.
+    // Fresh world: this week's totals are the best floor we have — never start
+    // veterans from zero. Records are written as each of them next waters.
     for (const [address, e] of leaderboard) lifetime.set(address, { ...e })
-    saveLifetime()
-    console.log(`[Server] Lifetime board seeded from weekly (${lifetime.size} players)`)
+    console.log(`[Server] Lifetime seeded from weekly (${lifetime.size} players)`)
   }
 
   // Weekly reset clock — persisted so restarts don't move the reset moment
@@ -268,6 +303,7 @@ async function loadLeaderboard(): Promise<boolean> {
   }
   ensureWeeklyReset()
   saveLeaderboard()
+  refreshLifetimeTop()
   return loadTributes()
 }
 
@@ -326,7 +362,7 @@ async function loadTributes(): Promise<boolean> {
       const e = lifetime.get(address)
       if (!e || e.total < TRIBUTE_MILESTONE) {
         lifetime.set(address, { displayName: f.displayName, total: Math.max(e?.total ?? 0, TRIBUTE_MILESTONE) })
-        saveLifetime()
+        void saveLifetimeFor(address)   // honorees are rarely connected, so load-then-write
       }
     }
   }
@@ -367,8 +403,58 @@ function saveLeaderboard(): void {
   leaderboardWriter.save([...leaderboard.entries()].map(([address, e]) => ({ address, ...e })))
 }
 
-function saveLifetime(): void {
-  lifetimeWriter.save([...lifetime.entries()].map(([address, e]) => ({ address, ...e })))
+/** Seed live totals from a stored board. A floor, never a sum: a stored total can
+ *  raise a live one but never lower it, so re-running this cannot double-count. */
+function seedLifetime(records: unknown): void {
+  if (!Array.isArray(records)) return
+  for (const r of records as BoardRecord[]) {
+    if (!r || typeof r.address !== 'string') continue
+    const total = Number(r.total) || 0
+    const live  = lifetime.get(r.address)
+    if (live) {
+      if (total > live.total) live.total = total
+      if (r.displayName) live.displayName = r.displayName
+    } else {
+      lifetime.set(r.address, { displayName: String(r.displayName ?? ''), total })
+    }
+  }
+}
+
+/** Rewrite the bounded all-time board, but only when its content actually changed —
+ *  most waters do not move the top LIFETIME_TOP_N at all. */
+function refreshLifetimeTop(): void {
+  const top = [...lifetime.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, LIFETIME_TOP_N)
+    .map(([address, e]) => ({ address, displayName: e.displayName, total: e.total }))
+  const json = JSON.stringify(top)
+  if (json === lifetimeTopJson) return
+  lifetimeTopJson = json
+  lifetimeTopWriter.save(top)
+}
+
+/** One gardener's lifetime record. The object it returns IS their entry in `lifetime`,
+ *  so bumping the board bumps the record and one save persists both. */
+async function loadLifetimeRecord(address: string): Promise<LeaderboardEntry> {
+  const seeded = lifetime.get(address)
+  const rec = await loadPlayerRecord<LeaderboardEntry>(address, 'lifetime', stored => {
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+      const r = stored as Partial<LeaderboardEntry>
+      // The legacy blob is a floor: an older record must never lower a known total.
+      return { displayName: String(r.displayName ?? seeded?.displayName ?? ''), total: Math.max(Number(r.total) || 0, seeded?.total ?? 0) }
+    }
+    return { displayName: seeded?.displayName ?? '', total: seeded?.total ?? 0 }
+  })
+  lifetime.set(address, rec)
+  return rec
+}
+
+/** Persist one gardener's lifetime total, and the all-time board if they moved it.
+ *  Loads the record first so a total is never written before it has been read. */
+async function saveLifetimeFor(address: string): Promise<void> {
+  await loadLifetimeRecord(address)
+  savePlayerJson(address, 'lifetime')
+  refreshLifetimeTop()
 }
 
 function tierOf(address: string): number {
@@ -389,6 +475,9 @@ function bumpWaterTotals(address: string): void {
     if (entry) entry.total += 1
     else board.set(address, { displayName: leaderboard.get(address)?.displayName ?? address.slice(0, 8) + '…', total: 1 })
   }
+  // Stamp the weekly entry so the board keeps its flair once the gardener is gone.
+  const weekly = leaderboard.get(address)
+  if (weekly) weekly.tier = flairTier(lifetime.get(address)?.total ?? 0)
 }
 
 /** Top-10 sorted entries of a board as JSON, ready to send over the wire. */
@@ -399,7 +488,9 @@ function boardJson(board: Map<string, LeaderboardEntry>): string {
       .slice(0, 10)
       // address travels too (v2): the podium renders each top gardener's AvatarShape,
       // which needs their wallet to look the profile up. Names alone are not enough.
-      .map(([address, e]) => ({ displayName: e.displayName, count: e.total, tier: tierOf(address), almanac: almanacRankOf(address), address }))
+      // A stamped tier wins: for a weekly entry it may be the only record of the
+      // gardener's flair, since their lifetime total is no longer held for everyone.
+      .map(([address, e]) => ({ displayName: e.displayName, count: e.total, tier: e.tier ?? tierOf(address), almanac: almanacRankOf(address), address }))
   )
 }
 
@@ -671,7 +762,7 @@ async function loadPlayerRecord<T>(address: string, key: string, parse: (stored:
     const res = await loadPlayer<unknown>(address, key)
     if (!res.ok) { console.error(`[Server] ${key} for ${address.slice(0, 8)}…: load failed — using the default, not cached`); return parse(null) }
     const value  = parse(res.value)
-    const writer = createPlayerWriter(address, key)
+    const writer = createPlayerWriter(address, key, PLAYER_KEY_VERSION[key] ?? 1)
     writer.enable()
     playerRecords.set(k, { value, writer })
     return value
@@ -1346,6 +1437,7 @@ function playerJoinSystem(): void {
         room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId), tier: wateredTierMap.get(plantId) ?? 0, almanac: wateredAlmanacMap.get(plantId) ?? 0 }, { to: [address] })
       }
 
+      await loadLifetimeRecord(address)   // authoritative total before the board goes out
       broadcastLeaderboard([address])
       sendThreshold([address])
       await loadPouch(address)
@@ -1468,7 +1560,10 @@ export async function server(): Promise<void> {
       watered.isWatered = true
       watered.wateredAt = now
 
-      // Count on both boards: this week's (resets) and lifetime (flair source)
+      // Count on both boards: this week's (resets) and lifetime (flair source). The
+      // record loads before the bump so a stored total is never overwritten by one
+      // that started from the legacy floor.
+      await loadLifetimeRecord(playerAddress)
       const tierBefore = tierOf(playerAddress)
       const cycleKey = playerAddress.toLowerCase()
       cycleContributors.add(cycleKey)
@@ -1483,7 +1578,7 @@ export async function server(): Promise<void> {
 
       savePlantStates()
       saveLeaderboard()
-      saveLifetime()
+      void saveLifetimeFor(playerAddress)
       const expiresAt = armExpiry(plantId, entity, now)
 
       room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now, tier, almanac: almanacRankOf(playerAddress) })
@@ -1779,11 +1874,12 @@ export async function server(): Promise<void> {
   onRoomMessage<{ amount: number }>('adminGrantWaters', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const amount = Math.max(1, Math.min(1000, Math.floor(data?.amount ?? 0)))
+    await loadLifetimeRecord(address)
     const tierBefore = tierOf(address)
     for (let i = 0; i < amount; i++) bumpWaterTotals(address)
     const tier = tierOf(address)
     saveLeaderboard()
-    saveLifetime()
+    await saveLifetimeFor(address)
     broadcastLeaderboard()
     const total = lifetime.get(address)?.total ?? 0
     console.log(`[Server] [Test] granted ${amount} waters to ${address} → lifetime ${total}, tier ${tierBefore}→${tier}`)
@@ -1837,6 +1933,7 @@ export async function server(): Promise<void> {
       if (!ps) continue
       room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId), tier: wateredTierMap.get(plantId) ?? 0, almanac: wateredAlmanacMap.get(plantId) ?? 0 }, { to: [address] })
     }
+    await loadLifetimeRecord(address)
     broadcastLeaderboard([address])
     sendThreshold([address])
     await loadPouch(address)
@@ -1871,13 +1968,14 @@ export async function server(): Promise<void> {
 
   // ── Message: registerPlayer ──────────────────────────────────
   onRoomMessage<{ displayName: string }>('registerPlayer', async (data, address) => {
+    await loadLifetimeRecord(address)
     for (const board of [leaderboard, lifetime]) {
       const entry = board.get(address)
       if (entry) entry.displayName = data.displayName
       else board.set(address, { displayName: data.displayName, total: 0 })
     }
     saveLeaderboard()
-    saveLifetime()
+    await saveLifetimeFor(address)
     broadcastLeaderboard([address])
     console.log(`[Server] Registered player: ${data.displayName} (${address})`)
   })
