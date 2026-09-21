@@ -20,10 +20,13 @@ import { readCanvasInfo, getSafeArea, getScreenInsets, pct } from './safeArea'
 import { isMobile } from '@dcl/sdk/platform'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, timers } from '@dcl/sdk/ecs'
-import { getPouch } from './playerInventory'
+import { getPouch, getPouchHint, notePouchOpened } from './playerInventory'
 import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
 import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
-import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor } from './shared/config'
+import { BloomFinaleUi } from './bloomFinale'
+import { DiscoveryCardUi, MilestoneCardUi } from './discoveryCard'
+import { InfoPanelUi, toggleInfo, isInfoOpen } from './infoPanel'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor, SHOW_DEV_OVERLAY } from './shared/config'
 
 // ---------------------------------------------------------------
 // State
@@ -31,6 +34,7 @@ import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS,
 
 let toastVisible  = false
 let toastText     = ''
+let toastColor: { r: number; g: number; b: number } | null = null   // e.g. the rarity colour of a gathered seed
 let toastGen      = 0
 
 let dailyLimitVisible = false
@@ -68,8 +72,10 @@ function openBanner(ms = BANNER_OPEN_MS): void {
 // Public API — toasts and pills (stacked under the banner)
 // ---------------------------------------------------------------
 
-export function showToast(text: string, durationMs: number, _large = false): void {
+/** @param color optional text colour (e.g. a seed's rarity colour); default cream */
+export function showToast(text: string, durationMs: number, _large = false, color?: { r: number; g: number; b: number }): void {
   toastText    = text
+  toastColor   = color ?? null
   toastVisible = true
   const gen    = ++toastGen
   timers.setTimeout(() => { if (toastGen === gen) toastVisible = false }, durationMs)
@@ -125,9 +131,9 @@ export function updatePlayerCount(n: number): void {
 }
 
 /** During a bloom the ring shows time left (wateringSystem's reset ticker pushes it). */
-export function updateBloomRemaining(label: string, remainingMs: number): void {
+export function updateBloomRemaining(label: string, remainingMs: number, totalMs = BLOOM_RESET_DELAY_MS): void {
   bloomRemainingLabel = label
-  bloomRemainingFrac  = Math.max(0, Math.min(1, remainingMs / BLOOM_RESET_DELAY_MS))
+  bloomRemainingFrac  = Math.max(0, Math.min(1, remainingMs / totalMs))   // blooms vary in length (contributors)
 }
 
 // ---------------------------------------------------------------
@@ -150,8 +156,11 @@ const TINT_SEED  = { r: 0.62, g: 0.88, b: 0.80 }
 // 1080-units (× U × M at render)
 const RING_SIZE  = 132
 const RING_FONT  = 30
-const CHIP_H     = 46
-const CHIP_FONT  = 22
+// Sized up ~1.6x on 2026-09-21: Fin did not notice the chip at the old 46, and it is the
+// only way into the seeds and the whole flower collection. KJ kept it bottom centre.
+const CHIP_H     = 72
+const CHIP_FONT  = 30
+const CHIP_GLYPH = 40
 const BANNER_W   = 680
 const BANNER_PAD = 18
 const TITLE_FONT = 22
@@ -166,27 +175,29 @@ const EDGE       = 16          // gap from the safe-area edge
 function barColor(): { r: number; g: number; b: number } {
   return bannerHealth >= 0.8 ? BAR_GREEN : bannerHealth >= 0.5 ? BAR_ORANGE : BAR_RED
 }
-// Ring sprites: art exists at 41 health steps + 21 bloom steps, but mounting one
-// UiEntity per frame (needed so nothing gets texture-swapped mid-game — see below)
-// means that many SIMULTANEOUS distinct UI textures. KJ 2026-09-17: the ring renders
-// as a plain white square on desktop even after the frames were made power-of-two —
-// so pixel size wasn't the whole story. DIAGNOSTIC: sample every 4th frame instead of
-// every one (62 → 17 simultaneous textures) to test whether sheer texture COUNT is the
-// actual limit. If this doesn't fix it either, the cause is something else entirely —
-// this file only picks a subset of the existing PNGs, no new art needed either way.
+// Ring sprites: ONE sprite sheet (ring_sheet.png, 8×8 cells of 256 px) holding all 41 health
+// frames then all 21 bloom frames, packed from the original ring_NN / ringbloom_NN PNGs
+// (2026-09-19, originals kept). The ring shows a frame by moving its UV window, so the texture
+// never changes — changing an element's texture made the client rebuild its background (a
+// blank-frame flash), which is why frames used to be STACKED and toggled by alpha. Stacking
+// cost one scene texture per frame (17 after the every-4th-frame cut) against a 71-texture
+// scene limit, and is the prime suspect for the desktop white-square ring. Now: 1 texture,
+// every frame back (the stride cut is gone).
 const RING_STEPS   = 40
 const BLOOM_STEPS  = 20
-const FRAME_STRIDE = 4
-const RING_FRAME_COUNT  = Math.floor(RING_STEPS  / FRAME_STRIDE) + 1   // 11 frames: 0,4,…40
-const BLOOM_FRAME_COUNT = Math.floor(BLOOM_STEPS / FRAME_STRIDE) + 1   // 6 frames: 0,4,…20
-const two = (n: number): string => String(n).padStart(2, '0')
-const RING_FILES: string[] = [
-  ...Array.from({ length: RING_FRAME_COUNT },  (_, i) => `${UI_DIR}ring_${two(i * FRAME_STRIDE)}.png`),
-  ...Array.from({ length: BLOOM_FRAME_COUNT }, (_, i) => `${UI_DIR}ringbloom_${two(i * FRAME_STRIDE)}.png`),
-]
-/** Index into RING_FILES of the one frame to show. Frames are STACKED and toggled by alpha —
- *  changing an element's texture makes the client rebuild its background (a blank frame),
- *  which with eased values meant several flashes per watering. */
+const RING_FRAME_COUNT  = RING_STEPS  + 1   // 41 frames: 0…40
+const BLOOM_FRAME_COUNT = BLOOM_STEPS + 1   // 21 frames: 0…20
+const RING_SHEET      = `${UI_DIR}ring_sheet.png`
+const RING_SHEET_COLS = 8                    // 8×8 grid, frames in reading order from the top-left
+const RING_TEXEL      = 0.5 / 2048           // half-texel inset so neighbouring cells never bleed in
+/** UVs of one sheet cell, bottom-left vertex clockwise (PBUiBackground.uvs order). */
+function ringUvs(i: number): number[] {
+  const col = i % RING_SHEET_COLS, row = Math.floor(i / RING_SHEET_COLS), k = 1 / RING_SHEET_COLS
+  const u0 = col * k + RING_TEXEL, u1 = (col + 1) * k - RING_TEXEL
+  const v1 = 1 - row * k - RING_TEXEL, v0 = 1 - (row + 1) * k + RING_TEXEL
+  return [u0, v0, u0, v1, u1, v1, u1, v0]
+}
+/** Sheet index of the frame to show. */
 function ringIndex(): number {
   const clamp = (v: number) => Math.max(0, Math.min(1, v))
   return bannerState === 'bloom'
@@ -303,12 +314,21 @@ function uiComponent() {
   const isCount    = bannerState === 'countdown'
   const bannerH    = px(isBloom ? 96 : 122)
   const ringSize   = px(RING_SIZE)
-  const chipTop    = topPx + ringSize + px(GAP)
+  // Seed chip sits BOTTOM CENTRE (KJ 2026-09-20), like an inventory bar. Anchored on the
+  // MEASURED bottom inset rather than a fixed offset, so it rides above whatever the
+  // client owns down there — the phone's joystick and interaction cluster included.
+  // Measured relative to the device-inset container, same as topPx: summing the two
+  // pushed the phone's ring 14% in.
+  const bottomPx   = Math.round(Math.max(0, sa.bottom - ins.bottom) * currentVirtualH) + px(EDGE)
   const gardeners  = Math.max(1, playerCount)
   const watered    = Math.round(bannerHealth * TOTAL_PLANTS)
   const need       = Math.max(0, BLOOM_THRESHOLD - watered)
   const pctLabel   = `${Math.round(bannerHealth * 100)}%`
   const ringLabel  = isBloom ? (bloomRemainingLabel || pctLabel) : pctLabel
+  // Tutorial stage 3 pulses the chip until it is opened once. ALPHA only - a size tween
+  // on the mobile (Godot) client is the thing we never do.
+  const pouchHint  = getPouchHint() && !isSeedMenuOpen()
+  const hintAlpha  = 0.45 + 0.45 * (Math.sin(Date.now() / 420) * 0.5 + 0.5)
 
   const title = isBloom ? (bannerBloomLabel || 'The Garden is in Full Bloom!')
               : isCount ? `Hold 80% for ${bannerCountdown} to wake the bloom`
@@ -336,23 +356,20 @@ function uiComponent() {
 
       {/* ── Test Panel — MOUNTED for v2 dev; comment out before production deploys ── */}
       <TestPanelUi />
-      {/* Dev calibration line (remove with the test panel) */}
+      {/* Dev calibration line — SHOW_DEV_OVERLAY, off by default (KJ 2026-09-21) */}
       <Label
         value={`${getFps()} fps${getTestPotCount() > 0 ? ` with ${getTestPotCount()} test planters` : ''} | ${getCanvasCalibration()}`}
         fontSize={fs(11)}
         color={{ r: 1, g: 1, b: 1, a: 0.7 }}
-        uiTransform={{ positionType: 'absolute', position: { left: '30%', bottom: 4 }, width: '40%', height: fs(16) }}
+        uiTransform={{ display: SHOW_DEV_OVERLAY ? 'flex' : 'none', positionType: 'absolute', position: { left: '30%', bottom: 4 }, width: '40%', height: fs(16) }}
       />
 
       {/* ═════ HEALTH RING — top right, the resting HUD. Tap to open the banner. ═════ */}
       <UiEntity uiTransform={{ positionType: 'absolute', position: { top: topPx, right: pct(rightPct) }, width: ringSize, height: ringSize }}>
-        {RING_FILES.map((src, i) => (
-          <UiEntity
-            key={src}
-            uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize }}
-            uiBackground={{ textureMode: 'stretch', texture: { src }, color: { r: 1, g: 1, b: 1, a: i === frame ? 1 : 0 } }}
-          />
-        ))}
+        <UiEntity
+          uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize }}
+          uiBackground={{ textureMode: 'stretch', texture: { src: RING_SHEET }, uvs: ringUvs(frame) }}
+        />
         <UiEntity
           uiTransform={{ positionType: 'absolute', position: { top: 0, left: 0 }, width: ringSize, height: ringSize, alignItems: 'center', justifyContent: 'center' }}
           onMouseDown={() => openBanner()}
@@ -361,20 +378,29 @@ function uiComponent() {
         </UiEntity>
       </UiEntity>
 
-      {/* ═════ SEED CHIP — under the ring; always there (dim when empty) so the menu and
+      {/* ═════ SEED CHIP — bottom centre, always there (dim when empty) so the menu and
           your flower collection are always one tap away ═════ */}
+      <UiEntity uiTransform={{ positionType: 'absolute', position: { bottom: bottomPx, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
       <UiEntity
         uiTransform={{
-          positionType: 'absolute', position: { top: chipTop, right: pct(rightPct) },
           height: px(CHIP_H), flexDirection: 'row', alignItems: 'center',
-          padding: { left: px(14), right: px(16) }, borderRadius: px(CHIP_H / 2),
+          padding: { left: px(20), right: px(22) }, borderRadius: px(CHIP_H / 2),
         }}
-        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
-        onMouseDown={() => toggleSeedMenu()}
+        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : pouchHint ? { ...GOLD, a: hintAlpha } : DARK }}
+        onMouseDown={() => { notePouchOpened(); toggleSeedMenu() }}
       >
-        <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(8) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
+        <UiEntity uiTransform={{ width: px(CHIP_GLYPH), height: px(CHIP_GLYPH), margin: { right: px(12) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
         <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: seedCount > 0 ? 1 : 0.55 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
-        <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(12), height: px(12), margin: { left: px(10) }, borderRadius: px(6) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
+        <UiEntity uiTransform={{ display: seedRare > 0 ? 'flex' : 'none', width: px(18), height: px(18), margin: { left: px(14) }, borderRadius: px(9) }} uiBackground={{ color: { ...GOLD, a: 1 } }} />
+      </UiEntity>
+      {/* ? — "how the garden works", beside the pouch so both live in one place */}
+      <UiEntity
+        uiTransform={{ width: px(CHIP_H), height: px(CHIP_H), margin: { left: px(GAP) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(CHIP_H / 2) }}
+        uiBackground={{ color: isInfoOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
+        onMouseDown={() => toggleInfo()}
+      >
+        <Label value="?" fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: 0.9 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+      </UiEntity>
       </UiEntity>
 
       {/* ═════ BANNER — top centre, opens on change, alpha fade only ═════ */}
@@ -405,7 +431,7 @@ function uiComponent() {
       <UiEntity uiTransform={{ display: toastVisible ? 'flex' : 'none', positionType: 'absolute', position: { top: toastY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
         <UiEntity uiTransform={{ height: px(PILL_H), flexDirection: 'row', alignItems: 'center', padding: { left: px(PILL_PAD_X - 6), right: px(PILL_PAD_X) }, borderRadius: px(PILL_H / 2) }} uiBackground={{ color: DARK }}>
           <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(10) } }} uiBackground={{ textureMode: 'stretch', texture: { src: glyph.src }, color: { ...glyph.tint, a: 1 } }} />
-          <Label value={toastText} fontSize={fs(PILL_FONT)} color={{ ...CREAM, a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+          <Label value={toastText} fontSize={fs(PILL_FONT)} color={{ ...(toastColor ?? CREAM), a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
 
@@ -426,7 +452,11 @@ function uiComponent() {
         </UiEntity>
       </UiEntity>
 
-      <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} rightPct={pct(rightPct)} belowChipPx={chipTop + px(CHIP_H) + px(GAP)} />
+      <BloomFinaleUi px={px} fs={fs} />
+      <DiscoveryCardUi px={px} fs={fs} mobile={mobile} />
+      <MilestoneCardUi px={px} fs={fs} mobile={mobile} />
+      <InfoPanelUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
+      <SeedMenuUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
 
     </UiEntity>
     </UiEntity>

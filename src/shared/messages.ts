@@ -33,6 +33,10 @@ export const room = registerMessages({
   /** Server → gatherer: the player's live seed pouch (after each gather, and on join).
    *  countsJson = JSON number[8], one count per rarity tier (index = tier id). */
   pouchUpdate:      Schemas.Map({ countsJson: Schemas.String }),
+  /** Server → all (and joiners): this bloom's golden seed. Position is computed on each
+   *  client from goldenSeedPos((now − spawnedAt), pathSeed); caught via gatherSeed with
+   *  its id. Timestamps are Int64 — Schemas.Number corrupts 13-digit ms values. */
+  goldenSeed:       Schemas.Map({ id: Schemas.String, pathSeed: Schemas.Number, spawnedAt: Schemas.Int64, endsAt: Schemas.Int64, serverNow: Schemas.Int64 }),
 
   // ── v2: seed boxes ───────────────────────────────────────
   /** Player taps an empty box to plant a seed from their pouch (rarityTier = which one). */
@@ -60,14 +64,46 @@ export const room = registerMessages({
   collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
   /** Hold one keepsake in your hand (by collection index), or -1 to put it away. */
   holdFlower:       Schemas.Map({ flowerIndex: Schemas.Number }),
-  /** Server → everyone: what a gardener holds (flower '' = empty hand). Also sent per holder on join. */
-  heldFlower:       Schemas.Map({ address: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
+  /** Equip a seed of this rarity tier into your hand, REPLACING whatever was there —
+   *  a held keepsake included. -1 goes back to the default (the rarest seed you hold,
+   *  shown only when your hands are otherwise free). */
+  holdSeed:         Schemas.Map({ rarityTier: Schemas.Number }),
+  /** Server → everyone: what a gardener holds (flower '' = empty hand). Also sent per holder on join.
+   *  seedTier (v2): the rarest seed in their pouch, shown in the SAME hand when they hold no
+   *  keepsake — a keepsake always wins, so the two can never collide. -1 = no seed to show. */
+  heldFlower:       Schemas.Map({ address: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number, seedTier: Schemas.Number }),
   /** Server → receiver of a gift. */
   giftReceived:     Schemas.Map({ from: Schemas.String, flower: Schemas.String, rarityTier: Schemas.Number }),
   /** Server → player: short feedback toast (rejections and confirmations). Broadcast when untargeted. */
   notice:           Schemas.Map({ text: Schemas.String }),
   /** Server → all / joining player: every tribute plant (Phase 5b). json = TributeRecord[]. */
   tributesUpdate:   Schemas.Map({ json: Schemas.String }),
+
+  // ── v2: onboarding ───────────────────────────────────────
+  /** Server → player: which of the two onboarding firsts this gardener has already
+   *  done. Persisted per wallet (player Storage 'onboarding'), so the lesson never
+   *  replays for someone who has done it — and a gardener who watered last visit but
+   *  never got as far as planting still gets the planting half next time.
+   *  Sent on full sync and again after each first. */
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, pouchOpened: Schemas.Boolean }),
+  /** Client → server: I opened the seed pouch for the first time. Ends the tutorial stage
+   *  that pulses the chip (Fin 2026-09-21 never noticed the pouch existed). */
+  markPouchOpened:  Schemas.Map({}),
+  /** Server → one player: every species they have ever REVEALED, as a JSON string[] of
+   *  species ids. The Almanac's source of truth, deliberately separate from `flowers`:
+   *  a flower left on show in its planter (GDD 3.1) is discovered but not kept. */
+  discoveredUpdate: Schemas.Map({ listJson: Schemas.String }),
+  /** Server → one player: an Almanac milestone just paid out. Celebration only — the
+   *  client DERIVES which rungs are earned from the species count it already has, so
+   *  nothing here needs re-sending on join. */
+  milestoneReached: Schemas.Map({ title: Schemas.String, species: Schemas.Number, seedTier: Schemas.Number, planters: Schemas.Number }),
+  /** Client → server: hold this empty planter for me while the tutorial points at it.
+   *  The CLIENT picks which one — the scene server has no avatar positions, so "nearest
+   *  free planter" can only be computed where the player is. */
+  reserveBox:       Schemas.Map({ boxId: Schemas.String }),
+  /** Server → player: the planter now held for them. boxId '' = request refused (taken,
+   *  already held by someone else, or it would have used up the last free planter). */
+  boxReserved:      Schemas.Map({ boxId: Schemas.String, expiresAt: Schemas.Int64 }),
 
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */
@@ -95,16 +131,28 @@ export const room = registerMessages({
   /** Broadcast when a plant's watered state changes (water or expiry).
    *  expiresInMs: server-computed time until this plant dries (0 when not watered) —
    *  decay scales with gardeners present, so the client must not guess it. */
-  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number, tier: Schemas.Number }),
+  /** `tier` is the lifetime-waters FLAIR tier; `almanac` is how many Almanac milestone
+   *  rungs the waterer has claimed (0 = none). Two different ladders, both shown beside
+   *  the name — one for care given, one for flowers found. */
+  plantStateUpdate: Schemas.Map({ plantId: Schemas.String, isWatered: Schemas.Boolean, wateredAt: Schemas.Int64, wateredBy: Schemas.String, expiresInMs: Schemas.Number, tier: Schemas.Number, almanac: Schemas.Number }),
   /** Broadcast when the bloom threshold is reached.
    *  scale: bloomScaleFor(gardeners) (0–1] — 1 = full-garden bloom, below 1 = the
    *  smaller, quieter scaled bloom. variant: BLOOM_VARIANTS id rolled by the server (v2 Phase 6). */
   /** elapsedMs: how far into the bloom we already are — 0 on the live broadcast, >0 when
-   *  re-sent to a late joiner, so their 6-minute countdown matches everyone else's. */
-  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number }),
+   *  re-sent to a late joiner, so their countdown matches everyone else's. durationMs: this
+   *  bloom's length (bloomDurationMs — 2 min solo … 6 min at 6+ contributors). */
+  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number, durationMs: Schemas.Number }),
   /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
    *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
+  /** Server → each gardener present when a bloom ENDS: what the garden just did, and
+   *  what they did in it. Sent per player (the you* fields differ) right before the
+   *  cycle counters are cleared. The during-bloom contributor names are untouched —
+   *  this is the closing beat, so a bloom finishes on a result instead of just stopping. */
+  bloomSummary:     Schemas.Map({
+    gardeners: Schemas.Number, waters: Schemas.Number, seeds: Schemas.Number, rares: Schemas.Number,
+    youWaters: Schemas.Number, youSeeds: Schemas.Number, youRares: Schemas.Number,
+  }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),
   /** Top-10 boards — sent to all on water, to joining player on join.
@@ -115,6 +163,9 @@ export const room = registerMessages({
 
   // ── Test-panel only — parked at the tail (see header note) ──
   // Expected casualties of the position cap; verify with the test panel.
+  /** Test-panel only — wipe MY onboarding record so the whole tutorial replays. Without
+   *  this, whoever built the tutorial can never see it again after doing it once. */
+  adminResetOnboarding: Schemas.Map({}),
   /** Test-panel only — tells the server to bypass the daily limit for this player. */
   setTestOverride:  Schemas.Map({ enabled: Schemas.Boolean }),
   /** Test-panel only — triggers bloom on the server so all clients sync correctly.
@@ -127,4 +178,15 @@ export const room = registerMessages({
   /** Test-panel only — cancels any bloom-sustain hold and ends an active bloom immediately,
    *  same as a normal bloomReset. Idempotent: a no-op if nothing is active/holding. */
   adminResetBloom:  Schemas.Map({}),
+  /** Test-panel only — tidy up the longest-away owner's planter now (crowding rule,
+   *  GDD §3.1), ignoring the reserve, the minimum-away time and whether they're here. */
+  adminTidyPlanter: Schemas.Map({}),
+  /** Test-panel only (admin): lift the planter cap for the sender; each planting rolls a RANDOM
+   *  tier and uses no seed. In-memory — a server restart turns it off. */
+  adminUnlimitedPlanters: Schemas.Map({ on: Schemas.Boolean }),
+  /** Planter layout tool (test panel, admin): save the draft layout (JSON array of
+   *  { x, z, rot }) to world Storage 'planterDraft'; json '' = ask for the saved draft. */
+  adminPlanterDraft: Schemas.Map({ json: Schemas.String }),
+  /** Server → admin: the saved planter draft ('' = none yet). */
+  planterDraft:      Schemas.Map({ json: Schemas.String }),
 })

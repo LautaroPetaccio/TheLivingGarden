@@ -13,7 +13,7 @@
 //   send    →  holdFlower       { flowerIndex }           (-1 = put away)
 //   receive ←  heldFlower       { address, flower, rarityTier }   (anyone's hand, incl. mine)
 //
-// Held flower: one keepsake shown in a gardener's left hand, for everyone. Interlocks
+// Held flower: one keepsake shown in a gardener's right hand, for everyone. Interlocks
 // with gifting — a world tap on a player with nothing picked in the menu gives the flower
 // you're holding; giving away the last one of that kind empties your hand (server).
 //
@@ -39,9 +39,11 @@ import { Quaternion } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
-import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex } from './playerInventory'
+import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex, setDiscovered } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
-import { rarityTierById, plantSpeciesById } from './shared/config'
+import { rarityTierById, plantSpeciesById, withArticle, seedModelSrc, SEED_HAND_SCALE } from './shared/config'
+import { isBloomFlowerActive } from './bloomFlowerSystem'
+import { playSfx } from './sounds'
 
 // ---------------------------------------------------------------
 // Config
@@ -52,12 +54,19 @@ const TAG_OFFSET_Y  = 0.9                           // AAPT_POSITION anchors at 
 const GIFT_DISTANCE = 6     // m — mobile is third-person only
 const SCAN_MS       = 1_000
 const TOAST_MS      = 5_000
-// Held flower in the LEFT hand — the right hand belongs to the bloom contributor's
-// hand-flower (bloomFlowerSystem, 10 min after a bloom), so the two never overlap.
-// Offset/rotation copied from that one; size is a fraction of the species' planter size.
+// Held flower in the RIGHT hand with the bloom contributor's hand-flower offset/rotation
+// (bloomFlowerSystem) so it faces forward the same way — the left hand's bone is mirrored
+// and the same rotation pointed the flower backwards (KJ 2026-09-18). My own keepsake hides
+// while that bloom flower is out (it's local-only, so other players still see the keepsake).
+// Size is a fraction of the species' planter-box size.
 const HAND_K        = 0.4
 const HAND_OFFSET   = { x: 0, y: 0.06, z: 0 }
 const HAND_ROTATION = Quaternion.fromEulerDegrees(90, 0, 0)
+/** HAND_ROTATION tips a plant forward out of the fist, which is right for a flower held
+ *  like a bouquet but lays a seed on its side. Undo it so the seed stands upright in the
+ *  palm, and lift it clear of the hand mesh. */
+const SEED_HAND_ROTATION = Quaternion.fromEulerDegrees(-90, 0, 0)
+const SEED_HAND_LIFT     = 0.05
 
 // ---------------------------------------------------------------
 // State
@@ -66,6 +75,7 @@ const HAND_ROTATION = Quaternion.fromEulerDegrees(90, 0, 0)
 let scanAccum = 0
 const tags = new Map<string, Entity>()   // remote address → AvatarAttach parent
 const hands = new Map<string, Entity>()  // address → held-flower AvatarAttach parent (mine included)
+let   myHolder: Entity | null = null       // my keepsake's holder — scaled to 0 while the bloom flower is out
 
 
 
@@ -90,33 +100,57 @@ function tryGift(toAddress: string): void {
   }
   console.log(`[Gift] offering ${flowers[flowerIndex]?.flower ?? '?'} to ${toAddress}`)
   room.send('giftFlower', { toAddress, flowerIndex })
+  playSfx('gift')
 }
 
 function localAddress(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 
-/** Show (or clear, flower '') what a gardener holds. Mine attaches to the local avatar. */
-function setHand(address: string, flower: string, rarityTier: number): void {
+/** Show what a gardener holds in their right hand: their keepsake if they hold one,
+ *  otherwise the rarest seed in their pouch (seedTier -1 = nothing to show). The server
+ *  decides which, so the two can never collide and only one entity is ever attached. */
+function setHand(address: string, flower: string, rarityTier: number, seedTier: number): void {
   const old = hands.get(address)
   if (old !== undefined) { engine.removeEntityWithChildren(old); hands.delete(address) }
   const mine = address === localAddress()
-  if (mine) setHeld(flower ? { flower, rarityTier } : null)
+  if (mine) { setHeld(flower ? { flower, rarityTier } : null); myHolder = null }
   const species = flower ? plantSpeciesById(flower) : null
-  if (!species) return
+  if (!species && seedTier < 0) return
   const parent = engine.addEntity()
   AvatarAttach.create(parent, mine
-    ? { anchorPointId: AvatarAnchorPointType.AAPT_LEFT_HAND }
-    : { avatarId: address, anchorPointId: AvatarAnchorPointType.AAPT_LEFT_HAND })
+    ? { anchorPointId: AvatarAnchorPointType.AAPT_RIGHT_HAND }
+    : { avatarId: address, anchorPointId: AvatarAnchorPointType.AAPT_RIGHT_HAND })
   const holder = engine.addEntity()
   Transform.create(holder, { parent, position: HAND_OFFSET, rotation: HAND_ROTATION })
+  if (mine) { myHolder = holder; syncMyHand() }
   const model = engine.addEntity()
-  const k = species.scale * HAND_K
-  Transform.create(model, {
-    parent: holder,
-    position: { x: species.offsetX * HAND_K, y: species.baseYOffset * HAND_K, z: species.offsetZ * HAND_K },
-    scale: { x: k, y: k, z: k },
-  })
-  GltfContainer.create(model, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  if (species) {
+    const k = species.scale * HAND_K
+    Transform.create(model, {
+      parent: holder,
+      position: { x: species.offsetX * HAND_K, y: species.baseYOffset * HAND_K, z: species.offsetZ * HAND_K },
+      scale: { x: k, y: k, z: k },
+    })
+    GltfContainer.create(model, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  } else {
+    // Seed: one shared 152-tri mesh per tier, centred near its own origin, so it needs
+    // no per-species offsets — just the scale that brings it down to a hand.
+    Transform.create(model, {
+      parent: holder,
+      position: { x: 0, y: SEED_HAND_LIFT, z: 0 },
+      rotation: SEED_HAND_ROTATION,
+      scale: { x: SEED_HAND_SCALE, y: SEED_HAND_SCALE, z: SEED_HAND_SCALE },
+    })
+    GltfContainer.create(model, { src: seedModelSrc(seedTier), visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  }
   hands.set(address, parent)
+}
+
+/** Hide my keepsake while the bloom hand-flower occupies the same hand. */
+function syncMyHand(): void {
+  if (myHolder === null) return
+  const k = isBloomFlowerActive() ? 0 : 1
+  const tr = Transform.getMutable(myHolder)
+  if (tr.scale.x !== k) tr.scale = { x: k, y: k, z: k }
 }
 
 function createTag(address: string): Entity {
@@ -138,6 +172,7 @@ function tagScanSystem(dt: number): void {
   scanAccum += dt * 1_000
   if (scanAccum < SCAN_MS) return
   scanAccum = 0
+  syncMyHand()
 
   const present = new Set<string>()
   for (const [entity, ident] of engine.getEntitiesWith(PlayerIdentityData)) {
@@ -159,6 +194,13 @@ function tagScanSystem(dt: number): void {
 
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupGiftSystem(): void {
+  room.onMessage('discoveredUpdate', (data) => {
+    let ids: string[] = []
+    try { ids = JSON.parse(data.listJson) } catch { ids = [] }
+    setDiscovered(ids)
+    console.log(`[Gift] discovered: ${ids.length} species`)
+  })
+
   room.onMessage('collectionUpdate', (data) => {
     let list: Keepsake[] = []
     try { list = JSON.parse(data.flowersJson) } catch { list = [] }
@@ -168,12 +210,13 @@ export function setupGiftSystem(): void {
   })
 
   room.onMessage('giftReceived', (data) => {
+    playSfx('gift')
     const tierName = rarityTierById(data.rarityTier).name
-    showToast(`${data.from} gave you a ${plantSpeciesById(data.flower)?.name ?? data.flower}${data.rarityTier > 0 ? ` — a ${tierName} one!` : ''}`, TOAST_MS, false)
+    showToast(`${data.from} gave you ${withArticle(plantSpeciesById(data.flower)?.name ?? data.flower)}${data.rarityTier > 0 ? ` — ${withArticle(tierName)} one!` : ''}`, TOAST_MS, false)
   })
 
   room.onMessage('heldFlower', (data) => {
-    setHand(data.address.toLowerCase(), data.flower, data.rarityTier)
+    setHand(data.address.toLowerCase(), data.flower, data.rarityTier, data.seedTier ?? -1)
   })
 
   room.onMessage('notice', (data) => {
@@ -184,8 +227,9 @@ export function setupGiftSystem(): void {
   // track) and the one call that sends a flower.
   registerGiftApi({
     gardenersHere: () => [...tags.keys()].map(address => ({ address, name: getPlayer({ userId: address })?.name || `${address.slice(0, 6)}...` })),
-    give: (toAddress, flowerIndex) => { console.log(`[Gift] menu gift #${flowerIndex} to ${toAddress}`); room.send('giftFlower', { toAddress, flowerIndex }) },
+    give: (toAddress, flowerIndex) => { console.log(`[Gift] menu gift #${flowerIndex} to ${toAddress}`); room.send('giftFlower', { toAddress, flowerIndex }); playSfx('gift') },
     hold: (flowerIndex) => { console.log(`[Gift] hold #${flowerIndex}`); room.send('holdFlower', { flowerIndex }) },
+    holdSeed: (rarityTier) => { console.log(`[Gift] equip seed tier ${rarityTier}`); room.send('holdSeed', { rarityTier }) },
   })
   engine.addSystem(tagScanSystem)
   console.log(`[Gift] ready · notice listeners=${room.listenerCount('notice')}`)

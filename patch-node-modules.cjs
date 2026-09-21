@@ -7,6 +7,7 @@
 //      globalThis.__BABYLON_*__ so ESM babylon can be preloaded via hammurabi.mjs
 //   2. @dcl/sdk-commands     — replace npx spawn with local hammurabi.mjs spawn
 //      so the preloader is always used when running `npm start`
+//   3. @dcl/sdk-commands     — linker-dapp header forwarding (deploy signing crash)
 
 const fs   = require('fs')
 const path = require('path')
@@ -43,7 +44,10 @@ function patchDir(dir) {
   }
 }
 
-if (fs.existsSync(hamDir)) {
+// EXPERIMENT (exp/hammurabi-upgrade): stock SDK flow — no pinned hammurabi, no preloader swap.
+const LEGACY_HAMMURABI = false
+
+if (LEGACY_HAMMURABI && fs.existsSync(hamDir)) {
   console.log('[postinstall] Patching @dcl/hammurabi-server ...')
   patchDir(hamDir)
 
@@ -102,7 +106,7 @@ const sdkCmdFile = path.join(
   'node_modules/@dcl/sdk-commands/dist/commands/start/hammurabi-server.js'
 )
 
-if (fs.existsSync(sdkCmdFile)) {
+if (LEGACY_HAMMURABI && fs.existsSync(sdkCmdFile)) {
   console.log('[postinstall] Patching @dcl/sdk-commands ...')
   let src = fs.readFileSync(sdkCmdFile, 'utf8')
 
@@ -131,4 +135,26 @@ if (fs.existsSync(sdkCmdFile)) {
   }
 } else {
   console.warn('[postinstall] @dcl/sdk-commands hammurabi-server.js not found — skipping.')
+}
+
+// ── 3. Patch sdk-commands linker-dapp routes.js — deploy signing ──────────────
+// The /auth/* proxy spreads the incoming Headers object into fetch() init. The spread
+// copies a symbol-keyed internal property and Node 22's fetch rejects it:
+// "Proxy error: Request constructor: init.headers is a symbol" → the linker page
+// can't sign. Copy the header entries only. (sdk-commands 7.26.1, 2026-09-18)
+
+const linkerRoutesFile = path.join(root, 'node_modules/@dcl/sdk-commands/dist/linker-dapp/routes.js')
+const LINKER_SPREAD = '...ctx.request.headers,'
+const LINKER_FIX    = "...(typeof ctx.request.headers?.entries === 'function' ? Object.fromEntries(ctx.request.headers.entries()) : Object.fromEntries(Object.entries(ctx.request.headers ?? {}))), // patched: symbol-keyed header crash"
+
+if (fs.existsSync(linkerRoutesFile)) {
+  let src = fs.readFileSync(linkerRoutesFile, 'utf8')
+  if (src.includes(LINKER_SPREAD)) {
+    fs.writeFileSync(linkerRoutesFile, src.replace(LINKER_SPREAD, LINKER_FIX))
+    console.log('[postinstall] patched: linker-dapp/routes.js — header forwarding')
+  } else {
+    console.log('[postinstall] linker-dapp/routes.js — already patched or changed upstream')
+  }
+} else {
+  console.warn('[postinstall] linker-dapp/routes.js not found — skipping.')
 }

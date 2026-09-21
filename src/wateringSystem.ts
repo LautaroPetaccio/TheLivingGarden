@@ -15,6 +15,7 @@ import {
   Animator,
   AudioSource,
   GltfContainer,
+  GltfNodeModifiers,
   TextShape,
   Billboard,
   BillboardMode,
@@ -31,9 +32,8 @@ import {
   VisibilityComponent,
   Tween,
   EasingFunction,
-  TweenSequence,
-  TweenLoop,
   timers,
+  GltfContainerLoadingState,
   PlayerIdentityData,
   MaterialTransparencyMode,
 } from '@dcl/sdk/ecs'
@@ -42,11 +42,11 @@ import { onEnterSceneObservable } from '@dcl/sdk/observables'
 import { setupPetalSystem, petalParticleSystem }                                                                   from './petalSystem'
 import { setupBloomSystem, triggerBloomEvent, endBloom, startBloomClose, isBloomActive, playBloomAudioAccent }    from './bloomSystem'
 import { startPreBloomEffects, startBloomPhases, startBloomCooldown, cancelPreBloom }                             from './bloomEvent'
-import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, sparkleSystem, triggerBloomSparkles, endBloomSparkles, bloomSparkleSystem } from './sparkleSystem'
+import { setupSparkleSystem, triggerSparkle, triggerWateringTribute, triggerBloomSparkles, endBloomSparkles, bloomSparkleSystem } from './sparkleSystem'
 import { setupAmbientFX, triggerGroundRipple, stopFireflies, ambientFXSystem }                                        from './ambientFX'
 import { setupProgressBars, updateProgressBars, setBloomRatio } from './progressBarsSystem'
 import { setupGroundLights, updateGroundLights, triggerGroundLightBurst }                       from './groundLightSystem'
-import { flairIcon, bloomSustainMs, bloomVariantById, bloomFxLevel } from './shared/config'
+import { flairIcon, almanacTitleByRank, bloomSustainMs, bloomVariantById, bloomFxLevel, withArticle } from './shared/config'
 import { setBloomSparklePalette } from './sparkleSystem'
 import { setAmbientPalette } from './ambientFX'
 import { startMoonlight, stopMoonlight } from './moonlight'
@@ -61,6 +61,7 @@ import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './pla
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
+import { setupPlanterLayoutTool } from './planterLayoutTool'
 import { setupTributeSystem } from './tributeSystem'
 import { PLANT_LAYOUT } from './shared/layout'
 import { Quaternion, Color4 } from '@dcl/sdk/math'
@@ -101,7 +102,8 @@ const ANIM_CLOSE_PLAY_SPEED = 0.25         // playback speed — slow wilt
 const ANIM_TRANSITION_MS    = 6_000        // ms — duration of Play clip
 const ANIM_CLOSE_PLAY_MS    = Math.round(6_033 / ANIM_CLOSE_PLAY_SPEED)  // 24 132 ms at 0.25×
 const WILT_SOUND_DELAY_MS   = 5_000        // ms after ClosePlay starts before wilt sound plays
-const ANIMATOR_INIT_DELAY_MS = 1000     // ms — defer Animator.create until GLBs load
+// LoadingState values (const enum in @dcl/ecs internals, not re-exported — same as boxSystem)
+const LS_NOT_FOUND = 2, LS_FINISHED_WITH_ERROR = 3, LS_FINISHED = 4
 
 // ── Unhealthy Rose (shown while plant is not watered) ─────────
 const UNHEALTHY_ROSE_SRC  = 'assets/scene/Models/UnhealthyRose/UnhealthyRose.glb'
@@ -128,7 +130,7 @@ const WATER_FX_MS   = 400
 const WATER_ANIM_MS = 1500
 
 // ── Water drop indicator ──────────────────────────────────────
-const WATER_DROP_SRC = 'assets/scene/Models/waterDrop/waterDrop.glb'
+const WATER_DROP_SRC = 'assets/scene/Models/waterDrop/waterDrop_bob.glb'   // waterDrop.glb + baked 'Bob' clip
 const WATER_DROP_Y   = 0.8   // local Y above plant pivot
 const DROP_FADE_MS   = 1600  // ms for scale-in / scale-out tween
 
@@ -136,11 +138,8 @@ const DROP_FADE_MS   = 1600  // ms for scale-in / scale-out tween
 const waterDropMap = new Map<Entity, Entity>()
 
 // ── Droplet idle float animation ──────────────────────────────
-const DROP_ANIM_AMPLITUDE = 0.065   // metres (within 0.05–0.08)
-const DROP_ANIM_SPEED     = 1.1     // radians / second — slow, calm
-// The bob is a renderer-side yoyo Tween on a parent 'bob' entity (the drop itself carries the
-// fade scale Tween — one Tween per entity). Was a per-frame Transform write on all 38 drops.
-const DROP_BOB_HALF_MS    = Math.round(Math.PI / DROP_ANIM_SPEED * 1000)
+// Baked into waterDrop_bob.glb: ±0.065 m, 1.1 rad/s (5.7 s period) — see setDropBob.
+// The drop carries the fade scale Tween; its parent 'bob' entity just holds the height.
 
 // ── Sounds ────────────────────────────────────────────────────
 const SND_HOVER    = 'assets/scene/Sounds/hover.mp3'
@@ -276,6 +275,11 @@ function setLabelFlair(plant: Entity, tier: number): void {
   })
 }
 const wateredByNames    = new Map<Entity, string>()   // entity → display name
+// entity → the waterer's Almanac title, '' for most people. Text rather than an icon,
+// unlike the flair tier: there is no art for the four rungs, and the title IS the reward,
+// so it has to be readable. It only appears once someone has found 10 species, which is
+// what keeps it off nearly every label and stops the garden turning into a wall of text.
+const wateredByTitles   = new Map<Entity, string>()
 
 const bloomContributors = new Set<string>()           // unique waterer names this bloom cycle
 let   contributorLabelEntity: Entity | null = null
@@ -285,19 +289,98 @@ const entityPlantId     = new Map<Entity, string>()   // entity → plantId (for
 /** plant entity → its UnhealthyRose entity */
 const roseMap = new Map<Entity, Entity>()
 
+// ── Plant / rose animators: created when each GLB reports loaded ──────────────
+const pendingPlantAnimators = new Set<Entity>()
+const pendingRoseAnimators  = new Set<Entity>()
+const pendingDropAnimators  = new Set<Entity>()
+
+/** LS_FINISHED → true; error/not-found → dropped (logged); still loading → false. */
+function glbReady(e: Entity, pending: Set<Entity>): boolean {
+  const st = GltfContainerLoadingState.getOrNull(e)?.currentState
+  if (st === LS_NOT_FOUND || st === LS_FINISHED_WITH_ERROR) {
+    pending.delete(e)
+    console.log(`[WateringSystem] GLB failed to load for entity ${e} — no animator`)
+    return false
+  }
+  return st === LS_FINISHED
+}
+
+function plantAnimatorInitSystem(): void {
+  for (const entity of [...pendingPlantAnimators]) {
+    if (!glbReady(entity, pendingPlantAnimators)) continue
+    pendingPlantAnimators.delete(entity)
+    Animator.createOrReplace(entity, {
+      states: [
+        { clip: ANIM_DROOPY_STATE,  playing: false, loop: true  },
+        { clip: ANIM_TO_HEALTHY,    playing: false, loop: false },
+        { clip: ANIM_HEALTHY_STATE, playing: false, loop: true  },
+        { clip: ANIM_CLOSE_PLAY,    playing: false, loop: false, speed: ANIM_CLOSE_PLAY_SPEED },
+      ],
+    })
+    // The state as of NOW: watered, or held healthy by a bloom (bloomTriggered snaps
+    // unwatered plants to healthy; its playSingleAnimation was a no-op before this existed).
+    const healthy = (PlantData.getOrNull(entity)?.isWatered ?? false) || isBloomActive() || bloomActive
+    if (isShown(entity)) Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
+  }
+  for (const drop of [...pendingDropAnimators]) {
+    if (!glbReady(drop, pendingDropAnimators)) continue
+    pendingDropAnimators.delete(drop)
+    Animator.createOrReplace(drop, { states: [{ clip: DROP_BOB_CLIP, playing: shownDrops.has(drop), loop: true, speed: 0.85 + Math.random() * 0.3 }] })
+  }
+  for (const rose of [...pendingRoseAnimators]) {
+    if (!glbReady(rose, pendingRoseAnimators)) continue
+    pendingRoseAnimators.delete(rose)
+    Animator.createOrReplace(rose, {
+      states: [
+        { clip: ANIM_UNHEALTHY_IDLE, playing: false, loop: true  },
+        { clip: ANIM_CLOSE_PLAY,     playing: false, loop: false },
+      ],
+    })
+    if (isShown(rose)) Animator.playSingleAnimation(rose, ANIM_UNHEALTHY_IDLE, true)
+  }
+}
+
+// Each plant is a PAIR of skinned, animated GLBs (rose + healthy plant) swapped by
+// visibility. Hiding a model doesn't stop its Animator, so 38 hidden twins kept skinning
+// every frame. The hidden one is stopped; whoever shows it starts its clip (every
+// showPlant call site is followed by playSingleAnimation; showRose restarts the idle).
 function showRose(entity: Entity)  {
-  const r = roseMap.get(entity); if (r) VisibilityComponent.createOrReplace(r, { visible: true  })
+  const r = roseMap.get(entity); if (!r) return
+  VisibilityComponent.createOrReplace(r, { visible: true })
+  if (Animator.has(r)) Animator.playSingleAnimation(r, ANIM_UNHEALTHY_IDLE, false)
 }
 function hideRose(entity: Entity)  {
-  const r = roseMap.get(entity); if (r) VisibilityComponent.createOrReplace(r, { visible: false })
+  const r = roseMap.get(entity); if (!r) return
+  VisibilityComponent.createOrReplace(r, { visible: false })
+  if (Animator.has(r)) Animator.stopAllAnimations(r)
 }
 function showPlant(entity: Entity) { VisibilityComponent.createOrReplace(entity, { visible: true  }) }
-function hidePlant(entity: Entity) { VisibilityComponent.createOrReplace(entity, { visible: false }) }
+function hidePlant(entity: Entity) {
+  VisibilityComponent.createOrReplace(entity, { visible: false })
+  if (Animator.has(entity)) Animator.stopAllAnimations(entity)
+}
+const isShown = (e: Entity): boolean => VisibilityComponent.getOrNull(e)?.visible !== false
+
+// The bob is BAKED into waterDrop_bob.glb (clip 'Bob', node translation ±0.065 m,
+// one 5.7 s sine period — generated from waterDrop.glb, geometry untouched). It used to be a
+// looping Tween, and the explorer writes a looping-tweened entity's Transform back to the scene
+// EVERY frame: 38 drops = 38 inbound messages per tick at rest. GLB animation has no write-back.
+// Each drop gets a slightly different speed so they drift out of step instead of bobbing as one.
+const DROP_BOB_CLIP = 'Bob'
+const shownDrops   = new Set<Entity>()   // drops currently showing (their bob should play)
+
+function setDropBob(drop: Entity, on: boolean): void {
+  if (on) shownDrops.add(drop); else shownDrops.delete(drop)
+  const a = Animator.getMutableOrNull(drop)
+  const st = a?.states[0]
+  if (st && st.playing !== on) st.playing = on
+}
 
 function setDropFade(plantEntity: Entity, direction: 'in' | 'out') {
   const drop = waterDropMap.get(plantEntity)
   if (!drop) return
   if (direction === 'in') {
+    setDropBob(drop, true)
     Tween.setScale(drop,
       { x: 0.001, y: 0.001, z: 0.001 },
       { x: 1,     y: 1,     z: 1     },
@@ -311,6 +394,7 @@ function setDropFade(plantEntity: Entity, direction: 'in' | 'out') {
       DROP_FADE_MS,
       EasingFunction.EF_EASEINBACK,
     )
+    setDropBob(drop, false)
   }
 }
 
@@ -350,6 +434,7 @@ function setVisible(entity: Entity | null, visible: boolean) {
 // ── Bloom-reset countdown ticker ─────────────────────────────
 let bloomResetTickerGen  = 0
 let bloomResetStartMs: number | null = null
+let bloomDurationMs = BLOOM_RESET_DELAY_MS   // this bloom's length, from bloomTriggered (contributor-scaled)
 
 /** @param elapsedMs how far into the bloom we join (late joiners) — keeps every client's
  *  countdown and end-of-bloom moment aligned with the server's. */
@@ -364,12 +449,12 @@ function startBloomResetTicker(elapsedMs = 0): void {
   // against stale timers firing during a subsequent bloom cycle (test mode).
   timers.setTimeout(() => {
     if (isBloomActive()) startBloomClose()
-  }, Math.max(0, BLOOM_RESET_DELAY_MS - elapsedMs))
+  }, Math.max(0, bloomDurationMs - elapsedMs))
 
   function tick(): void {
     if (bloomResetTickerGen !== myGen) return
     const elapsed   = Date.now() - (bloomResetStartMs ?? Date.now())
-    const remaining = Math.max(0, BLOOM_RESET_DELAY_MS - elapsed)
+    const remaining = Math.max(0, bloomDurationMs - elapsed)
     const totalSecs = Math.ceil(remaining / 1_000)
     const m = Math.floor(totalSecs / 60)
     const s = totalSecs % 60
@@ -377,7 +462,7 @@ function startBloomResetTicker(elapsedMs = 0): void {
       ? (m > 0 ? `${m}m ${s}s` : `${s}s`)
       : '…'
     setBloomResetText(label)
-    updateBloomRemaining(totalSecs > 0 ? `${m}:${String(s).padStart(2, '0')}` : '', remaining)   // HUD ring shows time left
+    updateBloomRemaining(totalSecs > 0 ? `${m}:${String(s).padStart(2, '0')}` : '', remaining, bloomDurationMs)   // HUD ring shows time left
     if (remaining > 0) timers.setTimeout(tick, 1_000)
     // No startBloomClose() here — the dedicated timer above handles it
   }
@@ -964,8 +1049,13 @@ function refreshWateredByLabels(): void {
     const pd   = PlantData.getOrNull(entity)
     const name = wateredByNames.get(entity)
     if (!pd?.isWatered || !name) continue
+    // Only write when the text changes — any TextShape write rebuilds that label's mesh,
+    // and "2m ago" mostly doesn't change between 5 s refreshes.
+    const title = wateredByTitles.get(entity) ?? ''
+    const text = `Watered by ${name}${title ? `\n${title}` : ''}\n${formatTimeAgo(pd.wateredAt)}`
+    if (TextShape.get(labelEntity).text === text) continue
     const ts = TextShape.getMutable(labelEntity)
-    ts.text      = `Watered by ${name}\n${formatTimeAgo(pd.wateredAt)}`
+    ts.text      = text
     // Fixed alpha, matching the flair icon above it (which never fades) — a fade tied to
     // time-to-expiry made the name go fully invisible on any plant watered a while ago,
     // leaving just the flair badge floating with no name under it. Found 2026-09-17.
@@ -1056,16 +1146,15 @@ function setupPlant(plantName: string) {
   // ── Water drop indicator ─────────────────────────────────────
   const bobEnt = engine.addEntity()
   Transform.create(bobEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, parent: anchor })
-  Tween.create(bobEnt, {
-    duration: DROP_BOB_HALF_MS, easingFunction: EasingFunction.EF_EASESINE, currentTime: Math.random(),
-    mode: { $case: 'move', move: { start: { x: 0, y: WATER_DROP_Y - DROP_ANIM_AMPLITUDE, z: 0 }, end: { x: 0, y: WATER_DROP_Y + DROP_ANIM_AMPLITUDE, z: 0 } } },
-  })
-  TweenSequence.create(bobEnt, { sequence: [], loop: TweenLoop.TL_YOYO })
   const dropEnt = engine.addEntity()
   Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: bobEnt })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
-  Billboard.create(dropEnt, { billboardMode: BillboardMode.BM_Y })
+  GltfNodeModifiers.create(dropEnt, { modifiers: [{ path: '', castShadows: false }] })   // 38 small drops — not worth a shadow pass
+  // No Billboard: the drop is a 3D teardrop, symmetric about Y, so facing the camera changed
+  // nothing — yet the explorer re-rotated all 38 every frame.
   waterDropMap.set(entity, dropEnt)
+  shownDrops.add(dropEnt)
+  pendingDropAnimators.add(dropEnt)
 
   // "Watered by" label — hidden until plant is watered
   const wateredByLabel = engine.addEntity()
@@ -1195,51 +1284,20 @@ export function setupWateringSystem(): void {
   for (const name of PLANT_NAMES) setupPlant(name)
   resizeClickboxes()
 
-  // Deferred animator setup — ensures GltfContainers have loaded
-  timers.setTimeout(() => {
-    for (const name of PLANT_NAMES) {
-      try {
-      const entity = engine.getEntityOrNullByName(name)
-      if (!entity) continue
-      const isWatered = PlantData.getOrNull(entity)?.isWatered ?? false
-
-      // demoPlant animator
-      Animator.createOrReplace(entity, {
-        states: [
-          { clip: ANIM_DROOPY_STATE,  playing: false, loop: true  },
-          { clip: ANIM_TO_HEALTHY,    playing: false, loop: false },
-          { clip: ANIM_HEALTHY_STATE, playing: false, loop: true  },
-          { clip: ANIM_CLOSE_PLAY,    playing: false, loop: false, speed: ANIM_CLOSE_PLAY_SPEED },
-        ],
-      })
-      Animator.playSingleAnimation(entity, isWatered ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
-
-      // UnhealthyRose animator
-      const roseEntity = roseMap.get(entity)
-      if (roseEntity) {
-        Animator.createOrReplace(roseEntity, {
-          states: [
-            { clip: ANIM_UNHEALTHY_IDLE, playing: false, loop: true  },
-            { clip: ANIM_CLOSE_PLAY,     playing: false, loop: false },
-          ],
-        })
-        Animator.playSingleAnimation(roseEntity, ANIM_UNHEALTHY_IDLE, true)
-      }
-
-      // Set correct initial visibility
-      if (isWatered) {
-        showPlant(entity)
-        hideRose(entity)
-      } else {
-        hidePlant(entity)
-        showRose(entity)
-      }
-      } catch (err) {
-        // One plant failing (e.g. GLB not loaded yet) must not abort init for the rest
-        console.log(`[WateringSystem] Deferred init failed for ${name}:`, err)
-      }
-    }
-  }, ANIMATOR_INIT_DELAY_MS)
+  // Starting look now (no GLB needed for visibility); animators once each GLB has loaded.
+  // Was one 1 s timer doing both: on a slow/late-joining client it fired before the GLBs
+  // loaded, and when the join sync (incl. an active bloom) arrived first it reset
+  // bloom-healthy plants back to droopy. Server state updates visibility from here on.
+  for (const name of PLANT_NAMES) {
+    const entity = engine.getEntityOrNullByName(name)
+    if (!entity) continue
+    hidePlant(entity)
+    showRose(entity)
+    pendingPlantAnimators.add(entity)
+    const rose = roseMap.get(entity)
+    if (rose) pendingRoseAnimators.add(rose)
+  }
+  engine.addSystem(plantAnimatorInitSystem)
 
   setupPetalSystem()
   setupSparkleSystem()
@@ -1255,7 +1313,6 @@ export function setupWateringSystem(): void {
   engine.addSystem(resetAnimSystem)
   engine.addSystem(emoteWatchSystem)
   engine.addSystem(petalParticleSystem)
-  engine.addSystem(sparkleSystem)
   engine.addSystem(bloomSparkleSystem)
   engine.addSystem(ambientFXSystem)
 
@@ -1306,6 +1363,7 @@ export function setupWateringSystem(): void {
   // cost a full day of playtests to find. Keep every room.onMessage below this line.)
   setupSeedSystem()
   setupBoxSystem()
+  setupPlanterLayoutTool()   // planter editor (admin): re-applies the saved layout draft
   setupTributeSystem()
 
   room.onMessage('notifyServerTime', (data) => {
@@ -1398,7 +1456,7 @@ export function setupWateringSystem(): void {
     currentBloomVariant = data?.variant || 'classic'
     const variant = bloomVariantById(currentBloomVariant)
     if (!isBloomActive() && variant.id !== 'classic') {
-      showToast(`A ${variant.name}! Rare seeds fall thicker tonight`, 6_000, false)
+      showToast(`${withArticle(variant.name, true)}! Rare seeds fall thicker tonight`, 6_000, false)
     }
     // The rare variant changes the light itself — also on a late joiner's re-send
     if (variant.id === 'moonlit') startMoonlight()
@@ -1406,7 +1464,7 @@ export function setupWateringSystem(): void {
     setBloomSparklePalette(variant.palette)
     setAmbientPalette(variant.palette)
     const fxLevel = bloomFxLevel(currentBloomScale)
-    const bannerLabel = variant.id !== 'classic' ? `A ${variant.name}!`
+    const bannerLabel = variant.id !== 'classic' ? `${withArticle(variant.name, true)}!`
                       : fxLevel === 0 ? 'A quiet bloom has woken'
                       : fxLevel === 1 ? 'The Garden is blooming'
                       : 'The Garden is in Full Bloom!'
@@ -1415,6 +1473,7 @@ export function setupWateringSystem(): void {
     resetClientSustain()   // sustain complete — bloom is firing
     showBannerBloom(bannerLabel)   // switch banner from countdown → bloom before visual effects ramp up
     for (const e of bloomCountdownLabels) TextShape.getMutable(e).text = ''  // clear countdown before reset ticker starts
+    bloomDurationMs = typeof data?.durationMs === 'number' && data.durationMs > 0 ? data.durationMs : BLOOM_RESET_DELAY_MS
     startBloomResetTicker(typeof data?.elapsedMs === 'number' && data.elapsedMs > 0 ? data.elapsedMs : 0)  // countdown to garden reset, aligned for late joiners
     if (!isBloomActive()) {
       triggerBloomEvent()
@@ -1493,6 +1552,7 @@ export function setupWateringSystem(): void {
     const wateredByLabel = wateredByLabelMap.get(entity)
     if (data.isWatered && data.wateredBy) {
       wateredByNames.set(entity, data.wateredBy)
+      wateredByTitles.set(entity, almanacTitleByRank(data.almanac))
       setLabelFlair(entity, data.tier)   // flair icon above the label (GDD §5)
       bloomContributors.add(data.wateredBy)   // tracks everyone who contributed this cycle
     } else {
@@ -1563,6 +1623,7 @@ export function setupWateringSystem(): void {
           if (drop) {
             Tween.deleteFrom(drop)
             Transform.getMutable(drop).scale = { x: 0.001, y: 0.001, z: 0.001 }
+            setDropBob(drop, false)
           }
         }
 
@@ -1693,10 +1754,17 @@ export function forceResetBloom(): void {
 }
 
 export function forceTriggerBloom(variant = ''): void {
-  if (isBloomActive()) return
+  // Both guards below used to fail in TOTAL SILENCE — the button did nothing and said
+  // nothing, which is exactly what KJ hit on the deployed world (2026-09-20).
+  if (isBloomActive()) {
+    console.log('[TestPanel] Force bloom ignored — this client already thinks a bloom is active')
+    showToast('Force bloom: a bloom is already running here', 4000, false)
+    return
+  }
   if (room.isReady()) {
     room.send('forceBloom', { variant })
   } else {
+    console.log('[TestPanel] Force bloom: room not ready — falling back to a LOCAL-only bloom')
     // Local fallback — room not connected yet (common in local preview)
     triggerBloomEvent()
   }

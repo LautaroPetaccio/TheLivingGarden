@@ -1,7 +1,10 @@
 import { isServer } from '@dcl/sdk/network'
-import { engine, VisibilityComponent } from '@dcl/sdk/ecs'
 import { setupNotifications } from './notifications'
 import { setupWateringSystem } from './wateringSystem'
+import { setupOnboarding } from './onboarding'
+import { setupBloomFinale } from './bloomFinale'
+import { setupDiscoveryCard } from './discoveryCard'
+import { setupPodium } from './podium'
 
 // Importing shared schemas + messages here ensures registerMessages()
 // and defineComponent() run on BOTH server and client before any
@@ -19,11 +22,14 @@ export async function main() {
   // ── Client only ────────────────────────────────────────────
   setupNotifications()
   setupWateringSystem()
+  // AFTER setupWateringSystem: it calls room.clear() partway through, and any
+  // room.onMessage handler registered before that clear is silently wiped.
+  setupOnboarding()
+  setupBloomFinale()
+  setupDiscoveryCard()   // same post-room.clear() window
+  setupPodium()
 
-  // Hide Discord buttons — removed from the experience
-  for (const name of ['Discord Button', 'Discord Button_2']) {
-    const e = engine.getEntityOrNullByName(name)
-    if (e) VisibilityComponent.createOrReplace(e, { visible: false })
-  }
+  // Discord buttons are BACK (KJ 2026-09-20) — they carry their own link from the
+  // composite, and the info panel's last page links to the same server.
 
 }

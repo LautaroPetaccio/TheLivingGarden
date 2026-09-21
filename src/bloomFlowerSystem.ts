@@ -24,6 +24,7 @@ import {
   engine,
   Entity,
   GltfContainer,
+  GltfContainerLoadingState,
   Transform,
   Animator,
   ColliderLayer,
@@ -48,8 +49,8 @@ const DEMO_PLANT_SRC = 'assets/scene/Models/demoPlant/demoPlant.glb'
 /** Healthy-state animation clip name (matches scene plants). */
 const ANIM_HEALTHY = 'OpenIdle'
 
-/** Delay before starting the Animator — lets the GLB finish loading (ms). */
-const ANIM_INIT_DELAY_MS = 1_200
+// LoadingState values (const enum in @dcl/ecs internals, not re-exported — same as boxSystem)
+const LS_NOT_FOUND = 2, LS_FINISHED_WITH_ERROR = 3, LS_FINISHED = 4
 
 /** Scale of the plant relative to the hand anchor (1 = full scene size). */
 const FLOWER_SCALE = { x: 0.18, y: 0.18, z: 0.18 }
@@ -68,6 +69,8 @@ const FLOWER_ROTATION = Quaternion.fromEulerDegrees(90, 0, 0)
 let flowerGen       = 0
 let flowerParentEnt: Entity | null = null
 let flowerChildEnt:  Entity | null = null
+let flowerAnimPending = false   // start the idle loop once the child GLB reports loaded
+let systemAdded       = false
 
 // ---------------------------------------------------------------
 // Public API
@@ -122,16 +125,9 @@ export function startBloomFlower(contributorNames: string[]): void {
   })
   flowerChildEnt = child
 
-  // Deferred Animator — play the healthy idle loop once the GLB has loaded
-  timers.setTimeout(() => {
-    if (flowerGen !== gen) return
-    Animator.createOrReplace(child, {
-      states: [
-        { clip: ANIM_HEALTHY, playing: true, loop: true },
-      ],
-    })
-    Animator.playSingleAnimation(child, ANIM_HEALTHY, true)
-  }, ANIM_INIT_DELAY_MS)
+  // Healthy idle loop once the GLB reports loaded (was a 1.2 s guess)
+  flowerAnimPending = true
+  if (!systemAdded) { systemAdded = true; engine.addSystem(flowerAnimInitSystem) }
 
   // Auto-remove after FLOWER_DURATION_MS
   timers.setTimeout(() => {
@@ -145,8 +141,21 @@ export function startBloomFlower(contributorNames: string[]): void {
  * Remove the attached flower immediately.
  * Any in-progress auto-stop timer is invalidated via the gen-counter.
  */
+/** True while the contributor's hand-flower is attached (giftSystem hides the held keepsake then). */
+export function isBloomFlowerActive(): boolean { return flowerParentEnt !== null }
+
+function flowerAnimInitSystem(): void {
+  if (!flowerAnimPending || flowerChildEnt === null) return
+  const st = GltfContainerLoadingState.getOrNull(flowerChildEnt)?.currentState
+  if (st === LS_NOT_FOUND || st === LS_FINISHED_WITH_ERROR) { flowerAnimPending = false; return }
+  if (st !== LS_FINISHED) return
+  flowerAnimPending = false
+  Animator.createOrReplace(flowerChildEnt, { states: [{ clip: ANIM_HEALTHY, playing: true, loop: true }] })
+}
+
 export function stopBloomFlower(): void {
   flowerGen++
+  flowerAnimPending = false
   if (flowerParentEnt !== null) {
     engine.removeEntity(flowerParentEnt)
     flowerParentEnt = null

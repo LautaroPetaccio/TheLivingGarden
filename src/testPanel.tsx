@@ -24,10 +24,14 @@ import {
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
-import { demoSeedlings, demoRevealedFlowers } from './boxSystem'
+import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter, adminSetUnlimitedPlanters } from './boxSystem'
+import { adminResetOnboarding } from './onboarding'
 import { vfxFlags, setVfxFlag } from './plantVfx'
+import { waterFxFlags } from './sparkleSystem'
+import { isLayoutToolOn, setLayoutTool, layoutCount, layoutSelectedInfo, layoutIsCarrying, layoutSelectNearest, layoutPickUpOrDrop, layoutNudge, layoutRotateLeft, layoutRotateRight, layoutSnap90, layoutAddHere, layoutDelete, layoutExport } from './planterLayoutTool'
 import {
   adminSpawnLocalSeed,
+  adminSpawnSeedLadder,
   adminRequestServerSeed,
   adminScaleSeeds,
   adminShiftSeedHeight,
@@ -63,6 +67,7 @@ const HEADER_H     = 46
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
 let overrideLimit = false                  // mirrors overrideDailyLimit
+let unlimitedPlanters = false              // server-side, in memory — off again after a server restart
 let clickboxMode  = getUseClickbox()       // mirrors useClickbox
 let trailActive   = false                  // sparkle trail toggle
 let flowerActive  = false                  // plant-in-hand toggle
@@ -203,6 +208,15 @@ export function TestPanelUi() {
           />
         </UiEntity>
 
+        {/* Unlimited planters (admin) */}
+        <UiEntity uiTransform={{ width: '100%', height: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 6 } }}>
+          <Label value="Unlimited planters (admin, random tier, no seeds used)" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton
+            value={unlimitedPlanters}
+            onChange={v => { unlimitedPlanters = v; adminSetUnlimitedPlanters(v) }}
+          />
+        </UiEntity>
+
         {/* Clickbox Mode */}
         <UiEntity uiTransform={{ width: '100%', height: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 6 } }}>
           <Label value="Click Target  (plant / clickbox)" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
@@ -258,7 +272,7 @@ export function TestPanelUi() {
           uiBackground={{ color: BTN_BLOOM }}
           onMouseDown={() => forceTriggerBloom('moonlit')}
         >
-          <Label value="Force MOONLIT Bloom (rare, full scale)" fontSize={12} color={WHITE} textAlign="middle-center" />
+          <Label value="Force MOONLIT Bloom (scales with players)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         <UiEntity
@@ -267,6 +281,16 @@ export function TestPanelUi() {
           onMouseDown={() => adminGrantWaters(100)}
         >
           <Label value="Grant +100 lifetime waters (flair / tribute)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* Replays the whole tutorial — without this, whoever builds it can never see it
+            again after doing it once (KJ 2026-09-20). */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_WATER }}
+          onMouseDown={adminResetOnboarding}
+        >
+          <Label value="Reset MY onboarding (replay the tutorial)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* 100-planter performance test — local only */}
@@ -291,13 +315,58 @@ export function TestPanelUi() {
           </UiEntity>
         </UiEntity>
 
+        {/* Watering FX A/B — same idea for the per-watering effects */}
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          {(['ripple', 'burst', 'tribute'] as const).map((k, i) => (
+            <UiEntity key={k} uiTransform={{ flexGrow: 1, height: 32, alignItems: 'center', justifyContent: 'center', margin: { right: i < 2 ? 4 : 0 } }} uiBackground={{ color: waterFxFlags[k] ? BTN_ON : BTN_OFF }} onMouseDown={() => { waterFxFlags[k] = !waterFxFlags[k] }}>
+              <Label value={`${k[0].toUpperCase()}${k.slice(1)} ${waterFxFlags[k] ? 'ON' : 'OFF'}`} fontSize={10} color={WHITE} textAlign="middle-center" />
+            </UiEntity>
+          ))}
+        </UiEntity>
+
+        {/* Planter layout editor — move/rotate the real planters, then bake (GDD §3.1) */}
+        <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
+          <Label value={isLayoutToolOn() ? `Planter editor  (${layoutCount()})` : 'Planter editor'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
+          <ToggleButton value={isLayoutToolOn()} onChange={setLayoutTool} />
+        </UiEntity>
+        <Label value={layoutSelectedInfo()} fontSize={11} color={MUTED} uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', height: 18, margin: { bottom: 4 } }} />
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Select nearest" color={BTN_OFF} onClick={layoutSelectNearest} />
+          <SeedBtn label={layoutIsCarrying() ? "Drop" : "Pick up"} color={BTN_ON} onClick={layoutPickUpOrDrop} />
+          <SeedBtn label="Add here" color={BTN_OFF} onClick={layoutAddHere} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Nudge fwd" color={BTN_OFF} onClick={() => layoutNudge('fwd')} />
+          <SeedBtn label="Nudge back" color={BTN_OFF} onClick={() => layoutNudge('back')} />
+          <SeedBtn label="Nudge left" color={BTN_OFF} onClick={() => layoutNudge('left')} />
+          <SeedBtn label="Nudge right" color={BTN_OFF} onClick={() => layoutNudge('right')} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 4 } }}>
+          <SeedBtn label="Turn -15" color={BTN_OFF} onClick={layoutRotateLeft} />
+          <SeedBtn label="Turn +15" color={BTN_OFF} onClick={layoutRotateRight} />
+          <SeedBtn label="Snap 90" color={BTN_OFF} onClick={layoutSnap90} />
+          <SeedBtn label="Delete" color={BTN_OFF} onClick={layoutDelete} last />
+        </UiEntity>
+        <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={layoutExport} last />
+        </UiEntity>
+
+        {/* Crowding rule (GDD §3.1) — tidy the longest-away owner's planter now */}
+        <UiEntity
+          uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
+          uiBackground={{ color: BTN_OFF }}
+          onMouseDown={adminTidyPlanter}
+        >
+          <Label value="Tidy longest-away planter (crowding rule)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
         {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}
         <UiEntity
           uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
           uiBackground={{ color: BTN_OFF }}
           onMouseDown={demoSeedlings}
         >
-          <Label value="Demo seedling tints (box_1 Common / box_2 Epic)" fontSize={12} color={WHITE} textAlign="middle-center" />
+          <Label value="Demo seedlings (box_1-6: Common, Rare, Epic, Legendary, Exotic, Unique)" fontSize={12} color={WHITE} textAlign="middle-center" />
         </UiEntity>
 
         {/* Revealed-flower demo — one box per rarity effect tier, box_5..8 */}
@@ -317,7 +386,7 @@ export function TestPanelUi() {
 
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>
           <SeedBtn label="Spawn LOCAL"  color={BTN_WATER} onClick={() => adminSpawnLocalSeed(0)} />
-          <SeedBtn label="LOCAL Epic"   color={BTN_WATER} onClick={() => adminSpawnLocalSeed(3)} />
+          <SeedBtn label="LOCAL ladder" color={BTN_WATER} onClick={() => adminSpawnSeedLadder()} />
           <SeedBtn label="Spawn SERVER" color={BTN_BLOOM} onClick={() => adminRequestServerSeed(0)} last />
         </UiEntity>
         <UiEntity uiTransform={{ width: '100%', height: 32, flexDirection: 'row', margin: { bottom: 5 } }}>

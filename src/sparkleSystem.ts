@@ -18,8 +18,10 @@ import {
   Transform,
   Billboard,
   BillboardMode,
+  ParticleSystem,
+  timers,
 } from '@dcl/sdk/ecs'
-import { Color4 } from '@dcl/sdk/math'
+import { Color4, Quaternion } from '@dcl/sdk/math'
 import { BLOOM_CENTER, SPARKLE_SRC } from './shared/config'
 
 // ---------------------------------------------------------------
@@ -36,8 +38,10 @@ function makeSparkleEntity(emissiveIntensity: number): Entity {
     emissiveColor:    { r: 1.0, g: 0.88, b: 0.52 },       // warm gold
     emissiveIntensity,
     transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND,
+    castShadows:      false,
   })
-  Billboard.create(ent, { billboardMode: BillboardMode.BM_ALL })
+  // No Billboard while parked: the explorer rotates EVERY billboard entity toward the camera
+  // each frame, hidden or not (BillboardSystem.UpdateRotation) — see wake()/park().
   Transform.create(ent, {
     position: { x: 0, y: -100, z: 0 },
     scale:    { x: 0.001, y: 0.001, z: 0.001 },
@@ -45,107 +49,57 @@ function makeSparkleEntity(emissiveIntensity: number): Entity {
   return ent
 }
 
+/** Dev A/B switches for the per-watering effects (test panel). Runtime only; production keeps all on. */
+export const waterFxFlags = { ripple: true, burst: true, tribute: true }
+
 // =============================================================
 // SECTION 1 — Per-plant burst
-// Pre-allocated pool — no entity creation/destruction at runtime.
+// A renderer-side ParticleSystem per watering (was a 16-entity pool moved by this script
+// every frame for 1.5 s). A fresh emitter per burst: re-sending an identical component
+// isn't a reliable "play again" signal, and one entity per watering is nothing.
 // =============================================================
 
-const BURST_COUNT     = 14   // sparkles claimed per watering
-const BURST_POOL_SIZE = 16   // pool slots (BURST_COUNT + 2 buffer)
-const SPARKLE_SIZE    = 0.22 // world-space diameter at peak (m)
+const BURST_COUNT     = 6    // sparkles per watering — few and big (KJ 2026-09-19: "too small and heavy")
+const BURST_EMIT_MS   = 120  // emit window — maxParticles caps it at BURST_COUNT
+const SPARKLE_SIZE    = 0.4  // world-space diameter at peak (m)
 const SPEED_MIN       = 1.8  // m/s
 const SPEED_MAX       = 4.2  // m/s
-const GRAVITY         = 5.0  // m/s²
-const LIFE_BASE_MS    = 1550
-const LIFE_VARY_MS    = 250
+const GRAVITY_MOD     = 0.5  // × 9.81 m/s² (was 5 m/s²)
+const LIFE_S          = 1.6
 const SPAWN_Y         = 2    // metres above plant base
-// Scale curve breakpoints (0–1 fraction of lifetime)
-const POP_IN   = 0.25
-const HOLD_END = 0.55
+const CONE_HALF_ANGLE = 70   // ° from vertical — the old 20–90° elevation fountain
+// const enums in @dcl/ecs internals, not re-exported (same as plantVfx)
+const PSB_ALPHA = 0, PS_PLAYING = 0, PSS_WORLD = 1   // alpha, not additive: additive vanishes on the bright garden
 
-interface BurstSlot {
-  entity:    Entity
-  active:    boolean
-  pos:       { x: number; y: number; z: number }
-  vel:       { x: number; y: number; z: number }
-  lifeMs:    number
-  maxLifeMs: number
-}
+let burstAlbedo:   { r: number; g: number; b: number } = { r: 1.0, g: 0.95, b: 0.78 }   // warm cream
+let burstEmissive: { r: number; g: number; b: number } = { r: 1.0, g: 0.88, b: 0.52 }   // warm gold
 
-const burstPool: BurstSlot[] = []
-
-/** Call once at scene startup — builds burst, bloom and tribute pools. */
+/** Call once at scene startup — builds the bloom and tribute pools. */
 export function setupSparkleSystem(): void {
-  for (let i = 0; i < BURST_POOL_SIZE; i++) {
-    burstPool.push({
-      entity:    makeSparkleEntity(1.5),
-      active:    false,
-      pos:       { x: 0, y: 0, z: 0 },
-      vel:       { x: 0, y: 0, z: 0 },
-      lifeMs:    0,
-      maxLifeMs: 0,
-    })
-  }
   bloomPool   = createPool(BLOOM_POOL_SIZE,   'bloom',   2.0, TRAVEL_DUR_BASE,  1.5, RISE_DUR_MS)
   tributePool = createPool(TRIBUTE_POOL_SIZE, 'tribute', 1.8, TRIBUTE_DUR_BASE, 0.4, TRIBUTE_DISSOLVE_MS)
-  console.log(`[Sparkles] Burst pool: ${BURST_POOL_SIZE}  Bloom pool: ${BLOOM_POOL_SIZE}  Tribute pool: ${TRIBUTE_POOL_SIZE}`)
+  console.log(`[Sparkles] Burst: particles  Bloom pool: ${BLOOM_POOL_SIZE}  Tribute pool: ${TRIBUTE_POOL_SIZE}`)
 }
 
 /** Emit a burst of sparkles centred on `pos` (world position of the plant). */
 export function triggerSparkle(pos: { x: number; y: number; z: number }): void {
-  let claimed = 0
-  for (const slot of burstPool) {
-    if (claimed >= BURST_COUNT) break
-    if (slot.active) continue
-    const azimuth   = Math.random() * Math.PI * 2
-    const elevation = (20 + Math.random() * 70) * (Math.PI / 180)
-    const speed     = SPEED_MIN + Math.random() * (SPEED_MAX - SPEED_MIN)
-    slot.active    = true
-    slot.lifeMs    = 0
-    slot.maxLifeMs = LIFE_BASE_MS + Math.random() * LIFE_VARY_MS
-    slot.pos       = { x: pos.x, y: pos.y + SPAWN_Y, z: pos.z }
-    slot.vel       = {
-      x: Math.cos(azimuth) * Math.cos(elevation) * speed,
-      y: Math.sin(elevation) * speed,
-      z: Math.sin(azimuth)  * Math.cos(elevation) * speed,
-    }
-    Transform.getMutable(slot.entity).position = { ...slot.pos }
-    claimed++
-  }
-}
-
-/** ECS system for per-plant bursts — register once with engine.addSystem. */
-export function sparkleSystem(dt: number): void {
-  for (const s of burstPool) {
-    if (!s.active) continue
-
-    s.lifeMs += dt * 1000
-    s.vel.y  -= GRAVITY * dt
-    s.pos.x  += s.vel.x * dt
-    s.pos.y  += s.vel.y * dt
-    s.pos.z  += s.vel.z * dt
-
-    if (s.lifeMs >= s.maxLifeMs) {
-      s.active = false
-      Transform.getMutable(s.entity).scale = { x: 0.001, y: 0.001, z: 0.001 }
-      continue
-    }
-
-    const t = Math.min(s.lifeMs / s.maxLifeMs, 1)
-    let sc: number
-    if (t < POP_IN) {
-      const u = t / POP_IN
-      sc = SPARKLE_SIZE * (1 - (1 - u) * (1 - u))
-    } else if (t < HOLD_END) {
-      sc = SPARKLE_SIZE
-    } else {
-      sc = SPARKLE_SIZE * (1 - (t - HOLD_END) / (1 - HOLD_END))
-    }
-
-    const tf = Transform.getMutable(s.entity)
-    tf.position = { x: s.pos.x, y: s.pos.y, z: s.pos.z }
-    tf.scale    = { x: sc, y: sc, z: sc }
-  }
+  if (!waterFxFlags.burst) return
+  const e = engine.addEntity()
+  // Unity cones emit along local +Z; pitch −90° points them up
+  Transform.create(e, { position: { x: pos.x, y: pos.y + SPAWN_Y, z: pos.z }, rotation: Quaternion.fromEulerDegrees(-90, 0, 0) })
+  ParticleSystem.create(e, {
+    shape: ParticleSystem.Shape.Cone({ angle: CONE_HALF_ANGLE, radius: 0.05 }),
+    rate: BURST_COUNT / (BURST_EMIT_MS / 1000), maxParticles: BURST_COUNT, lifetime: LIFE_S,
+    gravity: GRAVITY_MOD,
+    initialVelocitySpeed: { start: SPEED_MIN, end: SPEED_MAX },
+    initialSize: { start: SPARKLE_SIZE, end: SPARKLE_SIZE }, sizeOverTime: { start: 1, end: 0 },
+    initialColor: { start: Color4.create(burstAlbedo.r, burstAlbedo.g, burstAlbedo.b, 1), end: Color4.create(burstEmissive.r, burstEmissive.g, burstEmissive.b, 1) },
+    texture: { src: SPARKLE_SRC }, billboard: true, blendMode: PSB_ALPHA,
+    simulationSpace: PSS_WORLD,
+    loop: true, prewarm: false, active: true, playbackState: PS_PLAYING,
+  })
+  timers.setTimeout(() => { if (ParticleSystem.has(e)) ParticleSystem.getMutable(e).active = false }, BURST_EMIT_MS)
+  timers.setTimeout(() => engine.removeEntity(e), BURST_EMIT_MS + LIFE_S * 1000 + 200)
 }
 
 // =============================================================
@@ -250,8 +204,12 @@ function createPool(
 
 let bloomPool:   BloomSparkleState[] = []
 
+/** A pooled sparkle gets its Billboard only while it's in flight. */
+function wake(e: Entity): void { Billboard.createOrReplace(e, { billboardMode: BillboardMode.BM_ALL }) }
+function park(e: Entity): void { Billboard.deleteFrom(e) }
+
 /** Phase 6b — retint EVERY sparkle pool for the active bloom variant, not just the
- *  bloom-moment one. Found 2026-09-17: burstPool (the per-watering burst) and
+ *  bloom-moment one. Found 2026-09-17: the per-watering burst (now particles) and
  *  tributePool (the per-watering "travel to centre" effect) both stayed warm-gold
  *  through a moonlit bloom because this only covered bloomPool — the KJ-reported
  *  "yellow orb" during a moonlit bloom was one of those two, not a firefly.
@@ -263,12 +221,8 @@ export function setBloomSparklePalette(p: { albedo: { r: number; g: number; b: n
     m.pbr.albedoColor   = { ...p.albedo, a: m.pbr.albedoColor?.a ?? 1 }
     m.pbr.emissiveColor = { ...p.emissive }
   }
-  for (const s of burstPool) {
-    const m = Material.getMutableOrNull(s.entity)?.material
-    if (!m || m.$case !== 'pbr') continue
-    m.pbr.albedoColor   = { ...p.albedo, a: m.pbr.albedoColor?.a ?? 1 }
-    m.pbr.emissiveColor = { ...p.emissive }
-  }
+  burstAlbedo   = { ...p.albedo }
+  burstEmissive = { ...p.emissive }
 }
 
 // ── Tribute pool — per-watering travel-to-centre effect ──────────
@@ -340,6 +294,7 @@ export function triggerBloomSparkles(
       s.riseDurMs   = RISE_DUR_MS
       s.scale       = 0
       s.phase       = 'travel'
+      wake(s.entity)
 
       // Park off-screen until travel delay expires
       Transform.getMutable(s.entity).scale = { x: 0.001, y: 0.001, z: 0.001 }
@@ -357,6 +312,7 @@ export function triggerBloomSparkles(
 export function triggerWateringTribute(
   plantPos: { x: number; y: number; z: number },
 ): void {
+  if (!waterFxFlags.tribute) return
   let activated = 0
   for (const s of tributePool) {
     if (s.phase !== 'idle' || activated >= TRIBUTE_COUNT) continue
@@ -387,6 +343,7 @@ export function triggerWateringTribute(
     s.scale       = 0
     s.phase       = 'travel'
     s.mode        = 'tribute'
+    wake(s.entity)
 
     Transform.getMutable(s.entity).scale = { x: 0.001, y: 0.001, z: 0.001 }
     activated++
@@ -413,7 +370,12 @@ export function endBloomSparkles(): void {
 export function bloomSparkleSystem(dt: number): void {
   const dtMs = dt * 1000
 
-  for (const s of [...bloomPool, ...tributePool]) {
+  tickBloomPool(bloomPool, dtMs, dt)
+  tickBloomPool(tributePool, dtMs, dt)
+}
+
+function tickBloomPool(pool: BloomSparkleState[], dtMs: number, dt: number): void {
+  for (const s of pool) {
     if (s.phase === 'idle') continue
 
     const tf = Transform.getMutable(s.entity)
@@ -492,6 +454,7 @@ export function bloomSparkleSystem(dt: number): void {
         s.phase     = 'idle'
         tf.position = { x: 0, y: -100, z: 0 }
         tf.scale    = { x: 0.001, y: 0.001, z: 0.001 }
+        park(s.entity)
       }
     }
 
@@ -508,6 +471,7 @@ export function bloomSparkleSystem(dt: number): void {
         s.phase     = 'idle'
         tf.position = { x: 0, y: -100, z: 0 }
         tf.scale    = { x: 0.001, y: 0.001, z: 0.001 }
+        park(s.entity)
       }
     }
   }

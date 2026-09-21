@@ -32,6 +32,7 @@ import {
   GltfContainer,
   GltfNodeModifiers,
   ColliderLayer,
+  MeshCollider,
   TextShape,
   TextAlignMode,
   PointerEvents,
@@ -46,13 +47,15 @@ import {
 import { Quaternion } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById, withArticle } from './shared/config'
 import { showToast } from './notifications'
-import { attachPlantVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
+import { attachPlantVfx, attachSeedlingVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
+import { showDiscovery } from './discoveryCard'
 import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
-import { createSign, setupSignSystem } from './signs'
+import { createSign, moveSign, setupSignSystem, Sign } from './signs'
 import { BALLOON_TEXT_TRACK } from './balloonTextTrack'
+import { playSfx } from './sounds'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals)
@@ -65,6 +68,12 @@ const PLAQUE_OFFSET_Z = 1.055 * BOX_MODEL_SCALE
 const PLAQUE_Y        = 0.988 * BOX_MODEL_SCALE
 const PLAQUE_SIZE     = { w: 0.92 * BOX_MODEL_SCALE, h: 0.30 * BOX_MODEL_SCALE }
 const PLAQUE_FONT     = 0.4    // TUNING — two lines on a 0.55 × 0.18 m board
+// Plaques are POOLED: signs.ts only ever shows the nearest 8 within 9 m, so 96 per-box
+// plaques meant 88 hidden text entities (+ a 96-text rewrite on every pouch update).
+// PLAQUE_POOL plaques re-home to the nearest planters instead (same idea as the 100-pot test).
+const PLAQUE_POOL     = 8
+const PLAQUE_RANGE_M  = 12     // a bit beyond signs.ts' 9 m show range, so a plaque is in place before it fades in
+const PLAQUE_SCAN_MS  = 400
 const SEEDLING_SCALE = 0.25
 const SEEDLING_MODEL_MIN_Y = 1.15   // seedling.glb's geometry starts 1.15 above its origin
 // Balloon countdown, in the balloon GLB's own space (the entity carries BOX_MODEL_SCALE).
@@ -89,7 +98,8 @@ const TL_RESTART = 0   // TweenLoop
 interface BoxView {
   boxId:        string
   base:         Entity
-  label:        Entity
+  hit:          Entity          // box collider child: tap target + walk blocker
+  labelText:    string          // what this box's plaque says — shown by a pooled plaque when near
   plant:        Entity | null   // sprout or flower entity while planted
   plantKey:     string          // what `plant` currently shows — rebuilt only when this changes
   balloon:      Entity | null   // animated balloon while the box holds a seed or flower
@@ -97,6 +107,7 @@ interface BoxView {
   balloonMover: Entity | null   // text parent: replays Bone.003's position (Tween)
   balloonPivot: Entity | null   // child of the mover: replays Bone.003's rotation (Tween)
   balloonAnimPending: boolean   // waiting for the balloon GLB to load before starting clip + text together
+  balloonLive:  boolean         // inside the balloon budget — its clip + text Tweens run
   owner:        string
   ownerName:    string
   rarityTier:   number
@@ -108,8 +119,64 @@ interface BoxView {
 }
 
 const views  = new Map<string, BoxView>()
+/** Live planter layout: BOX_POSITIONS, as edited in preview by the planter editor
+ *  (planterLayoutTool). Everything positions planters from HERE, never BOX_POSITIONS. */
+const layout   = new Map<string, PlanterPos>()
+const deleted  = new Set<string>()   // removed in the editor (hidden until the next bake)
+const carrying = new Set<string>()   // being carried by the editor — plant rebuilt on drop
+const synced   = new Set<string>()   // boxes that have had their first boxState (join sync) — no sounds for that one
 let   pouch: number[] = []   // counts per rarity tier, from pouchUpdate
 let   tickAccum = 0
+
+/** Onboarding (Phase 2): the free planter nearest a point, and where it stands right
+ *  now — `layout`, not BOX_POSITIONS, because the planter editor can have moved it.
+ *  Null when every planter is taken. */
+export function nearestFreePlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
+  let best: { boxId: string; x: number; z: number; rot: number } | null = null
+  let bestSq = Infinity
+  for (const v of views.values()) {
+    if (v.owner || deleted.has(v.boxId)) continue
+    const p = layout.get(v.boxId)
+    if (!p) continue
+    const dx = p.x - from.x
+    const dz = p.z - from.z
+    const sq = dx * dx + dz * dz
+    if (sq < bestSq) { bestSq = sq; best = { boxId: v.boxId, x: p.x, z: p.z, rot: p.rot } }
+  }
+  return best
+}
+
+/** Onboarding (stage 4): EVERY planter of mine holding an opened, unharvested flower,
+ *  nearest first. All of them, not just the nearest — a gardener at the planter cap can
+ *  have several standing open and wants to find them all (Fin 2026-09-21: "we wanted 2
+ *  and had 1 when we were looking for our plants"). */
+export function myOpenedPlanters(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number }[] {
+  const mine: { boxId: string; x: number; z: number; rot: number; sq: number }[] = []
+  for (const v of views.values()) {
+    if (!isMine(v) || !v.opened || deleted.has(v.boxId)) continue
+    const p = layout.get(v.boxId)
+    if (!p) continue
+    const dx = p.x - from.x
+    const dz = p.z - from.z
+    mine.push({ boxId: v.boxId, x: p.x, z: p.z, rot: p.rot, sq: dx * dx + dz * dz })
+  }
+  mine.sort((a, b) => a.sq - b.sq)
+  return mine.map(m => ({ boxId: m.boxId, x: m.x, z: m.z, rot: m.rot }))
+}
+
+/** The nearest of them — the one the tutorial trail points at. */
+export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
+  return myOpenedPlanters(from)[0] ?? null
+}
+
+/** Where one planter stands, for the highlight shell to sit exactly on it. Null once
+ *  the planter is taken or deleted — the caller should stop pointing at it. */
+export function freePlanterPos(boxId: string): { x: number; z: number; rot: number } | null {
+  const v = views.get(boxId)
+  if (!v || v.owner || deleted.has(boxId)) return null
+  const p = layout.get(boxId)
+  return p ? { x: p.x, z: p.z, rot: p.rot } : null
+}
 
 function localId(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 function isMine(v: BoxView): boolean { return !!v.owner && v.owner.toLowerCase() === localId() }
@@ -128,7 +195,11 @@ function labelFor(v: BoxView): string {
     return have > 0 ? `Empty planter\nTap to plant (${have} seeds)` : 'Empty planter\nCatch a bloom seed'
   }
   const tierName = rarityTierById(v.rarityTier).name
-  const who = isMine(v) ? 'Your' : `${v.ownerName}'s`
+  // Always the owner's NAME, never "Your" (Fin 2026-09-21). The label is read by everyone
+  // standing near the planter, so "KJ's Tulip" is what it says to its owner too; the
+  // server sends ownerName for every box, and 'Your' only survives as a fallback for a
+  // record that somehow arrived without one. Direct-address TOASTS keep "Your".
+  const who = v.ownerName ? `${v.ownerName}'s` : 'Your'
   if (v.opened) return `${who} ${flowerName(v)}${v.rarityTier > 0 ? `\n${tierName}` : ''}`
   const watered = v.waters > 0 ? `\nwatered x${v.waters} by ${v.lastWaterer}` : ''
   return `${who} ${v.rarityTier > 0 ? `${tierName} ` : ''}seed${watered}`
@@ -147,7 +218,7 @@ function balloonTextFor(v: BoxView, now: number): string {
 /** Hover prompt for the one tap the box currently offers. */
 function hoverFor(v: BoxView): string {
   if (!v.owner) return 'Plant seed'
-  if (isMine(v)) return v.opened ? 'Harvest' : 'Growing…'
+  if (isMine(v)) return v.opened ? 'Harvest (or leave it on show)' : 'Growing…'
   if (v.opened) return `${v.ownerName}'s flower`
   return v.waters >= BOX_WATER_MAX ? 'Fully watered' : 'Water'
 }
@@ -164,7 +235,17 @@ function retirePlant(e: Entity): void {
   timers.setTimeout(() => engine.removeEntity(e), PLANT_RETIRE_MS)
 }
 
-function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
+type PlanterPos = { x: number; z: number; rot: number }
+
+/** A point given in the planter's own frame (lx right, lz front) → world x/z. Same
+ *  convention as Quaternion.fromEulerDegrees(0, rot, 0): rot 90 turns the front to +x. */
+function planterPoint(pos: PlanterPos, lx: number, lz: number): { x: number; z: number } {
+  const r = (pos.rot * Math.PI) / 180
+  return { x: pos.x + lx * Math.cos(r) + lz * Math.sin(r), z: pos.z - lx * Math.sin(r) + lz * Math.cos(r) }
+}
+const planterRotation = (pos: PlanterPos) => Quaternion.fromEulerDegrees(0, pos.rot, 0)
+
+function setPlantVisual(v: BoxView, pos: PlanterPos): void {
   detachPlantVfx(v.boxId)
   if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
   if (!v.owner) return
@@ -175,9 +256,10 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
     // far (SEEDLING_MODEL_SRC_NORMAL/_RARE), so tier 0 (Common) gets normal and
     // everything above it borrows the rare variant until per-tier seedling art exists.
     const k = SEEDLING_SCALE
-    Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k, z: pos.z }, scale: { x: k, y: k, z: k } })
+    Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k, z: pos.z }, rotation: planterRotation(pos), scale: { x: k, y: k, z: k } })
     const src = v.rarityTier > 0 ? SEEDLING_MODEL_SRC_RARE : SEEDLING_MODEL_SRC_NORMAL
     GltfContainer.create(e, { src, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+    attachSeedlingVfx(v.boxId, e, v.rarityTier)   // tier pulse while growing (Rare and up)
     v.plant = e
     return
   }
@@ -186,7 +268,8 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
   // scale/offsets); rarity effects are layered on by plantVfx.
   const species = plantSpeciesById(v.flower)
   if (species) {
-    Transform.create(e, { position: { x: pos.x + species.offsetX, y: BOX_MODEL_RIM_Y + species.baseYOffset, z: pos.z + species.offsetZ }, scale: { x: species.scale, y: species.scale, z: species.scale } })
+    const at = planterPoint(pos, species.offsetX, species.offsetZ)   // footprint-centring offset turns with the planter
+    Transform.create(e, { position: { x: at.x, y: BOX_MODEL_RIM_Y + species.baseYOffset, z: at.z }, rotation: planterRotation(pos), scale: { x: species.scale, y: species.scale, z: species.scale } })
     GltfContainer.create(e, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
     attachPlantVfx(v.boxId, e, species.id, v.rarityTier, { x: pos.x, y: BOX_MODEL_RIM_Y, z: pos.z })
   } else {
@@ -200,20 +283,42 @@ function setPlantVisual(v: BoxView, pos: { x: number; z: number }): void {
   v.plant = e
 }
 
-/** One pooled balloon per box, created once and never removed — shown/hidden by scale.
- *  Removing it made the Unity explorer's ResetMaterialSystem throw (it restores the
- *  Text.002 override's material on a GLB already being torn down — KJ log 2026-09-18
- *  15:40, on harvest), and every replant re-loaded the GLB and re-synced its clip. */
-function setBalloonVisual(v: BoxView, pos: { x: number; z: number }): void {
-  if (v.balloon === null) createBalloon(v, pos)
-  const k = v.owner ? BOX_MODEL_SCALE : 0
+/** One pooled balloon per box, created the first time the box is planted and never removed —
+ *  shown/hidden by scale. Removing it made the Unity explorer's ResetMaterialSystem throw (it
+ *  restores the Text.002 override's material on a GLB already being torn down — KJ log
+ *  2026-09-18 15:40, on harvest), and every replant re-loaded the GLB and re-synced its clip.
+ *  While hidden its clip and text Tweens are STOPPED: the explorer writes every looping-tweened
+ *  entity's Transform back to the scene each frame, hidden or not — 96 always-on balloons were
+ *  192 messages per tick and held the scene tick at ~13 fps (KJ debug panel 2026-09-19). */
+function setBalloonVisual(v: BoxView, pos: PlanterPos): void {
+  if (!v.owner) { if (v.balloon !== null) hideBalloon(v); return }
+  if (v.balloon === null) createBalloon(v, pos)   // motion starts when balloonBudgetSystem picks it
   const tr = Transform.getMutable(v.balloon!)
-  if (tr.scale.x !== k) tr.scale = { x: k, y: k, z: k }
+  if (tr.scale.x !== BOX_MODEL_SCALE) tr.scale = { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE }
 }
 
-function createBalloon(v: BoxView, pos: { x: number; z: number }): void {
+function hideBalloon(v: BoxView): void {
+  if (v.balloon === null) return
+  const tr = Transform.getMutable(v.balloon)
+  if (tr.scale.x !== 0) tr.scale = { x: 0, y: 0, z: 0 }
+  stopBalloonMotion(v)
+}
+
+/** Freeze a balloon: clip stopped, text Tweens removed (no per-frame write-back). */
+function stopBalloonMotion(v: BoxView): void {
+  v.balloonLive = false
+  v.balloonAnimPending = false
+  if (v.balloon !== null && Animator.has(v.balloon)) Animator.stopAllAnimations(v.balloon)
+  for (const e of [v.balloonMover, v.balloonPivot]) {
+    if (e === null) continue
+    TweenSequence.deleteFrom(e)
+    Tween.deleteFrom(e)
+  }
+}
+
+function createBalloon(v: BoxView, pos: PlanterPos): void {
   const balloon = engine.addEntity()
-  Transform.create(balloon, { position: { x: pos.x, y: 0, z: pos.z }, scale: { x: 0, y: 0, z: 0 } })
+  Transform.create(balloon, { position: { x: pos.x, y: 0, z: pos.z }, rotation: planterRotation(pos), scale: { x: 0, y: 0, z: 0 } })
   GltfContainer.create(balloon, { src: BALLOON_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
   // Hide the baked "Harvest in" mesh (KJ's GLB left untouched) — the live text below replaces it
   GltfNodeModifiers.create(balloon, { modifiers: [{
@@ -233,7 +338,7 @@ function createBalloon(v: BoxView, pos: { x: number; z: number }): void {
   v.balloonText = text
   v.balloonMover = mover
   v.balloonPivot = pivot
-  v.balloonAnimPending = true
+  v.balloonAnimPending = false   // balloonBudgetSystem starts it when it's near
 }
 
 /** Everything setPlantVisual depends on. boxState arrives on every watering too, and the
@@ -250,23 +355,25 @@ function plantRevealSystem(): void {
   const me = Transform.getOrNull(engine.PlayerEntity)?.position
   let best: BoxView | null = null, bestD = Infinity
   for (const v of pendingPlant) {
-    const p = BOX_POSITIONS.find(b => b.id === v.boxId)!
+    if (carrying.has(v.boxId)) continue
+    const p = layout.get(v.boxId)!
     const d = me ? (p.x - me.x) ** 2 + (p.z - me.z) ** 2 : 0
     if (d < bestD) { bestD = d; best = v }
   }
   if (best === null) return
   pendingPlant.delete(best)
-  setPlantVisual(best, BOX_POSITIONS.find(b => b.id === best!.boxId)!)
+  setPlantVisual(best, layout.get(best.boxId)!)
   best.plantKey = plantKeyFor(best)
 }
 
 function refresh(v: BoxView): void {
-  const pos = BOX_POSITIONS.find(p => p.id === v.boxId)!
+  if (deleted.has(v.boxId)) return   // removed in the layout editor — stays hidden until the bake
+  const pos = layout.get(v.boxId)!
   if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
   setBalloonVisual(v, pos)
-  if (v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, Date.now())
-  TextShape.getMutable(v.label).text = labelFor(v)
-  const pe = PointerEvents.getMutableOrNull(v.base)?.pointerEvents[0]?.eventInfo
+  if (v.balloonText !== null) setBalloonText(v, Date.now())
+  setLabel(v, labelFor(v))
+  const pe = PointerEvents.getMutableOrNull(v.hit)?.pointerEvents[0]?.eventInfo
   if (pe) pe.hoverText = hoverFor(v)
 }
 
@@ -277,10 +384,10 @@ function refresh(v: BoxView): void {
 function tryPlant(v: BoxView): void {
   if (v.owner) return
   if (myBoxCount() >= getBoxCap()) {
-    showToast(getBoxCap() === 1 ? 'You already have a box — harvest it when it opens' : `You already have ${getBoxCap()} boxes`, TOAST_MS, false)
+    showToast(`You're using all ${getBoxCap()} of your planters — harvest one to plant again`, TOAST_MS, false)
     return
   }
-  const tier = nextSeedTier()
+  const tier = adminUnlimited ? 0 : nextSeedTier()   // unlimited: the server rolls a random tier
   if (tier === null) {
     showToast('No seeds yet — catch some from a bloom', TOAST_MS, false)
     return
@@ -298,7 +405,7 @@ function onTap(v: BoxView): void {
     showToast(`Still growing — ready in ${countdown(v, Date.now())}`, TOAST_MS, false)
     return
   }
-  if (v.opened) { showToast(`${v.ownerName}'s ${flowerName(v)} — they'll harvest it`, TOAST_MS, false); return }
+  if (v.opened) { showToast(`${v.ownerName}'s ${flowerName(v)}, on show`, TOAST_MS, false); return }
   if (v.waters >= BOX_WATER_MAX) { showToast(`${v.ownerName}'s seed has had all the water it can take`, TOAST_MS, false); return }
   console.log(`[Boxes] watering ${v.ownerName}'s ${v.boxId}`)
   room.send('waterBox', { boxId: v.boxId })
@@ -308,19 +415,27 @@ function onTap(v: BoxView): void {
 // Setup
 // ---------------------------------------------------------------
 
-function createBox(p: { id: string; x: number; z: number }): BoxView {
-  // KJ's planter template. The GLB has no _collider mesh, so the visible meshes
-  // carry both pointer (tap) and physics (walkable) collision.
+// Model-space (before BOX_MODEL_SCALE): the planter body up to the soil rim
+const PLANTER_COLLIDER_CENTER = { x: 0, y: 0.55, z: 0.06 }
+const PLANTER_COLLIDER_SIZE   = { x: 1.8, y: 1.1, z: 1.95 }
+
+function createBox(p: PlanterPos & { id: string }): BoxView {
+  // KJ's planter template has no _collider mesh. Its visible meshes used to carry pointer +
+  // physics collision: 96 × 1,577-tri mesh colliders tested on every pointer raycast and
+  // physics step. One box collider per planter instead, sized to the model (glTF bounds
+  // x ±0.9, y 0–1.31, z −0.93…1.05; the box stops at the rim so the decorations stay free).
   const base = engine.addEntity()
-  Transform.create(base, { position: { x: p.x, y: 0, z: p.z }, scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
-  GltfContainer.create(base, { src: BOX_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS })
+  Transform.create(base, { position: { x: p.x, y: 0, z: p.z }, rotation: planterRotation(p), scale: { x: BOX_MODEL_SCALE, y: BOX_MODEL_SCALE, z: BOX_MODEL_SCALE } })
+  GltfContainer.create(base, { src: BOX_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  // No shadow casting (KJ 2026-09-19): 96 planters were drawn again for every shadow cascade
+  GltfNodeModifiers.create(base, { modifiers: [{ path: '', castShadows: false }] })
+  const hit = engine.addEntity()
+  Transform.create(hit, { parent: base, position: PLANTER_COLLIDER_CENTER, scale: PLANTER_COLLIDER_SIZE })
+  MeshCollider.setBox(hit, ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS)
 
-  const sign  = createSign({ x: p.x, y: PLAQUE_Y, z: p.z + PLAQUE_OFFSET_Z }, 180, PLAQUE_SIZE, PLAQUE_FONT, false)
-  const label = sign.text
-
-  const v: BoxView = { boxId: p.id, base, label, plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, balloonLive: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
   pointerEventsSystem.onPointerDown(
-    { entity: base, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
+    { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
   )
   return v
@@ -329,6 +444,94 @@ function createBox(p: { id: string; x: number; z: number }): BoxView {
 /** Test-panel only: force two boxes into the growing state so the rarity-tinted
  *  seedling colors can be compared side by side without waiting on real timers.
  *  Client-only, cosmetic — the next boxState broadcast (or a rejoin) overwrites it. */
+// ---------------------------------------------------------------
+// Planter layout editor API (planterLayoutTool) — moves the REAL planters in this
+// client only; the result is baked into BOX_POSITIONS. The server only knows ids.
+// ---------------------------------------------------------------
+
+export type PlanterPose = PlanterPos & { id: string }
+
+/** Current layout, deleted planters excluded — what gets saved and baked. */
+export function getPlanterLayout(): PlanterPose[] {
+  return [...layout.entries()].filter(([id]) => !deleted.has(id)).map(([id, p]) => ({ id, ...p }))
+}
+
+/** Move/turn one planter and everything on it. Plant is rebuilt (unless it's being carried). */
+export function setPlanterPose(id: string, pose: PlanterPos): void {
+  const v = views.get(id)
+  if (!v) return
+  layout.set(id, pose)
+  const base = Transform.getMutable(v.base)
+  base.position = { x: pose.x, y: 0, z: pose.z }
+  base.rotation = planterRotation(pose)
+  const pl = plaques.find(q => q.boxId === id)
+  if (pl) placePlaque(pl, pose)
+  if (v.balloon !== null) {
+    const b = Transform.getMutable(v.balloon)
+    b.position = { x: pose.x, y: 0, z: pose.z }
+    b.rotation = planterRotation(pose)
+  }
+  if (!carrying.has(id) && v.plant !== null) { v.plantKey = ''; pendingPlant.add(v) }
+}
+
+/** Editor: lift a planter — its plant is taken down while it moves, rebuilt on drop. */
+export function beginCarry(id: string): void {
+  const v = views.get(id)
+  if (!v) return
+  carrying.add(id)
+  detachPlantVfx(id)
+  if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
+  v.plantKey = ''
+}
+export function endCarry(id: string): void {
+  const v = views.get(id)
+  carrying.delete(id)
+  if (v) pendingPlant.add(v)
+}
+
+/** Editor: a new planter (client-only until baked — the server doesn't know its id yet). */
+export function addPlanter(pose: PlanterPos): string {
+  let n = views.size + 1
+  while (views.has(`box_${n}`)) n++
+  const id = `box_${n}`
+  layout.set(id, pose)
+  views.set(id, createBox({ id, ...pose }))
+  refresh(views.get(id)!)
+  return id
+}
+
+/** Editor: hide a planter until the next bake drops it (the server hands back its contents). */
+export function deletePlanter(id: string): void {
+  const v = views.get(id)
+  if (!v || deleted.has(id)) return
+  deleted.add(id)
+  detachPlantVfx(id)
+  if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
+  const zero = { x: 0, y: 0, z: 0 }
+  Transform.getMutable(v.base).scale = zero
+  hideBalloon(v)
+  const pl = plaques.find(q => q.boxId === id)
+  if (pl) freePlaque(pl)
+}
+export function isPlanterDeleted(id: string): boolean { return deleted.has(id) }
+
+/** Editor: apply a saved layout — move known planters, add new ids, delete missing ones. */
+export function applyPlanterLayout(list: PlanterPose[]): void {
+  const keep = new Set(list.map(p => p.id))
+  for (const p of list) {
+    if (views.has(p.id)) setPlanterPose(p.id, { x: p.x, z: p.z, rot: p.rot })
+    else { layout.set(p.id, { x: p.x, z: p.z, rot: p.rot }); views.set(p.id, createBox(p)); refresh(views.get(p.id)!) }
+  }
+  for (const id of [...views.keys()]) if (!keep.has(id)) deletePlanter(id)
+}
+
+/** Test panel: run the crowding rule once now (server picks the longest-away owner's planter). */
+export function adminTidyPlanter(): void { room.send('adminTidyPlanter', {}) }
+/** Test panel (admin): lift my planter cap + random-tier, seedless planting (server-checked);
+ *  the server replies with the new cap. */
+let adminUnlimited = false
+export function adminSetUnlimitedPlanters(on: boolean): void { adminUnlimited = on; room.send('adminUnlimitedPlanters', { on }) }
+
 export function demoSeedlings(): void {
   const demo = (boxId: string, rarityTier: number) => {
     const v = views.get(boxId)
@@ -340,9 +543,9 @@ export function demoSeedlings(): void {
     v.opensLocalAt = Date.now() + 3_600_000
     refresh(v)
   }
-  demo('box_1', 0)
-  demo('box_2', 3)
-  console.log('[Boxes] demo seedlings: box_1 = Common, box_2 = Epic — the next real box update clears it')
+  // One per seedling effect in KJ's table (Common = none); box_1..6 are a row in the current layout
+  demo('box_1', 0); demo('box_2', 2); demo('box_3', 3); demo('box_4', 4); demo('box_5', 5); demo('box_6', 7)
+  console.log('[Boxes] demo seedlings: box_1 Common, 2 Rare, 3 Epic, 4 Legendary, 5 Exotic, 6 Unique — the next real box update clears it')
 }
 
 /** Test-panel only: force four OTHER boxes into the opened/revealed state, one per
@@ -372,7 +575,50 @@ function boxTickSystem(dt: number): void {
   if (tickAccum < LABEL_TICK_MS) return
   tickAccum = 0
   const now = Date.now()
-  for (const v of views.values()) if (v.owner && v.balloonText !== null) TextShape.getMutable(v.balloonText).text = balloonTextFor(v, now)
+  for (const v of views.values()) if (v.balloonLive) setBalloonText(v, now)
+}
+
+/** Write a balloon's text only when it changed ("Ready to Harvest" never does; a countdown
+ *  changes once a minute at most). Was every owned balloon, every second: ~90 text rebuilds/s
+ *  with a full garden (KJ 17 fps, 2026-09-19). */
+function setBalloonText(v: BoxView, now: number): void {
+  if (v.balloonText === null) return
+  const text = balloonTextFor(v, now)
+  if (TextShape.get(v.balloonText).text !== text) TextShape.getMutable(v.balloonText).text = text
+}
+
+// Balloon budget: every planted box has a skinned, animated balloon whose text follows it via
+// 2 looping Tweens — and the explorer writes a looping-tweened entity's Transform back into the
+// scene EVERY frame. A full garden (~90 boxes) was ~180 inbound messages per tick + 90 animated
+// balloons (KJ 17 fps). Only the nearest BALLOON_LIVE within BALLOON_LIVE_M move; the rest
+// freeze in place (clip stopped, Tweens removed) until you walk up to them.
+const BALLOON_LIVE    = 8      // TUNING
+const BALLOON_LIVE_M  = 18     // TUNING — m
+const BALLOON_SCAN_MS = 500
+let balloonScanAccum = 0
+function balloonBudgetSystem(dt: number): void {
+  balloonScanAccum += dt * 1_000
+  if (balloonScanAccum < BALLOON_SCAN_MS) return
+  balloonScanAccum = 0
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!me) return
+  const near = new Set([...views.values()]
+    .filter(v => v.owner && v.balloon !== null && !deleted.has(v.boxId))
+    .map(v => { const p = layout.get(v.boxId)!; return { v, d: Math.hypot(p.x - me.x, p.z - me.z) } })
+    .filter(r => r.d <= BALLOON_LIVE_M)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, BALLOON_LIVE)
+    .map(r => r.v))
+  const now = Date.now()
+  for (const v of views.values()) {
+    if (near.has(v) && !v.balloonLive) {
+      v.balloonLive = true
+      v.balloonAnimPending = true   // balloonStartSystem starts clip + text together once loaded
+      setBalloonText(v, now)
+    } else if (!near.has(v) && v.balloonLive) {
+      stopBalloonMotion(v)
+    }
+  }
 }
 
 /** Bone.003's baked motion as looping renderer-side Tween sequences (one segment per track key). */
@@ -409,15 +655,73 @@ function balloonStartSystem(): void {
   }
 }
 
+// ---------------------------------------------------------------
+// Plaque pool
+// ---------------------------------------------------------------
+
+interface Plaque { sign: Sign; boxId: string | null }
+const plaques: Plaque[] = []
+let plaqueAccum = 0
+
+function placePlaque(pl: Plaque, pose: PlanterPos): void {
+  const at = planterPoint(pose, 0, PLAQUE_OFFSET_Z)   // on the planter's front board
+  moveSign(pl.sign, { x: at.x, y: PLAQUE_Y, z: at.z })
+  Transform.getMutable(pl.sign.root).rotation = Quaternion.fromEulerDegrees(0, (180 + pose.rot) % 360, 0)
+}
+
+function freePlaque(pl: Plaque): void {
+  pl.boxId = null
+  moveSign(pl.sign, { x: 0, y: -50, z: 0 })
+}
+
+/** Remember the text; write it only if a plaque is on that box right now. */
+function setLabel(v: BoxView, text: string): void {
+  if (v.labelText === text) return
+  v.labelText = text
+  const pl = plaques.find(q => q.boxId === v.boxId)
+  if (pl) TextShape.getMutable(pl.sign.text).text = text
+}
+
+/** Keep the pool on the nearest planters. A plaque only moves when its box drops out of the
+ *  nearest set, so plaques in view stay put. */
+function plaqueHomeSystem(dt: number): void {
+  plaqueAccum += dt * 1_000
+  if (plaqueAccum < PLAQUE_SCAN_MS) return
+  plaqueAccum = 0
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!me) return
+  const wanted = new Set([...layout.entries()]
+    .filter(([id]) => !deleted.has(id))
+    .map(([id, p]) => ({ id, p, d: Math.hypot(p.x - me.x, p.z - me.z) }))
+    .filter(r => r.d <= PLAQUE_RANGE_M)
+    .sort((a, b) => a.d - b.d)
+    .slice(0, PLAQUE_POOL)
+    .map(r => r.id))
+  for (const pl of plaques) if (pl.boxId !== null && !wanted.has(pl.boxId)) freePlaque(pl)
+  for (const id of wanted) {
+    if (plaques.some(q => q.boxId === id)) continue
+    const pl = plaques.find(q => q.boxId === null)
+    const v = views.get(id), pose = layout.get(id)
+    if (!pl || !v || !pose) break
+    pl.boxId = id
+    placePlaque(pl, pose)
+    TextShape.getMutable(pl.sign.text).text = v.labelText
+  }
+}
+
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupBoxSystem(): void {
-  for (const p of BOX_POSITIONS) views.set(p.id, createBox(p))
+  for (let i = 0; i < PLAQUE_POOL; i++) plaques.push({ sign: createSign({ x: 0, y: -50, z: 0 }, 0, PLAQUE_SIZE, PLAQUE_FONT, false), boxId: null })
+  for (const p of BOX_POSITIONS) { layout.set(p.id, { x: p.x, z: p.z, rot: p.rot }); views.set(p.id, createBox(p)) }
 
   room.onMessage('boxState', (data) => {
     const v = views.get(data.boxId)
     if (!v) return
     const wasOpened = v.opened
     const wasMine   = isMine(v)
+    const wasOwned  = !!v.owner
+    const live      = synced.has(v.boxId)   // false for the join/resync snapshot
+    synced.add(v.boxId)
     v.owner     = data.owner
     v.ownerName = data.ownerName
     v.rarityTier = data.rarityTier
@@ -428,10 +732,19 @@ export function setupBoxSystem(): void {
     // Countdown from the server's own clock delta — clockSync is unreliable here
     v.opensLocalAt = Date.now() + (Number(data.opensAt) - Number(data.serverNow))
     refresh(v)
-    if (!wasOpened && v.opened && isMine(v)) {
-      const tierName = rarityTierById(v.rarityTier).name
-      showToast(`Your ${flowerName(v)} opened!${v.rarityTier > 0 ? ` A ${tierName} one!` : ''} Tap the box to harvest it.`, TOAST_MS, false)
-    } else if (!wasMine && isMine(v) && !v.opened) {
+    // Sounds (sounds.ts): planting + opening play AT the planter so neighbours hear them too
+    const p = layout.get(v.boxId)
+    const at = p ? { x: p.x, y: 1, z: p.z } : undefined
+    if (live && !wasOwned && v.owner) playSfx('plant', at)
+    if (live && !wasOpened && v.opened) playSfx('flowerOpen', at)
+    if (live && wasMine && wasOpened && !v.owner) playSfx('harvest')
+    // `live` matters here: the join/resync snapshot arrives with opened=true and
+    // wasOpened=false for every planter already standing open, so an ungated branch
+    // replays the whole beat on every rejoin. It was only a toast before; as a card it
+    // would be a faceful of "you discovered" for flowers opened days ago.
+    if (live && !wasOpened && v.opened && isMine(v)) {
+      showDiscovery(v.flower, v.rarityTier)
+    } else if (live && !wasMine && isMine(v) && !v.opened) {
       showToast('Seed planted — come back when it opens', TOAST_MS, false)
     }
   })
@@ -441,13 +754,15 @@ export function setupBoxSystem(): void {
   room.onMessage('pouchUpdate', (data) => {
     try { pouch = JSON.parse(data.countsJson) } catch { pouch = [] }
     setPouch(pouch)   // HUD chip + seed menu read the shared store
-    for (const v of views.values()) if (!v.owner) TextShape.getMutable(v.label).text = labelFor(v)
+    for (const v of views.values()) if (!v.owner) setLabel(v, labelFor(v))
   })
 
   setupSignSystem()
   setupPlantVfx()
   engine.addSystem(boxTickSystem)
+  engine.addSystem(balloonBudgetSystem)
   engine.addSystem(balloonStartSystem)
   engine.addSystem(plantRevealSystem)
+  engine.addSystem(plaqueHomeSystem)
   console.log(`[Boxes] ${views.size} seed boxes ready · boxState listeners=${room.listenerCount('boxState')}`)
 }
