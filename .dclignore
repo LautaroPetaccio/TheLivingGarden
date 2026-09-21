@@ -19,3 +19,5 @@ README.md
 *.rar
 *.md
 src
+scripts
+test
