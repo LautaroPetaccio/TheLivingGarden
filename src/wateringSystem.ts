@@ -63,6 +63,7 @@ import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
 import { setupPlanterLayoutTool } from './planterLayoutTool'
 import { setupTributeSystem } from './tributeSystem'
+import { setupAvenueSystem } from './avenueSystem'
 import { PLANT_LAYOUT } from './shared/layout'
 import { Quaternion, Color4 } from '@dcl/sdk/math'
 
@@ -1478,6 +1479,7 @@ export function setupWateringSystem(): void {
   setupBoxSystem()
   setupPlanterLayoutTool()   // planter editor (admin): re-applies the saved layout draft
   setupTributeSystem()
+  setupAvenueSystem()        // the Avenue (entrance wall planters) — same post-room.clear() window
 
   room.onMessage('notifyServerTime', (data) => {
     clockSync.updateOffset(data.sentAt)

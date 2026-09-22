@@ -79,6 +79,25 @@ export const room = registerMessages({
   /** Server → all / joining player: every tribute plant (Phase 5b). json = TributeRecord[]. */
   tributesUpdate:   Schemas.Map({ json: Schemas.String }),
 
+  // ── The Avenue (design/communal-planters.md) ─────────────
+  /** One Avenue slot's state — broadcast on change, sent per slot on join/full sync.
+   *  owner '' = empty. grownBy/openedAt/helpersJson/giftedBy are the flower's provenance,
+   *  carried on the keepsake since harvest (helpersJson = JSON string[] of display names).
+   *  looks = how many gardeners have stopped to inspect it. */
+  avenueState:      Schemas.Map({
+    slotId: Schemas.String, owner: Schemas.String, ownerName: Schemas.String,
+    flower: Schemas.String, rarityTier: Schemas.Number, since: Schemas.Int64,
+    grownBy: Schemas.String, openedAt: Schemas.Int64, helpersJson: Schemas.String, giftedBy: Schemas.String,
+    looks: Schemas.Number,
+  }),
+  /** Put one of my keepsakes (by collection index) on the Avenue. slotId '' = the server
+   *  picks the first free slot — and when none is free, tidies the longest-away owner's. */
+  displayFlower:    Schemas.Map({ slotId: Schemas.String, flowerIndex: Schemas.Number }),
+  /** Take my flower back off the Avenue into My flowers. */
+  recallFlower:     Schemas.Map({ slotId: Schemas.String }),
+  /** I opened this slot's inspect card — counts one look per gardener per slot per session. */
+  inspectAvenue:    Schemas.Map({ slotId: Schemas.String }),
+
   // ── v2: onboarding ───────────────────────────────────────
   /** Server → player: which of the two onboarding firsts this gardener has already
    *  done. Persisted per wallet (player Storage 'onboarding'), so the lesson never
@@ -197,4 +216,11 @@ export const room = registerMessages({
   adminPlanterDraft: Schemas.Map({ json: Schemas.String }),
   /** Server → admin: the saved planter draft ('' = none yet). */
   planterDraft:      Schemas.Map({ json: Schemas.String }),
+  /** Test-panel only (admin): fill up to `count` empty Avenue slots with real, persisted,
+   *  Rare+ synthetic flowers (owner = the admin) — so the Avenue can be playtested without
+   *  harvesting 72 real rares. count 0 = a sensible default (server picks). */
+  adminFillAvenue:   Schemas.Map({ count: Schemas.Number }),
+  /** Test-panel only (admin): empty every Avenue slot the admin owns (or all, if none are
+   *  the admin's — a real player's display is never touched unless it's the admin's own). */
+  adminClearAvenue:  Schemas.Map({}),
 })

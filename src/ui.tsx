@@ -26,6 +26,7 @@ import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
 import { BloomFinaleUi } from './bloomFinale'
 import { DiscoveryCardUi, MilestoneCardUi } from './discoveryCard'
 import { InfoPanelUi, toggleInfo, isInfoOpen } from './infoPanel'
+import { AvenueCardUi } from './avenueCard'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor, SHOW_DEV_OVERLAY } from './shared/config'
 
 // ---------------------------------------------------------------
@@ -453,6 +454,7 @@ function uiComponent() {
       </UiEntity>
 
       <BloomFinaleUi px={px} fs={fs} />
+      <AvenueCardUi px={px} fs={fs} mobile={mobile} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
       <DiscoveryCardUi px={px} fs={fs} mobile={mobile} />
       <MilestoneCardUi px={px} fs={fs} mobile={mobile} />
       <InfoPanelUi px={px} fs={fs} mobile={mobile} topPx={topPx} aboveChipPx={bottomPx + px(CHIP_H) + px(GAP)} maxW={Math.round(currentVirtualW * (1 - hIns * 2))} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />

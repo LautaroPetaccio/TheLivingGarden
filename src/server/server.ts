@@ -64,6 +64,12 @@ import {
   FLOWER_COLLECTION_CAP,
   BOX_WATER_MAX,
   plantSpeciesById,
+  rarityTierById,
+  FLAIR_TIERS,
+  AVENUE_POSITIONS,
+  AVENUE_MIN_TIER,
+  AVENUE_NEVER_TIDY_TIER,
+  avenueSlotsFor,
 } from '../shared/config'
 
 // ---------------------------------------------------------------
@@ -328,6 +334,18 @@ async function saveLifetime(): Promise<void> {
 
 function tierOf(address: string): number {
   return flairTier(lifetime.get(address)?.total ?? 0)
+}
+
+/** "N lifetime waters — your name now carries X" — plus a one-time Avenue-unlock line the
+ *  FIRST time a slot opens (tier 1 = 100 waters = AVENUE_SLOTS_BY_FLAIR[1] = the first slot).
+ *  Shared by the real crossing (waterPlant) and the test-panel shortcut (adminGrantWaters),
+ *  so a tester granting waters gets told about the Avenue exactly like a real player would. */
+function flairTierMessage(tier: number, total: number): string {
+  const names = ['', 'a sprout', 'a flower', 'a golden flower']
+  const avenueHint = tier === 1 && AVENUE_POSITIONS.length > 0
+    ? ` — and a slot has opened on the Avenue: display your best flowers by the garden entrance`
+    : ''
+  return `${total} lifetime waters — your name now carries ${names[tier]}${avenueHint}`
 }
 
 // Almanac rung count per gardener, mirrored in memory so the watering and board paths can
@@ -722,7 +740,16 @@ function boxesOwnedBy(address: string): number {
 
 // ── Per-player JSON records (collection, box cap) — same cache + serialized
 // write-through pattern as the pouch, so concurrent handlers can't lose updates.
-interface FlowerKeepsake { flower: string; rarityTier: number; at: number; from?: string }
+interface FlowerKeepsake {
+  flower: string; rarityTier: number; at: number; from?: string
+  // Provenance (2026-09-22, for the Avenue plaque) — set at harvest, carried through gifts.
+  // Older keepsakes lack them; every reader must treat them as optional.
+  grownBy?:  string     // display name of whoever grew it
+  plantedAt?: number
+  openedAt?: number
+  helpers?:  string[]   // display names of the visitors who watered its planter
+  avenue?:   number     // how many times it has stood on the Avenue
+}
 const playerJson       = new Map<string, unknown>()          // `${address}:${key}` → live object
 const playerJsonWrites = new Map<string, Promise<void>>()
 
@@ -1084,7 +1111,7 @@ async function tidyPlanter(b: BoxRecord): Promise<void> {
   let note: string
   if (opened) {
     const flowers = await loadFlowers(owner)                   // past FLOWER_COLLECTION_CAP on purpose: never lost
-    flowers.push({ flower, rarityTier: tier, at: Date.now() })
+    flowers.push({ flower, rarityTier: tier, at: Date.now(), ...provenanceOf(b) })
     void savePlayerJson(owner, 'flowers')
     note = `The garden got busy while you were away — your ${plantSpeciesById(flower)?.name ?? flower} was kept safe in My flowers`
   } else {
@@ -1131,6 +1158,101 @@ async function ensureFreePlanters(): Promise<void> {
       free++
     }
   } finally { ensuringFree = false }
+}
+
+
+// ── The Avenue (design/communal-planters.md, 2026-09-22) ─────
+// Display-only slots on the entrance wall: a harvested keepsake moves out of My flowers
+// into a slot and back again on recall or tidy. Nothing grows here, so there are no
+// timers — state is one JSON list in world Storage 'avenue', same shape of code as boxes.
+interface AvenueRecord {
+  slotId:   string
+  owner:    string          // address; '' = empty
+  ownerName: string
+  keepsake: FlowerKeepsake | null   // the flower itself, returned intact on recall/tidy
+  since:    number          // epoch ms it went on show
+  looks:    number
+}
+const avenue = new Map<string, AvenueRecord>()           // slotId → record
+const avenueLooked = new Set<string>()                   // `${address}:${slotId}` — one look each per session
+const orphanedAvenue: AvenueRecord[] = []
+
+function emptySlot(slotId: string): AvenueRecord { return { slotId, owner: '', ownerName: '', keepsake: null, since: 0, looks: 0 } }
+
+/** What a keepsake remembers about its planter — read at harvest/tidy while the box record exists. */
+function provenanceOf(b: BoxRecord): Pick<FlowerKeepsake, 'grownBy' | 'plantedAt' | 'openedAt' | 'helpers'> {
+  return {
+    grownBy: b.ownerName, plantedAt: b.plantedAt, openedAt: b.opensAt,
+    helpers: b.waterers.map(a => leaderboard.get(a)?.displayName ?? a.slice(0, 8) + '…'),
+  }
+}
+
+function sendAvenue(r: AvenueRecord, to?: string[]): void {
+  const k = r.keepsake
+  room.send('avenueState', {
+    slotId: r.slotId, owner: r.owner, ownerName: r.ownerName,
+    flower: k?.flower ?? '', rarityTier: k?.rarityTier ?? 0, since: r.since,
+    grownBy: k?.grownBy ?? '', openedAt: k?.openedAt ?? 0, helpersJson: JSON.stringify(k?.helpers ?? []), giftedBy: k?.from ?? '',
+    looks: r.looks,
+  }, to ? { to } : undefined)
+}
+function sendAllAvenue(to: string[]): void { for (const r of avenue.values()) sendAvenue(r, to) }
+
+async function saveAvenue(): Promise<void> {
+  try { await setWorld('avenue', JSON.stringify([...avenue.values()])) }
+  catch (err) { console.error('[Server] saveAvenue failed:', err) }
+}
+
+async function loadAvenue(): Promise<void> {
+  for (const p of AVENUE_POSITIONS) avenue.set(p.id, emptySlot(p.id))
+  const raw = await Storage.get<string>('avenue')
+  if (raw) {
+    const records: Array<Partial<AvenueRecord> & { slotId: string }> = JSON.parse(raw)
+    for (const r of records) {
+      const rec = { ...emptySlot(r.slotId), ...r }
+      if (!avenue.has(r.slotId)) { if (rec.owner) orphanedAvenue.push(rec); continue }   // slot left the layout → flower goes home
+      avenue.set(r.slotId, rec)
+    }
+  }
+  console.log(`[Server] Avenue: ${avenue.size} slots, ${[...avenue.values()].filter(r => r.owner).length} on show`)
+}
+
+function avenueSlotsOwnedBy(address: string): number {
+  let n = 0
+  for (const r of avenue.values()) if (r.owner === address) n++
+  return n
+}
+
+/** Give a slot's flower back to its owner (recall, tidy, or a slot dropped from the layout). */
+async function returnAvenueFlower(r: AvenueRecord, why: 'recall' | 'tidy'): Promise<void> {
+  const owner = r.owner, k = r.keepsake
+  if (!owner || !k) return
+  if (avenue.get(r.slotId) === r) { avenue.set(r.slotId, emptySlot(r.slotId)); sendAvenue(avenue.get(r.slotId)!); void saveAvenue() }
+  const flowers = await loadFlowers(owner)                    // past FLOWER_COLLECTION_CAP on purpose: never lost
+  flowers.push({ ...k, avenue: (k.avenue ?? 0) + 1 })
+  void savePlayerJson(owner, 'flowers')
+  const name = plantSpeciesById(k.flower)?.name ?? k.flower
+  if (why === 'recall') { void sendCollection(owner); sendNotice(owner, `Your ${name} is back in My flowers`); return }
+  const note = `The Avenue got busy while you were away — your ${name} was kept safe in My flowers (it keeps its Avenue mark)`
+  console.log(`[Server] Avenue tidied ${r.slotId} (owner ${owner.slice(0, 8)}…, ${k.flower} tier ${k.rarityTier})`)
+  if (isConnected(owner)) { sendNotice(owner, note); void sendCollection(owner) }
+  else { (await loadKeptSafe(owner)).push(note); void savePlayerJson(owner, 'keptSafe') }
+}
+
+/** Crowding rule: the slot whose owner has been away longest — never a Mythic/Unique,
+ *  never someone here now or away less than PLANTER_TIDY_MIN_AWAY_MS. */
+function avenueTidyCandidate(): AvenueRecord | null {
+  const now = Date.now()
+  let best: AvenueRecord | null = null, bestSeen = Infinity
+  for (const r of avenue.values()) {
+    if (!r.owner || !r.keepsake) continue
+    if (r.keepsake.rarityTier >= AVENUE_NEVER_TIDY_TIER) continue
+    if (isConnected(r.owner)) continue
+    const seen = lastSeen.get(r.owner.toLowerCase()) ?? 0
+    if (now - seen < PLANTER_TIDY_MIN_AWAY_MS) continue
+    if (seen < bestSeen) { best = r; bestSeen = seen }
+  }
+  return best
 }
 
 /** Joining owner: deliver any "kept safe" notes from while they were away. */
@@ -1305,6 +1427,7 @@ function playerJoinSystem(): void {
       if (address) {
         syncRateLimits.delete(address)
         testOverrides.delete(address)
+        for (const k of avenueLooked) if (k.startsWith(address.toLowerCase() + ':')) avenueLooked.delete(k)
         markSeen(address)
         void ensureFreePlanters()
         heldSeeds.delete(address.toLowerCase())
@@ -1344,6 +1467,7 @@ function playerJoinSystem(): void {
       await sendDiscovered(address)
       await sendOnboarding(address)
       sendTributes([address])
+      sendAllAvenue([address])
       sendAllHeld([address])
       markSeen(address)
       await deliverKeptSafe(address)
@@ -1404,12 +1528,15 @@ export async function server(): Promise<void> {
   }
   try {
     await loadBoxes()
+    await loadAvenue()
   } catch (err) {
     console.error('[Server] loadBoxes failed — starting with empty boxes:', err)
     for (const p of BOX_POSITIONS) if (!boxes.has(p.id)) boxes.set(p.id, emptyBox(p.id))
   }
   await loadLastSeen()
   for (const r of orphanedBoxes) await tidyPlanter(r)   // owners get a 'kept safe' note next visit
+  for (const r of orphanedAvenue) await returnAvenueFlower(r, 'tidy')   // slot left AVENUE_POSITIONS
+  if (orphanedAvenue.length > 0) { console.log(`[Server] ${orphanedAvenue.length} Avenue slot(s) left the layout — flowers returned`); void saveAvenue() }
   if (orphanedBoxes.length > 0) { console.log(`[Server] ${orphanedBoxes.length} planted planter(s) left the layout — contents returned`); void saveBoxes() }
   await ensureFreePlanters()
   setInterval(() => executeTask(ensureFreePlanters), 60 * 60 * 1000)   // owners age past the min-away while nobody joins
@@ -1485,8 +1612,7 @@ export async function server(): Promise<void> {
       room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now, tier, almanac: almanacRankOf(playerAddress) })
       void markOnboarding(playerAddress, 'watered')
       if (tier > tierBefore) {
-        const names = ['', 'a sprout', 'a flower', 'a golden flower']
-        sendNotice(playerAddress, `${lifetime.get(playerAddress)?.total} lifetime waters — your name now carries ${names[tier]}`)
+        sendNotice(playerAddress, flairTierMessage(tier, lifetime.get(playerAddress)?.total ?? 0))
         console.log(`[Server] ${displayName} reached flair tier ${tier}`)
       }
       await grantTributeIfEarned(playerAddress)
@@ -1619,7 +1745,7 @@ export async function server(): Promise<void> {
     const flowers = await loadFlowers(playerAddress)
     if (!b.opened || b.owner !== playerAddress) return           // re-check after the await
     if (flowers.length >= FLOWER_COLLECTION_CAP) { sendNotice(playerAddress, `Your collection holds ${FLOWER_COLLECTION_CAP} flowers — gift one to make room`); return }
-    const keepsake: FlowerKeepsake = { flower: b.flower, rarityTier: b.rarityTier, at: Date.now() }
+    const keepsake: FlowerKeepsake = { flower: b.flower, rarityTier: b.rarityTier, at: Date.now(), ...provenanceOf(b) }
     flowers.push(keepsake)
     const name = b.ownerName
     boxes.set(b.boxId, emptyBox(b.boxId))                        // frees the box
@@ -1684,6 +1810,88 @@ export async function server(): Promise<void> {
     room.send('giftReceived', { from: fromName, flower: gift.flower, rarityTier: gift.rarityTier }, { to: [to] })
     void markOnboarding(playerAddress, 'gifted')
     sendNotice(playerAddress, `You gave your ${plantSpeciesById(gift.flower)?.name ?? gift.flower} to ${toName}`)
+  })
+
+  // ── The Avenue: display / recall / inspect ───────────────────
+  onRoomMessage<{ slotId: string; flowerIndex: number }>('displayFlower', async (data, playerAddress) => {
+    if (avenue.size === 0) { sendNotice(playerAddress, 'The Avenue is not open yet'); return }
+    const cap = avenueSlotsFor(lifetime.get(playerAddress)?.total ?? 0)
+    if (cap === 0) { sendNotice(playerAddress, `Your first Avenue slot opens at ${FLAIR_TIERS[0]} lifetime waters`); return }
+    if (avenueSlotsOwnedBy(playerAddress) >= cap) { sendNotice(playerAddress, cap === 1 ? 'You already have a flower on the Avenue — take it back first' : `You already have ${cap} flowers on the Avenue`); return }
+    const flowers = await loadFlowers(playerAddress)
+    const idx = Math.floor(data.flowerIndex)
+    const f = flowers[idx]
+    if (!f) { sendNotice(playerAddress, 'You no longer have that flower'); return }
+    if (f.rarityTier < AVENUE_MIN_TIER) { sendNotice(playerAddress, `The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`); return }
+    let slot = data.slotId ? avenue.get(data.slotId) : undefined
+    if (slot && slot.owner) { sendNotice(playerAddress, `${slot.ownerName}'s flower is on show there`); return }
+    if (!slot) slot = [...avenue.values()].find(r => !r.owner)
+    if (!slot) {
+      const victim = avenueTidyCandidate()
+      if (!victim) { sendNotice(playerAddress, 'The Avenue is full right now — try again later'); return }
+      await returnAvenueFlower(victim, 'tidy')
+      slot = avenue.get(victim.slotId)!
+    }
+    if (slot.owner || flowers[idx] !== f) return                  // re-check after the awaits
+    flowers.splice(idx, 1)
+    const name = leaderboard.get(playerAddress)?.displayName ?? playerAddress.slice(0, 8) + '…'
+    avenue.set(slot.slotId, { slotId: slot.slotId, owner: playerAddress, ownerName: name, keepsake: f, since: Date.now(), looks: 0 })
+    const held = heldFlowers.get(playerAddress.toLowerCase())
+    if (held && held.flower === f.flower && held.rarityTier === f.rarityTier) clearHeld(playerAddress.toLowerCase())
+    console.log(`[Server] ${name} put ${f.flower} (tier ${f.rarityTier}) on the Avenue at ${slot.slotId}`)
+    sendAvenue(avenue.get(slot.slotId)!)
+    void saveAvenue()
+    void savePlayerJson(playerAddress, 'flowers')
+    void sendCollection(playerAddress)
+    sendNotice(playerAddress, `Your ${plantSpeciesById(f.flower)?.name ?? f.flower} is on the Avenue with your name on it`)
+  })
+
+  onRoomMessage<{ slotId: string }>('recallFlower', async (data, playerAddress) => {
+    const r = avenue.get(data.slotId)
+    if (!r || r.owner !== playerAddress) return
+    await returnAvenueFlower(r, 'recall')
+  })
+
+  onRoomMessage<{ slotId: string }>('inspectAvenue', async (data, playerAddress) => {
+    const r = avenue.get(data.slotId)
+    if (!r || !r.owner) return
+    const key = `${playerAddress.toLowerCase()}:${r.slotId}`
+    if (avenueLooked.has(key)) return
+    avenueLooked.add(key)
+    r.looks += 1
+    sendAvenue(r)
+    void saveAvenue()
+  })
+
+  // ── Message: adminFillAvenue (test panel) — populate empty slots with real, persisted
+  // Rare+ flowers so the Avenue can be playtested without a genuine harvest chain ──
+  onRoomMessage<{ count: number }>('adminFillAvenue', async (data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    if (avenue.size === 0) { sendNotice(address, 'The Avenue is not open yet'); return }
+    const empties = [...avenue.values()].filter(r => !r.owner)
+    const n = Math.max(1, Math.min(empties.length, Math.floor(data?.count) || 8))
+    const name = leaderboard.get(address)?.displayName ?? address.slice(0, 8) + '…'
+    for (let i = 0; i < n; i++) {
+      const slot = empties[i]
+      const flower: FlowerKeepsake = {
+        flower: rollPlantSpecies(), rarityTier: rollTierAtLeast(AVENUE_MIN_TIER), at: Date.now(),
+        grownBy: name, plantedAt: Date.now(), openedAt: Date.now(), helpers: [],
+      }
+      avenue.set(slot.slotId, { slotId: slot.slotId, owner: address, ownerName: name, keepsake: flower, since: Date.now(), looks: 0 })
+      sendAvenue(avenue.get(slot.slotId)!)
+    }
+    void saveAvenue()
+    console.log(`[Server] [Test] filled ${n} Avenue slot(s) for ${address}`)
+  })
+
+  // ── Message: adminClearAvenue (test panel) — empty every slot the admin filled ──
+  onRoomMessage<Record<string, never>>('adminClearAvenue', async (_data, address) => {
+    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    const mine = [...avenue.values()].filter(r => r.owner === address)
+    if (mine.length === 0) { sendNotice(address, 'You have no Avenue slots to clear'); return }
+    for (const r of mine) { avenue.set(r.slotId, emptySlot(r.slotId)); sendAvenue(avenue.get(r.slotId)!) }
+    void saveAvenue()
+    console.log(`[Server] [Test] cleared ${mine.length} Avenue slot(s) for ${address}`)
   })
 
   // ── Message: holdFlower — show one of your keepsakes in your hand (-1 = put away) ──
@@ -1829,7 +2037,7 @@ export async function server(): Promise<void> {
     const total = lifetime.get(address)?.total ?? 0
     console.log(`[Server] [Test] granted ${amount} waters to ${address} → lifetime ${total}, tier ${tierBefore}→${tier}`)
     sendNotice(address, tier > tierBefore
-      ? `${total} lifetime waters — your name now carries ${['', 'a sprout', 'a flower', 'a golden flower'][tier]}`
+      ? flairTierMessage(tier, total)
       : `[Test] +${amount} waters → ${total} lifetime`)
     await grantTributeIfEarned(address)
   })
@@ -1891,6 +2099,7 @@ export async function server(): Promise<void> {
     await sendDiscovered(address)
     await sendOnboarding(address)
     sendTributes([address])
+    sendAllAvenue([address])
     sendAllHeld([address])
     console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })

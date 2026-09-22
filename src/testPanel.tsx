@@ -25,6 +25,7 @@ import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
 import { demoSeedlings, demoRevealedFlowers, adminTidyPlanter, adminSetUnlimitedPlanters } from './boxSystem'
+import { adminFillAvenue, adminClearAvenue } from './avenueSystem'
 import { adminResetOnboarding } from './onboarding'
 import { vfxFlags, setVfxFlag } from './plantVfx'
 import { waterFxFlags } from './sparkleSystem'
@@ -434,6 +435,25 @@ export function TestPanelUi() {
           onMouseDown={adminTidyPlanter}
         >
           <Label value="Tidy longest-away planter (crowding rule)" fontSize={12} color={WHITE} textAlign="middle-center" />
+        </UiEntity>
+
+        {/* The Avenue (design/communal-planters.md) — fill/clear real, persisted Rare+
+            flowers without a genuine harvest chain per flower */}
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <UiEntity
+            uiTransform={{ flexGrow: 1, height: 34, alignItems: 'center', justifyContent: 'center', margin: { right: 4 } }}
+            uiBackground={{ color: BTN_BLOOM }}
+            onMouseDown={() => adminFillAvenue(8)}
+          >
+            <Label value="Fill 8 Avenue slots" fontSize={12} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
+          <UiEntity
+            uiTransform={{ flexGrow: 1, height: 34, alignItems: 'center', justifyContent: 'center', margin: { left: 4 } }}
+            uiBackground={{ color: BTN_DANGER }}
+            onMouseDown={adminClearAvenue}
+          >
+            <Label value="Clear my Avenue slots" fontSize={12} color={WHITE} textAlign="middle-center" />
+          </UiEntity>
         </UiEntity>
 
         {/* Seedling rarity tint demo — box_1 = Common, box_2 = Epic, clears on the next real update */}

@@ -16,8 +16,9 @@
 // =============================================================
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
-import { PLANT_SPECIES, RARITY_TIERS, rarityTierById, plantSpeciesById, nextMilestone, milestoneTarget, milestoneTitle, growMsForTier, shortGrowTime } from './shared/config'
-import { setPreferredTier, nextSeedTier, getPouch, getFlowers, getDiscovered, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed } from './playerInventory'
+import { PLANT_SPECIES, RARITY_TIERS, rarityTierById, plantSpeciesById, nextMilestone, milestoneTarget, milestoneTitle, growMsForTier, shortGrowTime, AVENUE_MIN_TIER } from './shared/config'
+import { setPreferredTier, nextSeedTier, getPouch, getFlowers, getDiscovered, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed, displayOnAvenue } from './playerInventory'
+import { showToast } from './notifications'
 
 /** 128 px thumbnails made from each species' asset-pack thumbnail.png (assets/images/plantThumbs). */
 const thumbSrc = (flower: string) => `assets/images/plantThumbs/${flower}.png`
@@ -32,10 +33,13 @@ let tierFilter: number | null = null   // Flowers tab: show one rarity only; nul
 let selectedKey = ''      // `${flower}|${rarityTier}` of the tile picked in Flowers
 let giftMode = false      // choosing who to give the selected flower to
 let page = 0              // Flowers page (pagination — scrolling isn't verified on both explorers)
+let avenueSlot: string | null = null   // set when opened by tapping an empty Avenue planter: Display goes THERE
 
 export function isSeedMenuOpen(): boolean { return open }
-export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; page = 0; almanacPage = 0; almanacSel = null; tierFilter = null } }
+export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; page = 0; almanacPage = 0; almanacSel = null; tierFilter = null; avenueSlot = null } }
 export function openSeedMenu(): void { open = true }
+/** Tapped an empty Avenue planter with nothing in hand: open Flowers so they can pick one for it. */
+export function openSeedMenuForAvenue(slotId: string): void { open = true; tab = 'flowers'; avenueSlot = slotId; selectedKey = ''; giftMode = false; page = 0 }
 
 /** The keepsake index the menu currently has selected for gifting, or null if none —
  *  the world tap-a-player shortcut reuses this instead of guessing "the newest one". */
@@ -58,8 +62,11 @@ const INK    = { r: 0.07,  g: 0.065, b: 0.06,  a: 1 }
  *  spilled straight out of it. A tinted tile is still the coloured background Fin asked
  *  for instead of a dot, just at the scale that actually has room for the words.
  *  Common stays neutral: it is the ABSENCE of rarity, and that is what makes a rare land. */
-const tileBg = (t: number, selected: boolean) =>
-  selected ? { ...MOSS, a: 0.55 } : t > 0 ? { ...rarityTierById(t).seedColor, a: 0.22 } : RAISED
+const tileBg = (t: number) => (t > 0 ? { ...rarityTierById(t).seedColor, a: 0.22 } : RAISED)
+/** Selection is a white outline, not a fill (KJ 2026-09-22) — the tile keeps its rarity tint. */
+const OUTLINE = { r: 1, g: 1, b: 1, a: 0.9 }
+const NO_LINE = { r: 0, g: 0, b: 0, a: 0 }
+
 const TILE_COLS  = 4
 /** Everything above the flower grid (tabs, stats, filter row, pager) in virtual px, used
  *  to work out how many grid rows fit this canvas. Far less than when both sections
@@ -130,9 +137,12 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const allGroups = groupFlowers()
   // Which rarities they actually own, rarest first — the filter row only ever offers
   // tiers that would show something.
-  const ownedTiers = [...new Set(allGroups.map(g => g.rarityTier))].sort((a, b) => b - a)
+  const ownedTiers = [...new Set((avenueSlot !== null ? allGroups.filter(g => g.rarityTier >= AVENUE_MIN_TIER) : allGroups).map(g => g.rarityTier))].sort((a, b) => b - a)
   if (tierFilter !== null && !ownedTiers.includes(tierFilter)) tierFilter = null   // gifted the last one away
-  const groups = tierFilter === null ? allGroups : allGroups.filter(g => g.rarityTier === tierFilter)
+  // Avenue mode HIDES what can't go (KJ 2026-09-22): greying them out read as "everything
+  // is grey" on a page of Commons — there was nothing eligible on screen to contrast with.
+  const eligible = avenueSlot !== null ? allGroups.filter(g => g.rarityTier >= AVENUE_MIN_TIER) : allGroups
+  const groups = tierFilter === null ? eligible : eligible.filter(g => g.rarityTier === tierFilter)
   // Rows that fit the height, so the pager never lands off the bottom edge.
   const rows       = Math.max(1, Math.min(FLOWER_MAX_ROWS, Math.floor((props.maxH - px(FLOWERS_CHROME_H)) / px(FLOWER_ROW_H))))
   const pageTiles  = rows * TILE_COLS
@@ -161,8 +171,8 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const tile = (key: string, i: number, tier: number, count: number, active: boolean, onClick: () => void) => (
     <UiEntity
       key={key}
-      uiTransform={{ width: tileW, height: px(112), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: px(14) }}
-      uiBackground={{ color: tileBg(tier, active) }}
+      uiTransform={{ width: tileW, height: px(112), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'center', borderRadius: px(14), borderWidth: px(3), borderColor: active ? OUTLINE : NO_LINE }}
+      uiBackground={{ color: tileBg(tier) }}
       onMouseDown={onClick}
     >
       <UiEntity uiTransform={{ width: px(16), height: px(16), borderRadius: px(8), margin: { bottom: px(8) } }} uiBackground={{ color: { ...rarityTierById(tier).seedColor, a: 1 } }} />
@@ -180,8 +190,8 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const flowerTile = (g: Group, i: number) => (
     <UiEntity
       key={g.key}
-      uiTransform={{ width: tileW, height: px(126), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(8), left: px(4), right: px(4), bottom: px(4) }, borderRadius: px(14) }}
-      uiBackground={{ color: tileBg(g.rarityTier, g.key === selectedKey) }}
+      uiTransform={{ width: tileW, height: px(126), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(8), left: px(4), right: px(4), bottom: px(4) }, borderRadius: px(14), borderWidth: px(3), borderColor: g.key === selectedKey ? OUTLINE : NO_LINE }}
+      uiBackground={{ color: tileBg(g.rarityTier) }}
       onMouseDown={() => { selectedKey = selectedKey === g.key ? '' : g.key; giftMode = false }}
     >
       {plantSpeciesById(g.flower)
@@ -234,8 +244,8 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const almanacTile = (e: AlmanacEntry, i: number) => (
     <UiEntity
       key={`a-${e.id}`}
-      uiTransform={{ width: tileW, height: px(136), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(8), left: px(4), right: px(4), bottom: px(6) }, borderRadius: px(14) }}
-      uiBackground={{ color: e.found ? tileBg(e.bestTier, almanacSel === e.id) : { r: 1, g: 1, b: 1, a: 0.03 } }}
+      uiTransform={{ width: tileW, height: px(136), margin: { right: (i % TILE_COLS) === TILE_COLS - 1 ? 0 : px(8), bottom: px(8) }, flexDirection: 'column', alignItems: 'center', justifyContent: 'flex-start', padding: { top: px(8), left: px(4), right: px(4), bottom: px(6) }, borderRadius: px(14), borderWidth: px(3), borderColor: almanacSel === e.id ? OUTLINE : NO_LINE }}
+      uiBackground={{ color: e.found ? tileBg(e.bestTier) : { r: 1, g: 1, b: 1, a: 0.03 } }}
       onMouseDown={() => { almanacSel = almanacSel === e.id ? null : e.id }}
     >
       <UiEntity uiTransform={{ width: px(68), height: px(68) }} uiBackground={{ textureMode: 'stretch', texture: { src: thumbSrc(e.id) }, color: e.found ? { r: 1, g: 1, b: 1, a: 1 } : { r: 0, g: 0, b: 0, a: 0.55 } }} />
@@ -338,6 +348,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       {/* ── FLOWERS TAB */}
       <UiEntity uiTransform={{ display: tab === 'flowers' ? 'flex' : 'none', width: '100%', flexDirection: 'column' }}>
         <Label value={`${getFlowers().length} kept - ${speciesFound}/${PLANT_SPECIES.length} species discovered`} fontSize={fs(14)} color={DIM} textAlign="middle-left" textWrap="nowrap" uiTransform={{ width: '100%', height: fs(26), margin: { top: px(8), bottom: px(4) } }} />
+        <Label value={avenueSlot === null ? '' : eligible.length > 0 ? `${eligible.length} of your flowers can go on the Avenue` : `None of your flowers qualify yet — ${rarityTierById(AVENUE_MIN_TIER).name} and up only`} fontSize={fs(14)} color={CREAM} textAlign="middle-left" textWrap="wrap" uiTransform={{ display: avenueSlot !== null ? 'flex' : 'none', width: '100%', height: fs(26), margin: { bottom: px(4) } }} />
 
         {/* rarity filters — each on its own colour, so the row doubles as the legend */}
         <UiEntity uiTransform={{ display: ownedTiers.length > 1 ? 'flex' : 'none', width: '100%', flexDirection: 'row', flexWrap: 'wrap', margin: { top: px(6) } }}>
@@ -362,14 +373,28 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       </UiEntity>
 
       {/* selection → gift */}
-      <UiEntity uiTransform={{ display: sel && !giftMode ? 'flex' : 'none', width: '100%', height: px(48), flexDirection: 'row', alignItems: 'center', margin: { top: px(6) } }}>
-        <Label value={sel ? `${speciesName(sel.flower)}${sel.rarityTier > 0 ? ` (${rarityTierById(sel.rarityTier).name})` : ''}` : ''} fontSize={fs(16)} color={CREAM} textAlign="middle-left" uiTransform={{ flexGrow: 1, height: '100%' }} />
-        <UiEntity uiTransform={{ height: px(44), padding: { left: px(18), right: px(18) }, margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: RAISED }} onMouseDown={() => { if (sel) holdFlower(isHeld(sel) ? -1 : sel.lastIndex) }}>
-          <Label value={sel && isHeld(sel) ? 'Put away' : 'Hold'} fontSize={fs(17)} color={CREAM} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+      {/* Name on its own line, then three equal buttons: with the name in the row, "Hold"
+          and "Gift" broke mid-word on a narrow canvas (KJ 2026-09-22). */}
+      <UiEntity uiTransform={{ display: sel && !giftMode ? 'flex' : 'none', width: '100%', flexDirection: 'column', margin: { top: px(6) } }}>
+      <Label value={sel ? `${speciesName(sel.flower)}${sel.rarityTier > 0 ? ` (${rarityTierById(sel.rarityTier).name})` : ''}` : ''} fontSize={fs(16)} color={CREAM} textAlign="middle-left" textWrap="nowrap" uiTransform={{ width: '100%', height: fs(24) }} />
+      <UiEntity uiTransform={{ width: '100%', height: px(48), flexDirection: 'row', alignItems: 'center' }}>
+        <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: RAISED }} onMouseDown={() => { if (sel) holdFlower(isHeld(sel) ? -1 : sel.lastIndex) }}>
+          <Label value={sel && isHeld(sel) ? 'Put away' : 'Hold'} fontSize={fs(17)} color={CREAM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
-        <UiEntity uiTransform={{ height: px(44), padding: { left: px(22), right: px(22) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: MOSS }} onMouseDown={() => { giftMode = true }}>
-          <Label value="Gift" fontSize={fs(17)} color={CREAM} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+        <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: MOSS }} onMouseDown={() => { giftMode = true }}>
+          <Label value="Gift" fontSize={fs(17)} color={CREAM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
+        {/* The Avenue (design/communal-planters.md): Rare+ only — the server re-checks. Goes to the
+            tapped planter when the menu was opened from one, else the first free slot. */}
+        <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: sel && sel.rarityTier >= AVENUE_MIN_TIER ? MOSS : RAISED }}
+          onMouseDown={() => {
+            if (!sel) return
+            if (sel.rarityTier < AVENUE_MIN_TIER) { showToast(`The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`, 4_000, false); return }
+            displayOnAvenue(avenueSlot ?? '', sel.lastIndex); selectedKey = ''; avenueSlot = null; open = false
+          }}>
+          <Label value={avenueSlot ? 'Display here' : 'Avenue'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
+        </UiEntity>
+      </UiEntity>
       </UiEntity>
 
       {/* who to give it to */}

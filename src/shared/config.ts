@@ -165,64 +165,67 @@ export function plantDecayMs(plantId: string, gardeners: number): number {
 // Storage 'planterDraft'), 96 planters. TEMPORARY positions: KJ will re-lay them out.
 // rot = degrees about Y; 0 = front (sign side) faces +z. Ids are stable: box_1..box_8
 // kept their records (planted seeds moved onto these first eight spots).
-// BAKED 2026-09-21 from KJ's in-world planter editor (planterLayoutTool). 96 -> 51:
-// box_7..box_49 and box_91..box_96 removed, box_97..box_100 added. KJ is laying ONE SIDE
+// BAKED from KJ's in-world planter editor (planterLayoutTool). 96 -> 51 (2026-09-21)
+// -> 54 (2026-09-22, WIP). KJ is laying ONE SIDE
 // out first and will mirror it across afterwards, so the current list is deliberately
 // lopsided — do not "fix" the asymmetry. A planted planter that leaves this list is not
 // lost: loadBoxes collects it into orphanedBoxes and tidyPlanter returns the contents to
 // its owner at startup.
 export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number; rot: number }> = [
-  { id: 'box_1', x: 29, z: 19.4, rot: 180 },
-  { id: 'box_2', x: 27.1, z: 19.4, rot: 180 },
-  { id: 'box_3', x: 25, z: 19.5, rot: 180 },
-  { id: 'box_4', x: 22.7, z: 19.4, rot: 180 },
-  { id: 'box_5', x: 22.4, z: 20.9, rot: 0 },
-  { id: 'box_6', x: 22.8, z: 21.2, rot: 0 },
-  { id: 'box_50', x: 5.4, z: 10.1, rot: 270 },
+  { id: 'box_1', x: 29.4, z: 19.5, rot: 180 },
+  { id: 'box_2', x: 28.2, z: 19.5, rot: 180 },
+  { id: 'box_3', x: 25.8, z: 19.6, rot: 180 },
+  { id: 'box_4', x: 24.6, z: 19.6, rot: 180 },
+  { id: 'box_6', x: 23.2, z: 21.9, rot: 270 },
+  { id: 'box_50', x: 5.4, z: 9.4, rot: 270 },
   { id: 'box_51', x: 5.4, z: 8.3, rot: 270 },
   { id: 'box_52', x: 1.2, z: 6.9, rot: 90 },
-  { id: 'box_53', x: 1.3, z: 5.1, rot: 90 },
-  { id: 'box_54', x: 1.3, z: 2.7, rot: 90 },
+  { id: 'box_53', x: 1.2, z: 5.7, rot: 90 },
+  { id: 'box_54', x: 1.3, z: 2.2, rot: 90 },
   { id: 'box_55', x: 1.3, z: 1, rot: 90 },
-  { id: 'box_56', x: 5.7, z: -1.9, rot: 270 },
-  { id: 'box_57', x: 7.6, z: -2.1, rot: 180 },
-  { id: 'box_58', x: 9.1, z: -1.9, rot: 90 },
+  { id: 'box_56', x: 6, z: -1.9, rot: 270 },
+  { id: 'box_57', x: 8.2, z: -1.9, rot: 180 },
+  { id: 'box_58', x: 9.3, z: -1.9, rot: 90 },
   { id: 'box_59', x: 5.2, z: -6.6, rot: 0 },
-  { id: 'box_60', x: 7, z: -6.6, rot: 0 },
-  { id: 'box_61', x: 8.8, z: -6.7, rot: 0 },
-  { id: 'box_62', x: 11.1, z: -5.9, rot: 0 },
+  { id: 'box_60', x: 6.3, z: -6.6, rot: 0 },
+  { id: 'box_61', x: 7.4, z: -6.7, rot: 0 },
+  { id: 'box_62', x: 8.5, z: -6.7, rot: 0 },
   { id: 'box_63', x: 17.7, z: -4.6, rot: 0 },
   { id: 'box_64', x: 19.5, z: -4.6, rot: 0 },
-  { id: 'box_65', x: 21, z: -5.8, rot: 0 },
-  { id: 'box_66', x: 22.9, z: -6.7, rot: 0 },
+  { id: 'box_65', x: 22.8, z: -6.9, rot: 0 },
+  { id: 'box_66', x: 23.9, z: -6.9, rot: 0 },
   { id: 'box_67', x: 26.2, z: -1.9, rot: 90 },
-  { id: 'box_68', x: 29, z: -6.6, rot: 0 },
-  { id: 'box_69', x: 30.7, z: -5.6, rot: 0 },
-  { id: 'box_70', x: 30.7, z: -1.8, rot: 270 },
-  { id: 'box_71', x: 30.8, z: 0, rot: 270 },
-  { id: 'box_72', x: 30.9, z: 1.8, rot: 270 },
+  { id: 'box_68', x: 29.8, z: -6.6, rot: 0 },
+  { id: 'box_69', x: 31, z: -6.6, rot: 0 },
+  { id: 'box_70', x: 30.9, z: -0.3, rot: 270 },
+  { id: 'box_71', x: 30.9, z: 1.9, rot: 270 },
+  { id: 'box_72', x: 30.9, z: 3, rot: 270 },
   { id: 'box_73', x: 26.3, z: 8.3, rot: 180 },
-  { id: 'box_74', x: 30.8, z: 3.7, rot: 270 },
-  { id: 'box_75', x: 30.9, z: 5.4, rot: 270 },
+  { id: 'box_74', x: 30.9, z: 5.4, rot: 270 },
+  { id: 'box_75', x: 30.9, z: 6.5, rot: 270 },
   { id: 'box_76', x: 24.5, z: 10.1, rot: 180 },
-  { id: 'box_77', x: 30.9, z: 7.4, rot: 270 },
+  { id: 'box_77', x: 30.9, z: 7.9, rot: 270 },
   { id: 'box_78', x: 22.7, z: 10, rot: 180 },
-  { id: 'box_79', x: 30.9, z: 9.3, rot: 270 },
+  { id: 'box_79', x: 30.9, z: 9, rot: 270 },
   { id: 'box_80', x: 26.4, z: 10.1, rot: 90 },
   { id: 'box_81', x: 26.4, z: 12, rot: 90 },
   { id: 'box_82', x: 24.5, z: 14, rot: 0 },
-  { id: 'box_83', x: 30.9, z: 15.4, rot: 270 },
-  { id: 'box_84', x: 30.8, z: 17.2, rot: 270 },
+  { id: 'box_83', x: 30.9, z: 14.9, rot: 270 },
+  { id: 'box_84', x: 30.9, z: 17.6, rot: 270 },
   { id: 'box_85', x: 22.9, z: -2, rot: 270 },
   { id: 'box_86', x: 26.1, z: 0, rot: 90 },
   { id: 'box_87', x: 24.4, z: -1.7, rot: 180 },
   { id: 'box_88', x: 22.6, z: 13.9, rot: 0 },
   { id: 'box_89', x: 20.9, z: 13.9, rot: 270 },
   { id: 'box_90', x: 26.3, z: 13.8, rot: 0 },
-  { id: 'box_97', x: 5.9, z: -0.1, rot: 270 },
+  { id: 'box_91', x: 6.5, z: 9.4, rot: 0 },
+  { id: 'box_92', x: 7.1, z: -1.9, rot: 180 },
+  { id: 'box_93', x: 30.9, z: 16.3, rot: 270 },
+  { id: 'box_94', x: 30.9, z: -1.5, rot: 270 },
+  { id: 'box_97', x: 6, z: -0.8, rot: 270 },
   { id: 'box_98', x: 20.8, z: 12, rot: 270 },
-  { id: 'box_99', x: 20.9, z: 21.2, rot: 270 },
-  { id: 'box_100', x: 20.9, z: 19.5, rot: 270 },
+  { id: 'box_99', x: 23.2, z: 20.7, rot: 270 },
+  { id: 'box_100', x: 23.2, z: 19.5, rot: 270 },
 ]
 // ── Onboarding (v2) ──────────────────────────────────────────
 /** KJ's ground arrow (2026-09-20): 20 tris, gold emissive, no texture, lying flat in
@@ -792,3 +795,129 @@ export const FLOWER_COLLECTION_CAP = 500
 /** Another player watering your growing box shaves this off its timer… */
 /** …at most this many times per box, one water per visitor. */
 export const BOX_WATER_MAX         = 3
+
+// ── The Avenue — communal entrance planters (design/communal-planters.md, 2026-09-22) ──
+// A gallery, not a garden: harvested flowers only, nothing grows or wilts.
+// BAKED 2026-09-22 from scene.glb itself: the 72 wall planters are part of KJ's entrance
+// model (nodes ExhibitFlowers..ExhibitFlowers.005, identity transforms, geometry baked
+// into the vertices — the node origins mean nothing). Each cube has a 2-triangle soil
+// face inside it; x/z here = that face's centre, y = its height, mapped GLB-local →
+// scene-world exactly as PODIUM_SLOTS: world = (8 − local.x, local.y, local.z + 24).
+// Two walls: z ≈ 20.5 (rot 0, faces +z into the avenue) and z ≈ 27.5 (rot 180). Three
+// rows (soil y 1.13 / 1.78 / 2.43). Ids run from the gate (x ≈ 47) toward the garden.
+// Re-bake with the same script if the wall moves: cluster horizontal faces at |z| 3.1–3.78.
+export const AVENUE_POSITIONS: ReadonlyArray<{ id: string; x: number; y: number; z: number; rot: number }> = [
+  { id: 'av_1', x: 47.157, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_2', x: 47.157, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_3', x: 47.157, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_4', x: 47.157, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_5', x: 46.388, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_6', x: 46.388, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_7', x: 45.251, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_8', x: 45.251, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_9', x: 44.481, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_10', x: 44.481, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_11', x: 44.481, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_12', x: 44.481, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_13', x: 43.157, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_14', x: 43.157, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_15', x: 43.157, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_16', x: 43.157, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_17', x: 42.388, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_18', x: 42.388, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_19', x: 41.251, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_20', x: 41.251, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_21', x: 40.481, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_22', x: 40.481, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_23', x: 40.481, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_24', x: 40.481, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_25', x: 39.157, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_26', x: 39.157, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_27', x: 39.157, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_28', x: 39.157, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_29', x: 38.388, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_30', x: 38.388, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_31', x: 37.251, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_32', x: 37.251, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_33', x: 36.481, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_34', x: 36.481, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_35', x: 36.481, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_36', x: 36.481, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_37', x: 35.157, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_38', x: 35.157, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_39', x: 35.157, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_40', x: 35.157, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_41', x: 34.388, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_42', x: 34.388, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_43', x: 33.251, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_44', x: 33.251, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_45', x: 32.481, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_46', x: 32.481, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_47', x: 32.481, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_48', x: 32.481, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_49', x: 31.157, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_50', x: 31.157, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_51', x: 31.157, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_52', x: 31.157, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_53', x: 30.388, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_54', x: 30.388, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_55', x: 29.251, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_56', x: 29.251, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_57', x: 28.481, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_58', x: 28.481, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_59', x: 28.481, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_60', x: 28.481, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_61', x: 27.157, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_62', x: 27.157, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_63', x: 27.157, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_64', x: 27.157, y: 1.133, z: 27.504, rot: 180 },
+  { id: 'av_65', x: 26.388, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_66', x: 26.388, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_67', x: 25.251, y: 1.78, z: 20.496, rot: 0 },
+  { id: 'av_68', x: 25.251, y: 1.78, z: 27.504, rot: 180 },
+  { id: 'av_69', x: 24.481, y: 2.426, z: 20.496, rot: 0 },
+  { id: 'av_70', x: 24.481, y: 1.133, z: 20.496, rot: 0 },
+  { id: 'av_71', x: 24.481, y: 2.426, z: 27.504, rot: 180 },
+  { id: 'av_72', x: 24.481, y: 1.133, z: 27.504, rot: 180 },
+]
+/** Cube geometry (scene metres) — inner width 0.54, soil face is 0.345 m behind the
+ *  cube's front face, cube front is 0.43 m tall. Used for the tap box and the plaque. */
+export const AVENUE_CUBE_FRONT_OFFSET = 0.345
+export const AVENUE_CUBE_HEIGHT       = 0.43
+/** Species models are normalised to ~0.55 m (PLANT_SPECIES) for a 1.1 m planter; the
+ *  Avenue cubes are 0.54 m wide, so shrink a touch. TUNING. */
+export const AVENUE_FLOWER_SCALE = 0.85
+/** Empty-slot filler ("wild bloom", design/communal-planters.md): a real species model
+ *  stands in so the wall never reads as unfinished, dimmed so it never reads as someone's
+ *  real display — instantly replaced the moment a player plants here (client swaps the
+ *  visual the instant avenueState reports an owner; nothing server-side to displace).
+ *  Deterministic per slotId (wildSpeciesFor in avenueSystem.ts), so it's the same flower
+ *  for every viewer and doesn't shuffle on reload. TUNING — true desaturation needs a
+ *  shader; GltfNodeModifiers can only dim the albedo uniformly (see plantVfx.ts's own
+ *  note on what that component can and can't retint). */
+export const AVENUE_WILD_TINT = 0.4
+/** Inspect card (design/communal-planters.md "zooms in on plant"): a VirtualCamera LEANS
+ *  IN from the player's own camera toward the flower, by a FRACTION of however far the
+ *  player already is — proportional, so someone already standing close to a cube doesn't
+ *  get shoved into a jarring macro close-up (KJ 2026-09-22: a fixed close distance did
+ *  exactly that). Closing eases back through the player's EXACT recorded starting pose
+ *  (avenueCard.tsx closeAvenueCard) before releasing control — a plain lookAtEntity snap on
+ *  release read as a spin whenever the flower wasn't already dead-centre in view, since
+ *  lookAtEntity forces the camera to stare at it regardless of where the player was
+ *  actually looking. UNVERIFIED on desktop 0.174 and on the Godot mobile client — set
+ *  false and the card still opens, the camera just stays put. */
+export const AVENUE_CAMERA_ZOOM          = true
+export const AVENUE_CAMERA_PUSH_FRACTION = 0.35   // lean in by at most this fraction of the player's own distance — TUNING
+export const AVENUE_CAMERA_MIN_DIST      = 0.6    // safety floor only — never end up closer than this (clipping) — TUNING
+export const AVENUE_CAMERA_MS            = 600    // transition duration, each leg (open, and each half of the close)
+/** Lowest rarity tier allowed on the Avenue (2 = Rare). TUNING — drop to 1 (Uncommon)
+ *  if the Avenue is mostly empty after launch week (hypothesis H2-07). */
+export const AVENUE_MIN_TIER = 2
+/** Mythic and Unique are never tidied off the Avenue by the crowding rule. */
+export const AVENUE_NEVER_TIDY_TIER = 6
+/** Avenue slots a player may hold, by flair tier (0 none / 1 sprout / 2 flower / 3 golden):
+ *  1 at 100 lifetime waters, 2 at 500, 3 at 1,000 — the existing FLAIR_TIERS, no new currency. */
+export const AVENUE_SLOTS_BY_FLAIR: ReadonlyArray<number> = [0, 1, 2, 3]   // TUNING
+export function avenueSlotsFor(lifetimeWaters: number): number {
+  return AVENUE_SLOTS_BY_FLAIR[flairTier(lifetimeWaters)] ?? 0
+}

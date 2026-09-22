@@ -10,7 +10,11 @@
 // so this file still doesn't need to import the game/config to stay decoupled.
 // =============================================================
 
-export interface Keepsake { flower: string; rarityTier: number; at: number; from?: string }
+export interface Keepsake {
+  flower: string; rarityTier: number; at: number; from?: string
+  // Provenance for the Avenue plaque (server, 2026-09-22) — absent on older keepsakes.
+  grownBy?: string; plantedAt?: number; openedAt?: number; helpers?: string[]; avenue?: number
+}
 export interface Gardener { address: string; name: string }
 
 let pouch: number[] = []      // counts per rarity tier, index = tier id
@@ -89,6 +93,12 @@ let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex:
 export function registerGiftApi(api: NonNullable<typeof giftApi>): void { giftApi = api }
 export function gardenersHere(): Gardener[] { return giftApi ? giftApi.gardenersHere() : [] }
 export function giveFlower(toAddress: string, flowerIndex: number): void { giftApi?.give(toAddress, flowerIndex) }
+// The Avenue is owned by avenueSystem; same registration pattern as gifting.
+let avenueApi: { display(slotId: string, flowerIndex: number): void; recall(slotId: string): void } | null = null
+export function registerAvenueApi(api: NonNullable<typeof avenueApi>): void { avenueApi = api }
+/** Put this keepsake on the Avenue — slotId '' lets the server pick the first free slot. */
+export function displayOnAvenue(slotId: string, flowerIndex: number): void { avenueApi?.display(slotId, flowerIndex) }
+export function recallFromAvenue(slotId: string): void { avenueApi?.recall(slotId) }
 /** Ask the server to put this keepsake in my hand (-1 = empty hand). One at a time. */
 export function holdFlower(flowerIndex: number): void { giftApi?.hold(flowerIndex) }
 /** Equip a seed of this tier into my hand, replacing whatever was there (-1 = default). */
