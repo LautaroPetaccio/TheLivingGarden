@@ -1267,8 +1267,13 @@ function setupPlant(plantName: string) {
   // ── Water drop indicator ─────────────────────────────────────
   const bobEnt = engine.addEntity()
   Transform.create(bobEnt, { position: { x: 0, y: WATER_DROP_Y, z: 0 }, parent: anchor })
+  // Starts HIDDEN — a droopy plant's drop fading IN through setDropFade (below) is what
+  // should make it appear. Starting at full scale left every drop visible from the instant
+  // it was created, before any server message had a chance to say the plant was already
+  // watered — the likely cause of "drops on watered flowers" (KJ 2026-09-22); see the
+  // matching fix in the plantStateUpdate join-recovery branch.
   const dropEnt = engine.addEntity()
-  Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 1, y: 1, z: 1 }, parent: bobEnt })
+  Transform.create(dropEnt, { position: { x: 0, y: 0, z: 0 }, scale: { x: 0.001, y: 0.001, z: 0.001 }, parent: bobEnt })
   GltfContainer.create(dropEnt, { src: WATER_DROP_SRC })
   GltfNodeModifiers.create(dropEnt, { modifiers: [{ path: '', castShadows: false }] })   // 38 small drops — not worth a shadow pass
   // No Billboard: the drop is a 3D teardrop, symmetric about Y, so facing the camera changed
@@ -1734,12 +1739,7 @@ export function setupWateringSystem(): void {
           hideRose(entity)
           showPlant(entity)
           Animator.playSingleAnimation(entity, ANIM_HEALTHY_STATE)
-          const drop = waterDropMap.get(entity)
-          if (drop) {
-            Tween.deleteFrom(drop)
-            Transform.getMutable(drop).scale = { x: 0.001, y: 0.001, z: 0.001 }
-            setDropBob(drop, false)
-          }
+          setDropFade(entity, 'out')
         }
 
       }

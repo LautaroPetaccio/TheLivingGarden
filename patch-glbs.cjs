@@ -153,6 +153,71 @@ function patchVec4Colors(filePath) {
   return vec4Indices.size
 }
 
+// ── Clamp out-of-spec specularColorFactor ────────────────────────────────────
+//
+// WHY: KHR_materials_specular.specularColorFactor is defined [0,1] per channel. A value
+// above 1.0 (Blender lets you type any number into "Specular Tint") produces a NaN in the
+// explorer's material.freeze() step — check-glb.cjs blocks deploy on this (see its
+// CRASH_EXTENSIONS / specularColorFactor check). This is the automatic fix: clamp each
+// channel to 1.0, the closest valid value, the same "sanitize before deploy" role
+// patchVec4Colors and stripColliderMeshes already play for their own crash classes.
+
+function clampSpecularColorFactor(filePath) {
+  const glb = readGlb(filePath)
+  if (!glb || !glb.jsonData) return 0
+
+  const gltf = glb.jsonData
+  let patched = 0
+
+  for (const mat of (gltf.materials || [])) {
+    const spec = mat.extensions && mat.extensions.KHR_materials_specular
+    const cf   = spec && spec.specularColorFactor
+    if (!Array.isArray(cf) || !cf.some(v => v > 1.0)) continue
+    spec.specularColorFactor = cf.map(v => Math.min(1.0, v))
+    patched++
+  }
+
+  if (patched === 0) return 0
+
+  // JSON-only rebuild (BIN chunk untouched) — same shape as stripColliderMeshes.
+  const jsonStr    = JSON.stringify(gltf, null, 0)
+  const jsonBuf    = Buffer.from(jsonStr, 'utf8')
+  const jsonPadLen = (4 - (jsonBuf.length % 4)) % 4
+  const jsonPadded = jsonPadLen ? Buffer.concat([jsonBuf, Buffer.alloc(jsonPadLen, 0x20)]) : jsonBuf
+
+  const binPadded = glb.binData
+    ? (() => {
+        const pad = (4 - (glb.binData.length % 4)) % 4
+        return pad ? Buffer.concat([glb.binData, Buffer.alloc(pad)]) : glb.binData
+      })()
+    : null
+
+  const jsonChunkTotal = 8 + jsonPadded.length
+  const binChunkTotal  = binPadded ? 8 + binPadded.length : 0
+  const totalLen       = 12 + jsonChunkTotal + binChunkTotal
+
+  const header = Buffer.allocUnsafe(12)
+  header.writeUInt32LE(0x46546C67, 0)
+  header.writeUInt32LE(2, 4)
+  header.writeUInt32LE(totalLen, 8)
+
+  const jsonHeader = Buffer.allocUnsafe(8)
+  jsonHeader.writeUInt32LE(jsonPadded.length, 0)
+  jsonHeader.writeUInt32LE(0x4E4F534A, 4)
+
+  const parts = [header, jsonHeader, jsonPadded]
+
+  if (binPadded) {
+    const binHeader = Buffer.allocUnsafe(8)
+    binHeader.writeUInt32LE(binPadded.length, 0)
+    binHeader.writeUInt32LE(0x004E4942, 4)
+    parts.push(binHeader, binPadded)
+  }
+
+  fs.writeFileSync(filePath, Buffer.concat(parts))
+  return patched
+}
+
 // ── Strip _collider meshes ────────────────────────────────────────────────────
 //
 // WHY: DCL's production hammurabi-server (worker-bundle.cjs) calls setColliderMask()
@@ -267,8 +332,10 @@ let totalVec4    = 0
 let filesVec4    = 0
 let totalStripped = 0
 let filesStripped = 0
+let totalSpecular = 0
+let filesSpecular = 0
 
-console.log(`[patch-glbs] Scanning ${glbs.length} GLB(s) for VEC4 vertex colors and _collider meshes...`)
+console.log(`[patch-glbs] Scanning ${glbs.length} GLB(s) for VEC4 vertex colors, _collider meshes, and out-of-spec specular...`)
 
 for (const glb of glbs) {
   const rel = path.relative(__dirname, glb)
@@ -286,11 +353,19 @@ for (const glb of glbs) {
     totalStripped += stripCount
     filesStripped++
   }
+
+  const specCount = clampSpecularColorFactor(glb)
+  if (specCount > 0) {
+    console.log(`[patch-glbs] ✅ Clamped specularColorFactor: ${specCount} material(s) in ${rel}`)
+    totalSpecular += specCount
+    filesSpecular++
+  }
 }
 
-if (filesVec4 === 0 && filesStripped === 0) {
+if (filesVec4 === 0 && filesStripped === 0 && filesSpecular === 0) {
   console.log('[patch-glbs] All GLBs already clean — nothing to patch.')
 } else {
-  if (filesVec4    > 0) console.log(`[patch-glbs] VEC4 done:    ${totalVec4} accessor(s) across ${filesVec4} file(s).`)
+  if (filesVec4     > 0) console.log(`[patch-glbs] VEC4 done:     ${totalVec4} accessor(s) across ${filesVec4} file(s).`)
   if (filesStripped > 0) console.log(`[patch-glbs] Collider done: ${totalStripped} mesh(es) stripped across ${filesStripped} file(s).`)
+  if (filesSpecular > 0) console.log(`[patch-glbs] Specular done: ${totalSpecular} material(s) clamped across ${filesSpecular} file(s).`)
 }

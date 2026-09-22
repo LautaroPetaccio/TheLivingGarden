@@ -18,25 +18,29 @@
 // =============================================================
 
 import {
-  engine, Transform, AvatarShape, TextShape, MeshCollider, MeshRenderer, Material,
-  MaterialTransparencyMode, ColliderLayer,
-  VisibilityComponent, pointerEventsSystem, InputAction, Billboard, BillboardMode, Entity,
+  engine, Transform, AvatarShape, GltfContainer, MeshCollider, ColliderLayer,
+  VisibilityComponent, pointerEventsSystem, InputAction, Entity,
 } from '@dcl/sdk/ecs'
-import { Quaternion, Vector3, Color4 } from '@dcl/sdk/math'
+import { Quaternion, Vector3 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import {
   PODIUM_SLOTS, PODIUM_ROTATION_Y, PODIUM_COUNT,
-  PODIUM_LABEL_Y, PODIUM_PAGE_OFFSET, PODIUM_PAGE_SIZE, PODIUM_PAGE_Y, PODIUM_PAGE_COLOR,
+  PODIUM_PAGE_OFFSET, PODIUM_PAGE_SIZE, PODIUM_PAGE_Y,
+  ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW,
 } from './shared/config'
 
 interface BoardEntry { displayName: string; count: number; tier: number; address?: string }
-/** Both entities carry ABSOLUTE world Transforms.
+/** The avatar's Transform carries an ABSOLUTE world position.
  *  CORRECTION 2026-09-21: an earlier note here blamed "a renderer ignoring the parent
  *  chain" for the avatars standing nowhere near the stand. That was wrong. The real cause
  *  was the GLB→world mapping negating X (see PODIUM_SLOTS in config) — the whole podium
  *  was ~16 m out along X, parented or not. Absolute transforms are kept because they are
- *  simpler to reason about, not because parenting is broken. */
-interface Slot { avatar: Entity; label: Entity }
+ *  simpler to reason about, not because parenting is broken.
+ *  No custom name plate any more (KJ 2026-09-22: "remove text above rendered avatars") —
+ *  AvatarShape.name still gives each figure the platform's own floating nametag; how big
+ *  that renders at a distance is native explorer behaviour with no scene-side control
+ *  (PBAvatarShape has no size/distance field to tune — checked the schema). */
+interface Slot { avatar: Entity }
 
 let entries: BoardEntry[] = []
 let page = 0
@@ -104,6 +108,12 @@ function pageTarget(dir: -1 | 1): void {
   render()
 }
 
+/** KJ 2026-09-22: "use our arrow models for the previous and next gardeners buttons" —
+ *  the arrow's own tip does the pointing, so it needs no separate label. Yaw uses the
+ *  exact same (direction → angle) conversion as onboarding.ts's drawTrail: feeding it the
+ *  desired WORLD pointing direction (±X, since PODIUM_SLOTS runs along world X and
+ *  PODIUM_ROTATION_Y — currently 0 — is the only thing that could rotate that away) makes
+ *  the arrow point that way, corrected by the model's own authored-forward offset. */
 function makePageButton(dir: -1 | 1): void {
   // Just outside whichever marker is furthest that way, so the pagers follow the markers
   // rather than a spacing constant that no longer exists.
@@ -111,35 +121,21 @@ function makePageButton(dir: -1 | 1): void {
   const endX = dir > 0 ? Math.max(...xs) : Math.min(...xs)
   const z = PODIUM_SLOTS.reduce((a, p) => a + p.z, 0) / PODIUM_SLOTS.length
   const at = Vector3.create(endX + dir * PODIUM_PAGE_OFFSET, PODIUM_SLOTS[0].y + PODIUM_PAGE_Y, z)
+  const yaw = Math.atan2(-dir, 0) * 180 / Math.PI + ARROW_FORWARD_YAW
 
-  // Was a bare CL_POINTER box with no MeshRenderer — a working button nobody could see
-  // (KJ 2026-09-21). Now an emissive panel facing the same way as the avatars, with its
-  // own label, so it reads as a control rather than an invisible hotspot.
   const e = engine.addEntity()
-  Transform.create(e, { position: at, rotation: podiumRotation(), scale: Vector3.create(PODIUM_PAGE_SIZE.x, PODIUM_PAGE_SIZE.y, PODIUM_PAGE_SIZE.z) })
-  MeshRenderer.setBox(e)
-  Material.setPbrMaterial(e, {
-    albedoColor: Color4.create(PODIUM_PAGE_COLOR.r, PODIUM_PAGE_COLOR.g, PODIUM_PAGE_COLOR.b, 0.92),
-    emissiveColor: PODIUM_PAGE_COLOR,
-    emissiveIntensity: 1.1,
-    transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND,
-    castShadows: false,
-  })
-  MeshCollider.setBox(e, ColliderLayer.CL_POINTER)
+  Transform.create(e, { position: at, rotation: Quaternion.fromEulerDegrees(0, yaw, 0), scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
+  GltfContainer.create(e, { src: ARROW_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+
+  // The arrow GLB carries no collision (decorative everywhere else it's used) — a
+  // dedicated tap box, sized off the old flat-panel dimensions.
+  const hit = engine.addEntity()
+  Transform.create(hit, { position: at, scale: Vector3.create(PODIUM_PAGE_SIZE.x, PODIUM_PAGE_SIZE.y, PODIUM_PAGE_SIZE.z) })
+  MeshCollider.setBox(hit, ColliderLayer.CL_POINTER)
   pointerEventsSystem.onPointerDown(
-    { entity: e, opts: { button: InputAction.IA_POINTER, hoverText: dir > 0 ? 'Next gardeners' : 'Previous gardeners', maxDistance: 8 } },
+    { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: dir > 0 ? 'Next gardeners' : 'Previous gardeners', maxDistance: 8 } },
     () => pageTarget(dir),
   )
-
-  // Label on its own entity: a TextShape on the panel would inherit the panel's scale and
-  // come out squashed by the 0.08 depth.
-  const cap = engine.addEntity()
-  Transform.create(cap, { position: Vector3.create(at.x, at.y + PODIUM_PAGE_SIZE.y * 0.85, at.z) })
-  TextShape.create(cap, {
-    text: dir > 0 ? 'Next' : 'Prev', fontSize: 1.4,
-    textColor: Color4.create(0.98, 0.9, 0.7, 1), outlineWidth: 0.14, outlineColor: Color4.Black(),
-  })
-  Billboard.create(cap, { billboardMode: BillboardMode.BM_Y })
 }
 
 function build(): void {
@@ -151,14 +147,7 @@ function build(): void {
     const avatar = engine.addEntity()
     Transform.create(avatar, { position: at, rotation: podiumRotation() })
 
-    const label = engine.addEntity()
-    Transform.create(label, { position: Vector3.create(at.x, at.y + PODIUM_LABEL_Y, at.z) })
-    TextShape.create(label, { text: '', fontSize: 2, textColor: Color4.create(0.98, 0.78, 0.46, 1), outlineWidth: 0.12, outlineColor: Color4.Black() })
-    // Y-billboard: the plates rendered mirrored from the front before this, because a
-    // fixed rotation only reads correctly from one side.
-    Billboard.create(label, { billboardMode: BillboardMode.BM_Y })
-
-    slots.push({ avatar, label })
+    slots.push({ avatar })
   }
   makePageButton(-1)
   makePageButton(1)
@@ -183,13 +172,9 @@ function render(): void {
     const show = !!e
     VisibilityComponent.createOrReplace(slot.avatar, { visible: show })
     if (!show) {
-      TextShape.getMutable(slot.label).text = ''
       AvatarShape.deleteFrom(slot.avatar)          // an empty pod holds nobody
       continue
     }
-
-    const rank = start + i + 1
-    TextShape.getMutable(slot.label).text = `#${rank}  ${e.displayName}\n${e.count} waters`
 
     const address = (e.address ?? '').toLowerCase()
     if (!address) { AvatarShape.deleteFrom(slot.avatar); continue }

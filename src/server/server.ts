@@ -269,6 +269,13 @@ async function loadTributes(): Promise<void> {
   const raw = await Storage.get<string>('tributes')
   if (raw) { try { tributes = JSON.parse(raw) } catch { tributes = [] } }
   let changed = false
+  // Retract any founding tribute no longer listed in FOUNDING_TRIBUTES (KJ 2026-09-22:
+  // "remove the tribute plaque and plant to Peter for now") — its plot frees up, and
+  // re-adding the honoree to the config list regrows it exactly as it did the first time.
+  const keptNames = new Set(FOUNDING_TRIBUTES.map(f => f.displayName))
+  const beforeCount = tributes.length
+  tributes = tributes.filter(t => !t.founding || keptNames.has(t.displayName))
+  if (tributes.length !== beforeCount) changed = true
   for (const f of FOUNDING_TRIBUTES) {
     const address  = f.address.toLowerCase()
     const existing = tributes.find(t => t.founding && t.displayName === f.displayName)

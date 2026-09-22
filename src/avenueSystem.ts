@@ -117,14 +117,14 @@ export function avenueSlotIds(): string[] { return [...views.keys()] }
 
 /** Onboarding: the nearest EMPTY slot to a point — mirrors boxSystem's
  *  nearestFreePlanter, same purpose (a shell highlight to make one findable among 72). */
-export function nearestFreeAvenueSlot(from: { x: number; z: number }): { slotId: string; x: number; z: number; rot: number } | null {
-  let best: { slotId: string; x: number; z: number; rot: number } | null = null
+export function nearestFreeAvenueSlot(from: { x: number; z: number }): { slotId: string; x: number; y: number; z: number; rot: number } | null {
+  let best: { slotId: string; x: number; y: number; z: number; rot: number } | null = null
   let bestSq = Infinity
   for (const v of views.values()) {
     if (v.owner) continue
     const dx = v.pos.x - from.x, dz = v.pos.z - from.z
     const sq = dx * dx + dz * dz
-    if (sq < bestSq) { bestSq = sq; best = { slotId: v.slotId, x: v.pos.x, z: v.pos.z, rot: v.pos.rot } }
+    if (sq < bestSq) { bestSq = sq; best = { slotId: v.slotId, x: v.pos.x, y: v.pos.y, z: v.pos.z, rot: v.pos.rot } }
   }
   return best
 }

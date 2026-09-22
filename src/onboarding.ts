@@ -17,6 +17,13 @@
 // Which stage is live is the SERVER's call, via onboardingState { watered,
 // planted } — persisted per wallet, sent on join and after each first.
 //
+// The gold shell highlight is DIFFERENT from the rest: it runs ALWAYS, independent of
+// `stage`, on every planter the player owns (boxSystem's myPlanters) — a returning
+// player who finished the tutorial ages ago still can't spot their own planter among 50+
+// look-alikes otherwise (KJ 2026-09-22). Onboarding-only extras (the reserved planter
+// while learning to plant, the empty Avenue slot while learning the Avenue) are layered
+// onto that same always-on list rather than fighting it for the shell pool.
+//
 // ⚠️ Registered from index.ts AFTER setupWateringSystem(), which calls
 // room.clear() — a handler registered before that clear is silently wiped.
 // =============================================================
@@ -26,7 +33,7 @@ import { Quaternion, Vector3, Color4 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { PlantData } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
-import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters } from './boxSystem'
+import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters, myPlanters } from './boxSystem'
 import { nearestFreeAvenueSlot } from './avenueSystem'
 import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened, getAvenueSlotsFree } from './playerInventory'
 import { showPersistent, hidePersistent, showToast } from './notifications'
@@ -71,6 +78,7 @@ let heldBoxId = ''                  // planter the server is holding for us ('' 
 let repickIn = 0
 let retryIn  = 0
 let elapsed  = 0
+let shellAccum = 0                  // the always-on highlight's own repick clock
 
 // ── Entities ──────────────────────────────────────────────────
 
@@ -149,10 +157,6 @@ function showChevrons(visible: boolean): void {
   for (const e of chevrons) VisibilityComponent.getMutable(e).visible = visible
 }
 
-function showShells(visible: boolean): void {
-  for (const e of shells) VisibilityComponent.getMutable(e).visible = visible
-}
-
 /** Wear the gold shell on these planters — the one you should plant in, or EVERY one of
  *  yours holding an opened flower. KJ 2026-09-20: the arrows point, but the highlight is
  *  what actually makes a planter findable among ninety-six of them. */
@@ -169,8 +173,10 @@ function shellsOnPlanters(ps: ReadonlyArray<{ x: number; z: number; rot: number 
 }
 
 function clearVisuals(): void {
+  // Shells are NOT cleared here — they're always-on now, independent of stage (see the
+  // module header). Clearing them on every stage transition would fight the always-on
+  // updater and flicker.
   showChevrons(false)
-  showShells(false)
   showBeacons(false)
   beaconTargets = []
   hidePersistent()
@@ -201,12 +207,8 @@ function heldPlanter(from: Vector3, dt: number): Vector3 | null {
   retryIn -= dt
   if (heldBoxId) {
     const p = freePlanterPos(heldBoxId)
-    if (p) {
-      shellsOnPlanters([p])
-      return Vector3.create(p.x, 0, p.z)
-    }
+    if (p) return Vector3.create(p.x, 0, p.z)
     heldBoxId = ''            // someone planted in it — ask for another
-    showShells(false)
   }
   if (retryIn <= 0) {
     retryIn = PLANTER_RESERVE_RETRY_S
@@ -214,6 +216,39 @@ function heldPlanter(from: Vector3, dt: number): Vector3 | null {
     if (candidate) room.send('reserveBox', { boxId: candidate.boxId })
   }
   return null
+}
+
+// ── Avenue slot marker ───────────────────────────────────────
+//
+// A single arrow (KJ 2026-09-22: "wrong model" on the shell — "smartly reuse our arrow
+// model" instead), standing a short distance out from the empty slot and pointing back
+// at it — the same standoff-and-point-back geometry avenueSystem.ts's plaques use, just
+// with the tutorial arrow model instead of a sign.
+
+let avenueArrow: Entity | null = null
+
+function ensureAvenueArrow(): Entity {
+  if (avenueArrow === null) {
+    avenueArrow = engine.addEntity()
+    Transform.create(avenueArrow, { scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
+    GltfContainer.create(avenueArrow, {
+      src: ARROW_MODEL_SRC,
+      visibleMeshesCollisionMask: ColliderLayer.CL_NONE,
+      invisibleMeshesCollisionMask: ColliderLayer.CL_NONE,
+    })
+    VisibilityComponent.create(avenueArrow, { visible: false })
+  }
+  return avenueArrow
+}
+
+function showAvenueArrow(slot: { x: number; y: number; z: number; rot: number } | null): void {
+  const e = ensureAvenueArrow()
+  VisibilityComponent.getMutable(e).visible = !!slot
+  if (!slot) return
+  const r = (slot.rot * Math.PI) / 180
+  const t = Transform.getMutable(e)
+  t.position = Vector3.create(slot.x + ARROW_STANDOFF * Math.sin(r), slot.y, slot.z + ARROW_STANDOFF * Math.cos(r))
+  t.rotation = Quaternion.fromEulerDegrees(0, (slot.rot + 180) % 360 + ARROW_FORWARD_YAW, 0)
 }
 
 // ── The trail ─────────────────────────────────────────────────
@@ -290,36 +325,47 @@ function applyStage(): void {
 // ── System ────────────────────────────────────────────────────
 
 function onboardingSystem(dt: number): void {
-  if (stage === 'none') return
   elapsed += dt
+  const player = Transform.getOrNull(engine.PlayerEntity)?.position
+
+  // ── Always-on shell highlight — runs regardless of `stage`, including 'none' (a
+  // veteran with nothing left to learn), which is the whole point (see module header). ──
+  shellAccum -= dt
+  if (player && shellAccum <= 0) {
+    shellAccum = ONBOARDING_REPICK_S
+    const wanted: Array<{ x: number; z: number; rot: number }> = myPlanters(player)
+    if (stage === 'plant' && heldBoxId) {
+      const p = freePlanterPos(heldBoxId)
+      if (p) wanted.push({ x: p.x, z: p.z, rot: p.rot })
+    }
+    shellsOnPlanters(wanted)
+    // The Avenue slot gets its OWN marker, not the shell pool: shellsOnPlanters always
+    // plants its pool at ground level (y=0), which is already wrong for a wall cube at
+    // one of three different heights — and KJ 2026-09-22 also flagged the shell model
+    // itself as the wrong fit for a wall slot. An arrow (see ensureAvenueArrow) fixes both.
+    showAvenueArrow(stage === 'avenue' ? nearestFreeAvenueSlot(player) : null)
+  }
+
+  if (stage === 'none') return
 
   // Nothing droops during a bloom and the server rejects watering outright — telling a
   // new player to tap a plant right then would only earn them a rejection.
   if (stage === 'water' && isBloomActive()) { clearVisuals(); return }
 
-  const player = Transform.getOrNull(engine.PlayerEntity)?.position
   if (!player) return
 
   if (stage === 'gift' || stage === 'pouch') {
     // No trail: gift's target is another player, who moves, and pouch's is a HUD chip.
     // The line (plus, for pouch, the chip's own pulse) is the whole lesson.
     showChevrons(false)
-    showShells(false)
     showBeacons(false)
     showPersistent(stage === 'pouch' ? ONBOARDING_POUCH_HINT : ONBOARDING_GIFT_HINT)
     return
   }
 
   if (stage === 'avenue') {
-    // A shell only, no trail: the Avenue sits right where the garden starts, so a new
-    // player doesn't need walking to it — just help finding ONE spot among 72 look-alikes
-    // (same reason 'plant' wears a shell, not just an arrow).
-    repickIn -= dt
-    if (repickIn <= 0) {
-      repickIn = ONBOARDING_REPICK_S
-      const slot = nearestFreeAvenueSlot(player)
-      shellsOnPlanters(slot ? [slot] : [])
-    }
+    // No trail: the Avenue sits right where the garden starts, so a new player doesn't
+    // need walking to it — the shell (always-on block, above) is the whole lesson.
     showChevrons(false)
     showBeacons(false)
     showPersistent(ONBOARDING_AVENUE_HINT)
@@ -336,10 +382,10 @@ function onboardingSystem(dt: number): void {
   } else if (stage === 'harvest') {
     if (repickIn <= 0) {
       repickIn = ONBOARDING_REPICK_S
-      // EVERY flower of theirs that is standing open gets a shell and a beacon; the trail
-      // walks them to the nearest, because they can only go to one at a time.
+      // EVERY flower of theirs that is standing open gets a beacon; the trail walks them
+      // to the nearest, because they can only go to one at a time. (The shell is handled
+      // by the always-on block above — myPlanters already covers every opened one.)
       const mine = myOpenedPlanters(player)
-      shellsOnPlanters(mine)
       beaconTargets = mine.map(b => Vector3.create(b.x, 0, b.z))
       target = mine.length > 0 ? Vector3.create(mine[0].x, 0, mine[0].z) : null
     }
@@ -403,8 +449,7 @@ export function setupOnboarding(): void {
   })
   room.onMessage('boxReserved', (data) => {
     heldBoxId = data.boxId
-    if (!heldBoxId) showShells(false)
-    else console.log(`[Onboarding] planter ${heldBoxId} held for this gardener`)
+    if (heldBoxId) console.log(`[Onboarding] planter ${heldBoxId} held for this gardener`)
   })
   // A box opening or a gardener arriving can start a stage, and neither sends
   // onboardingState — so re-evaluate on a slow tick rather than only on messages.

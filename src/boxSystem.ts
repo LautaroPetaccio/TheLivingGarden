@@ -168,6 +168,23 @@ export function myOpenedPlanter(from: { x: number; z: number }): { boxId: string
   return myOpenedPlanters(from)[0] ?? null
 }
 
+/** EVERY planter I own, growing or opened — the always-on highlight (onboarding.ts) uses
+ *  this so a returning player can find their own planters among 50+ look-alikes at any
+ *  time, not just during the first-time tutorial (KJ 2026-09-22: "impossible to find"). */
+export function myPlanters(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number }[] {
+  const mine: { boxId: string; x: number; z: number; rot: number; sq: number }[] = []
+  for (const v of views.values()) {
+    if (!isMine(v) || deleted.has(v.boxId)) continue
+    const p = layout.get(v.boxId)
+    if (!p) continue
+    const dx = p.x - from.x
+    const dz = p.z - from.z
+    mine.push({ boxId: v.boxId, x: p.x, z: p.z, rot: p.rot, sq: dx * dx + dz * dz })
+  }
+  mine.sort((a, b) => a.sq - b.sq)
+  return mine.map(m => ({ boxId: m.boxId, x: m.x, z: m.z, rot: m.rot }))
+}
+
 /** Perf test (potStressTest): hide/show every planter — base, plant, balloon and plaque —
  *  so its cost can be measured against a frame rate instead of estimated from tri counts. */
 export function setAllPlantersVisible(visible: boolean): void {

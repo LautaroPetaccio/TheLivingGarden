@@ -675,14 +675,12 @@ export const PODIUM_ROTATION_Y = 0
  *  escape hatch if four skinned avatars cost too much frame rate on the iMac. */
 export const PODIUM_COUNT      = PODIUM_SLOTS.length
 /** Name plate height above the rail. */
-export const PODIUM_LABEL_Y    = 2.3
 /** Tap targets that page through the board sit this far out past the end pods. */
 export const PODIUM_PAGE_OFFSET = 0.75
 /** The page buttons were collider-only and therefore invisible (KJ 2026-09-21). They now
  *  render a small emissive panel with a label on it, at roughly chest height on the rail. */
 export const PODIUM_PAGE_SIZE   = { x: 0.55, y: 0.55, z: 0.08 }
 export const PODIUM_PAGE_Y      = 1.15   // above the rail top
-export const PODIUM_PAGE_COLOR  = { r: 0.98, g: 0.78, b: 0.46 }
 
 // ── Test tooling ─────────────────────────────────────────────
 /** Wallets allowed to use test handlers that write PERMANENT data (lifetime board /
@@ -769,9 +767,13 @@ export const TRIBUTE_REGISTER_POS = { x: 8.7, y: 1.25, z: 20.3 } as const
 export interface FoundingTribute { displayName: string; address: string; note: string }
 /** Seeded on first run — v2 ships with the first tribute already grown (GDD §4.2).
  *  address: fill in the honoree's wallet when known → the server also seeds their
- *  lifetime total to TRIBUTE_MILESTONE so they carry golden flair on the boards. */
+ *  lifetime total to TRIBUTE_MILESTONE so they carry golden flair on the boards.
+ *  EMPTY for now (KJ 2026-09-22: "remove the tribute plaque and tribute plant to Peter
+ *  for now") — server.ts's loadTributes() retracts any founding tribute no longer listed
+ *  here, so this alone removes the plant + plaque + register line on the next server
+ *  restart. Re-add the PeterParker entry below to regrow it exactly as before. */
 export const FOUNDING_TRIBUTES: ReadonlyArray<FoundingTribute> = [
-  { displayName: 'PeterParker', address: '0xCE0A77432DC952460c6cA1B8d8cf54169db3e210', note: 'v1 gardener - reached 1,000 waters twice' },
+  // { displayName: 'PeterParker', address: '0xCE0A77432DC952460c6cA1B8d8cf54169db3e210', note: 'v1 gardener - reached 1,000 waters twice' },
 ]
 /** GLB paths; empty = greybox stand-in. Founding gets a unique model (KJ's custom rose),
  *  every later tribute reuses ONE standard plant tinted per player + a plaque. */

@@ -6,6 +6,8 @@
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
 import { Color4 } from '@dcl/sdk/math'
+import { getPlayer } from '@dcl/sdk/players'
+import { ADMIN_ADDRESSES } from './shared/config'
 import {
   setOverrideDailyLimit,
   setUseClickbox,
@@ -130,6 +132,10 @@ function SeedBtn({ label, color, onClick, last = false }: { label: string; color
 // ── Component ────────────────────────────────────────────────────
 
 export function TestPanelUi() {
+  // Reviewer/tester tools only (file header) — never rendered for a regular player.
+  // Every action behind it is ALSO admin-gated server-side, so this is a visibility/
+  // clutter fix, not a security one (KJ 2026-09-22: "make it invisible except to admin").
+  if (!ADMIN_ADDRESSES.includes((getPlayer()?.userId ?? '').toLowerCase())) return null
   const s   = getWateringStatus()
 
   return (
