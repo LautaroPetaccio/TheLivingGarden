@@ -61,7 +61,10 @@ export const room = registerMessages({
   /** Tap a nearby player: give them one flower from your collection (by index). */
   giftFlower:       Schemas.Map({ toAddress: Schemas.String, flowerIndex: Schemas.Number }),
   /** Server → player: their keepsake collection + box cap (after harvest/gift, and on join). */
-  collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number }),
+  /** avenueSlotsFree: how many MORE flowers this gardener could put on the Avenue right
+   *  now (slots their flair has earned, minus slots they're already using) — lets the
+   *  client onboarding hint know when to point at the Avenue without a extra round trip. */
+  collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number, avenueSlotsFree: Schemas.Number }),
   /** Hold one keepsake in your hand (by collection index), or -1 to put it away. */
   holdFlower:       Schemas.Map({ flowerIndex: Schemas.Number }),
   /** Equip a seed of this rarity tier into your hand, REPLACING whatever was there —
@@ -104,7 +107,7 @@ export const room = registerMessages({
    *  replays for someone who has done it — and a gardener who watered last visit but
    *  never got as far as planting still gets the planting half next time.
    *  Sent on full sync and again after each first. */
-  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, pouchOpened: Schemas.Boolean }),
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, pouchOpened: Schemas.Boolean, avenueUsed: Schemas.Boolean }),
   /** Client → server: I opened the seed pouch for the first time. Ends the tutorial stage
    *  that pulses the chip (Fin 2026-09-21 never noticed the pouch existed). */
   markPouchOpened:  Schemas.Map({}),

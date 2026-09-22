@@ -39,7 +39,7 @@ import { Quaternion } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import { showToast } from './notifications'
 import { getPlayer } from '@dcl/sdk/players'
-import { getFlowers, setFlowers, setBoxCap, registerGiftApi, Keepsake, setHeld, heldFlowerIndex, setDiscovered } from './playerInventory'
+import { getFlowers, setFlowers, setBoxCap, setAvenueSlotsFree, registerGiftApi, Keepsake, setHeld, heldFlowerIndex, setDiscovered } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
 import { rarityTierById, plantSpeciesById, withArticle, seedModelSrc, SEED_HAND_SCALE } from './shared/config'
 import { isBloomFlowerActive } from './bloomFlowerSystem'
@@ -206,6 +206,7 @@ export function setupGiftSystem(): void {
     try { list = JSON.parse(data.flowersJson) } catch { list = [] }
     setFlowers(list)
     setBoxCap(data.boxCap)
+    setAvenueSlotsFree(data.avenueSlotsFree)
     console.log(`[Gift] collection: ${list.length} flower(s), box cap ${data.boxCap}`)
   })
 

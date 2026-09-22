@@ -13,7 +13,7 @@
 // =============================================================
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
-import { engine, Entity, Transform, VirtualCamera, MainCamera, timers } from '@dcl/sdk/ecs'
+import { engine, Entity, Transform, VirtualCamera, MainCamera } from '@dcl/sdk/ecs'
 import {
   AVENUE_CAMERA_ZOOM, AVENUE_CAMERA_PUSH_FRACTION, AVENUE_CAMERA_MIN_DIST, AVENUE_CAMERA_MS,
   PLANTER_TIDY_MIN_AWAY_MS, rarityTierById, plantSpeciesById,
@@ -41,14 +41,12 @@ let card: AvenueCardData | null = null
 let camera: Entity | null = null
 let target: Entity | null = null
 let onRecall: (() => void) | null = null
-/** The player's own camera pose at the moment the card opened — the close transition eases
- *  BACK to this exact pose before releasing control, instead of handing control back to the
- *  live camera directly. */
-let basePos: { x: number; y: number; z: number } | null = null
-let baseRot: { x: number; y: number; z: number; w: number } | null = null
 
 export function isAvenueCardOpen(): boolean { return card !== null }
 
+// Camera move is OFF (AVENUE_CAMERA_ZOOM — see config.ts for why). Kept simple, as a single
+// camera with a direct release on close, rather than the two-camera eased-return version
+// that made things worse: fewer moving parts is the safer state to leave this in.
 export function showAvenueCard(data: AvenueCardData, recall: () => void): void {
   closeAvenueCard()
   card = data
@@ -57,18 +55,16 @@ export function showAvenueCard(data: AvenueCardData, recall: () => void): void {
   const flowerPos = { x: data.at.x, y: data.at.y + 0.25, z: data.at.z }
   const playerCam = Transform.getOrNull(engine.CameraEntity)
   if (!playerCam) return   // no live camera to record — skip the move entirely rather than guess
-  basePos = playerCam.position
-  baseRot = playerCam.rotation
+  const base = playerCam.position
   // Lean in by a FRACTION of however far the player already is, not toward a fixed close
-  // distance — proportional, so standing close to a cube doesn't turn into a macro shot
-  // (KJ 2026-09-22).
-  const dx = flowerPos.x - basePos.x, dz = flowerPos.z - basePos.z
+  // distance — proportional, so standing close to a cube doesn't turn into a macro shot.
+  const dx = flowerPos.x - base.x, dz = flowerPos.z - base.z
   const dist = Math.max(0.001, Math.hypot(dx, dz))
   const push = Math.min(dist * AVENUE_CAMERA_PUSH_FRACTION, Math.max(0, dist - AVENUE_CAMERA_MIN_DIST))
   target = engine.addEntity()
   Transform.create(target, { position: flowerPos })
   camera = engine.addEntity()
-  Transform.create(camera, { position: { x: basePos.x + (dx / dist) * push, y: basePos.y, z: basePos.z + (dz / dist) * push } })
+  Transform.create(camera, { position: { x: base.x + (dx / dist) * push, y: base.y, z: base.z + (dz / dist) * push } })
   VirtualCamera.create(camera, { defaultTransition: { transitionMode: VirtualCamera.Transition.Time(AVENUE_CAMERA_MS / 1000) }, lookAtEntity: target })
   MainCamera.createOrReplace(engine.CameraEntity, { virtualCameraEntity: camera })
 }
@@ -76,34 +72,12 @@ export function showAvenueCard(data: AvenueCardData, recall: () => void): void {
 export function closeAvenueCard(): void {
   card = null
   onRecall = null
-  const zoomCam = camera, lookTarget = target, pos = basePos, rot = baseRot
-  camera = null; target = null; basePos = null; baseRot = null
-  if (zoomCam === null) return
-  if (pos === null || rot === null) {   // shouldn't happen (set together with camera), but never guess a pose
+  if (camera !== null) {
     MainCamera.createOrReplace(engine.CameraEntity, { virtualCameraEntity: undefined })
-    engine.removeEntity(zoomCam)
-    if (lookTarget !== null) engine.removeEntity(lookTarget)
-    return
+    engine.removeEntity(camera)
+    camera = null
   }
-  // Ease back through the EXACT pose the player's camera started from — no lookAtEntity, so
-  // nothing forces a stare — THEN release control. Releasing straight to the live camera
-  // snapped hard: the SDK's eased transition only fires on a virtualCameraEntity SWITCH, so
-  // it can't be trusted to smooth a bare "go back to the default camera" on its own, and
-  // lookAtEntity itself was forcing a rotation the player never actually had (KJ 2026-09-22:
-  // "the return needs to be a gentle zoom, not a spin").
-  const returnCam = engine.addEntity()
-  Transform.create(returnCam, { position: pos, rotation: rot })
-  VirtualCamera.create(returnCam, { defaultTransition: { transitionMode: VirtualCamera.Transition.Time(AVENUE_CAMERA_MS / 1000) } })
-  MainCamera.createOrReplace(engine.CameraEntity, { virtualCameraEntity: returnCam })
-  engine.removeEntity(zoomCam)
-  if (lookTarget !== null) engine.removeEntity(lookTarget)
-  timers.setTimeout(() => {
-    // Only release if nothing newer (another card opened mid-return) has already taken over.
-    if (MainCamera.getOrNull(engine.CameraEntity)?.virtualCameraEntity === returnCam) {
-      MainCamera.createOrReplace(engine.CameraEntity, { virtualCameraEntity: undefined })
-    }
-    engine.removeEntity(returnCam)
-  }, AVENUE_CAMERA_MS + 50)
+  if (target !== null) { engine.removeEntity(target); target = null }
 }
 
 const DARK   = { r: 0.085, g: 0.078, b: 0.067, a: 0.96 }

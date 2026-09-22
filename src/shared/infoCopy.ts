@@ -17,6 +17,7 @@
 import {
   RARITY_TIERS, BOX_GROW_MS, BOX_CAP_DEFAULT, BOX_WATER_MAX, growMsForTier, formatGrowTime,
   GUARANTEED_RARE_AT_CONTRIBUTORS, DECAY_FULL_GARDENERS,
+  AVENUE_MIN_TIER, AVENUE_SLOTS_BY_FLAIR, FLAIR_TIERS, PLANTER_TIDY_MIN_AWAY_MS, rarityTierById,
 } from './config'
 
 export const DISCORD_URL = 'https://discord.gg/gn8hTCYVPJ'
@@ -79,6 +80,15 @@ export const INFO_SECTIONS: ReadonlyArray<InfoSection> = [
     lines: [
       'Anything in My Flowers can be given away. Hold one, walk up to another gardener and tap them.',
       'A gifted flower is theirs to keep, display or pass on.',
+    ],
+  },
+  {
+    title: 'The Avenue',
+    lines: [
+      `${rarityTierById(AVENUE_MIN_TIER).name} flowers and up can stand on show along the entrance wall, for every visitor to see.`,
+      `Slots open with your lifetime waters — the same total that earns your flair: ${FLAIR_TIERS.map((t, i) => `${AVENUE_SLOTS_BY_FLAIR[i + 1]} at ${t}`).join(', ')}.`,
+      'Tap an empty spot on the wall to put one of your flowers there, or an occupied one to see who grew it, who watered it, and how long it has stood.',
+      `If the Avenue is full and you're away ${Math.round(PLANTER_TIDY_MIN_AWAY_MS / 3_600_000)}h+, the longest-away flower moves home to make room for someone new — never lost.`,
     ],
   },
 ]

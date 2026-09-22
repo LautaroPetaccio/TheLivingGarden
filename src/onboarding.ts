@@ -27,7 +27,8 @@ import { room } from './shared/messages'
 import { PlantData } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
 import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters } from './boxSystem'
-import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened } from './playerInventory'
+import { nearestFreeAvenueSlot } from './avenueSystem'
+import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened, getAvenueSlotsFree } from './playerInventory'
 import { showPersistent, hidePersistent, showToast } from './notifications'
 import {
   ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW, ARROW_STANDOFF, ARROW_GROUND_LIFT,
@@ -37,13 +38,13 @@ import {
   TOON_HIGHLIGHT_SRC, TOON_HIGHLIGHT_SCALE,
   ONBOARDING_REPICK_S, ONBOARDING_MAX_RANGE,
   ONBOARDING_WATER_HINT, ONBOARDING_PLANT_HINT, ONBOARDING_HARVEST_HINT, ONBOARDING_GIFT_HINT,
-  ONBOARDING_POUCH_HINT,
+  ONBOARDING_POUCH_HINT, ONBOARDING_AVENUE_HINT,
   ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS,
   ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS,
-  PLANTER_RESERVE_RETRY_S,
+  PLANTER_RESERVE_RETRY_S, AVENUE_MIN_TIER,
 } from './shared/config'
 
-type Stage = 'none' | 'water' | 'plant' | 'pouch' | 'harvest' | 'gift'
+type Stage = 'none' | 'water' | 'plant' | 'pouch' | 'harvest' | 'gift' | 'avenue'
 
 // All four assume DONE until the server says otherwise, so a dropped message never
 // nags a veteran with a tutorial they finished long ago.
@@ -52,6 +53,7 @@ let planted     = true
 let harvested   = true
 let gifted      = true
 let pouchOpened = true
+let avenueUsed  = true
 let hasSeeds = false
 let stage: Stage = 'none'
 let seedToastShown = false
@@ -263,6 +265,9 @@ function currentStage(): Stage {
   if (!harvested && myOpenedPlanter({ x: 0, z: 0 }) !== null) return 'harvest'
   // Gifting needs someone to give TO — never nag a player gardening alone.
   if (harvested && !gifted && getFlowers().length > 0 && gardenersHere().length > 0) return 'gift'
+  // Lowest priority — a bonus once the core loop is already known. Only fires when it's
+  // actually actionable: a slot free AND something in My Flowers good enough for it.
+  if (!avenueUsed && getAvenueSlotsFree() > 0 && getFlowers().some(f => f.rarityTier >= AVENUE_MIN_TIER)) return 'avenue'
   return 'none'
 }
 
@@ -302,6 +307,22 @@ function onboardingSystem(dt: number): void {
     showShells(false)
     showBeacons(false)
     showPersistent(stage === 'pouch' ? ONBOARDING_POUCH_HINT : ONBOARDING_GIFT_HINT)
+    return
+  }
+
+  if (stage === 'avenue') {
+    // A shell only, no trail: the Avenue sits right where the garden starts, so a new
+    // player doesn't need walking to it — just help finding ONE spot among 72 look-alikes
+    // (same reason 'plant' wears a shell, not just an arrow).
+    repickIn -= dt
+    if (repickIn <= 0) {
+      repickIn = ONBOARDING_REPICK_S
+      const slot = nearestFreeAvenueSlot(player)
+      shellsOnPlanters(slot ? [slot] : [])
+    }
+    showChevrons(false)
+    showBeacons(false)
+    showPersistent(ONBOARDING_AVENUE_HINT)
     return
   }
 
@@ -370,6 +391,7 @@ export function setupOnboarding(): void {
     harvested   = !!data.harvested
     gifted      = !!data.gifted
     pouchOpened = !!data.pouchOpened
+    avenueUsed  = !!data.avenueUsed
     if (justPlanted) showToast(ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS)
     applyStage()
   })

@@ -786,7 +786,7 @@ const loadFlowers = (a: string) => loadPlayerJson<FlowerKeepsake[]>(a, 'flowers'
 // ── Onboarding (v2): the two firsts the in-world tutorial waits on. Persisted per
 // wallet so the lesson never replays for a gardener who has done it — and a gardener
 // who watered last visit but never got as far as planting still gets taught planting.
-interface OnboardingRecord { watered: boolean; planted: boolean; harvested: boolean; gifted: boolean; pouchOpened: boolean }
+interface OnboardingRecord { watered: boolean; planted: boolean; harvested: boolean; gifted: boolean; pouchOpened: boolean; avenueUsed: boolean }
 async function loadOnboarding(address: string): Promise<OnboardingRecord> {
   // Backfill for gardeners who predate this record (the key landed 2026-09-20): without it
   // every existing player is handed the beginner tutorial at launch. Used ONLY as the
@@ -801,6 +801,9 @@ async function loadOnboarding(address: string): Promise<OnboardingRecord> {
     // Same condition as `planted`: anyone who has already grown something has been
     // around long enough not to be taught where their own pouch is.
     pouchOpened: boxesOwnedBy(address) > 0 || flowers.length > 0,
+    // Unlike `gifted`, this one CAN be backfilled accurately: the Avenue tracks its own
+    // owners, so a gardener who already has a flower on show is never nagged about it.
+    avenueUsed:  [...avenue.values()].some(r => r.owner === address),
   }))
   // Migrate on load: a record written before a field existed reads back undefined,
   // and an undefined in a Schemas.Boolean field throws inside the event bus. The
@@ -810,11 +813,12 @@ async function loadOnboarding(address: string): Promise<OnboardingRecord> {
   o.harvested = !!o.harvested
   o.gifted    = !!o.gifted
   o.pouchOpened = !!o.pouchOpened
+  o.avenueUsed  = !!o.avenueUsed
   return o
 }
 async function sendOnboarding(address: string): Promise<void> {
   const o = await loadOnboarding(address)
-  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted, pouchOpened: o.pouchOpened }, { to: [address] })
+  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted, pouchOpened: o.pouchOpened, avenueUsed: o.avenueUsed }, { to: [address] })
 }
 // ── Tutorial planter reservations (Phase 2). In memory only: a server restart just
 // means the tutorial re-asks. The CLIENT chooses which planter (the server has no
@@ -940,7 +944,8 @@ async function markDiscovered(address: string, flower: string, tier: number): Pr
 async function sendCollection(address: string): Promise<void> {
   const flowers = await loadFlowers(address)
   const cap     = await planterCap(address)
-  room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap }, { to: [address] })
+  const free    = Math.max(0, avenueSlotsFor(lifetime.get(address)?.total ?? 0) - avenueSlotsOwnedBy(address))
+  room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap, avenueSlotsFree: free }, { to: [address] })
 }
 
 // ── v2: held flower — one keepsake per gardener, shown in their hand to everyone.
@@ -1843,6 +1848,7 @@ export async function server(): Promise<void> {
     void saveAvenue()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
+    void markOnboarding(playerAddress, 'avenueUsed')
     sendNotice(playerAddress, `Your ${plantSpeciesById(f.flower)?.name ?? f.flower} is on the Avenue with your name on it`)
   })
 

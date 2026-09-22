@@ -77,6 +77,13 @@ export function setFlowers(list: Keepsake[]): void { flowers = list }
 export function getBoxCap(): number { return boxCap }
 export function setBoxCap(n: number): void { boxCap = n }
 
+/** How many MORE flowers this gardener could put on the Avenue right now — server-owned,
+ *  refreshed alongside the collection (harvest/gift/display/recall/join). Onboarding uses
+ *  it to know when a nudge toward the Avenue is actually actionable. */
+let avenueSlotsFree = 0
+export function getAvenueSlotsFree(): number { return avenueSlotsFree }
+export function setAvenueSlotsFree(n: number): void { avenueSlotsFree = n }
+
 // Onboarding stage 3 (pouch) crosses the same seam as gifting: the tutorial SETS the
 // hint, the HUD reads it, and the HUD calls back the first time the pouch is opened.
 // It lives here rather than the HUD importing onboarding directly, because that would

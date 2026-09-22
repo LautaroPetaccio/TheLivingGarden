@@ -357,6 +357,7 @@ export const ONBOARDING_LOOP_TOAST_MS = 10_000
 export const ONBOARDING_HARVEST_HINT  = 'Your flower opened — tap it to keep it, or leave it on show'
 /** Stage 5 — shown only while another gardener is actually here. */
 export const ONBOARDING_GIFT_HINT     = 'Tap a gardener to give them one of your flowers'
+export const ONBOARDING_AVENUE_HINT   = 'You have a flower worthy of the Avenue - tap the glowing spot to put it on show'
 /** One-off toast when the first seed lands in the pouch. */
 export const ONBOARDING_SEED_TOAST = 'You caught a seed — plant it and it opens on a real-world timer'
 export const ONBOARDING_SEED_TOAST_MS = 7_000
@@ -896,20 +897,21 @@ export const AVENUE_FLOWER_SCALE = 0.85
  *  shader; GltfNodeModifiers can only dim the albedo uniformly (see plantVfx.ts's own
  *  note on what that component can and can't retint). */
 export const AVENUE_WILD_TINT = 0.4
-/** Inspect card (design/communal-planters.md "zooms in on plant"): a VirtualCamera LEANS
- *  IN from the player's own camera toward the flower, by a FRACTION of however far the
- *  player already is — proportional, so someone already standing close to a cube doesn't
- *  get shoved into a jarring macro close-up (KJ 2026-09-22: a fixed close distance did
- *  exactly that). Closing eases back through the player's EXACT recorded starting pose
- *  (avenueCard.tsx closeAvenueCard) before releasing control — a plain lookAtEntity snap on
- *  release read as a spin whenever the flower wasn't already dead-centre in view, since
- *  lookAtEntity forces the camera to stare at it regardless of where the player was
- *  actually looking. UNVERIFIED on desktop 0.174 and on the Godot mobile client — set
- *  false and the card still opens, the camera just stays put. */
-export const AVENUE_CAMERA_ZOOM          = true
+/** Inspect card (design/communal-planters.md "zooms in on plant") camera move — OFF for
+ *  now (2026-09-22). Two blind attempts (a fixed-point placement, then a two-camera eased
+ *  "return to the exact starting pose" close) both read as worse than no camera move at
+ *  all — KJ: "still terrible, like a bunch of things happening at once" on the second one.
+ *  Neither attempt could be watched live, so this stopped rather than guess a third time.
+ *  The card's information works with this off; re-enabling needs either watching it
+ *  together in-world or real docs on how the explorer actually blends a virtualCameraEntity
+ *  switch (the two-hop close relied on that being smooth, and evidently it wasn't, or the
+ *  extra entities/timers it juggled were themselves the "bunch of things"). Code kept in
+ *  avenueCard.tsx, simplified back to a single camera / single direct release — the
+ *  smaller of the two attempts, in case this gets picked up again. */
+export const AVENUE_CAMERA_ZOOM          = false
 export const AVENUE_CAMERA_PUSH_FRACTION = 0.35   // lean in by at most this fraction of the player's own distance — TUNING
 export const AVENUE_CAMERA_MIN_DIST      = 0.6    // safety floor only — never end up closer than this (clipping) — TUNING
-export const AVENUE_CAMERA_MS            = 600    // transition duration, each leg (open, and each half of the close)
+export const AVENUE_CAMERA_MS            = 600    // transition duration
 /** Lowest rarity tier allowed on the Avenue (2 = Rare). TUNING — drop to 1 (Uncommon)
  *  if the Avenue is mostly empty after launch week (hypothesis H2-07). */
 export const AVENUE_MIN_TIER = 2
