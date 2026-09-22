@@ -1,0 +1,47 @@
+name: CI
+
+# Type-checks, tests and builds the scene on every pull request, and on pushes to
+# the long-lived branches. Read-only: it never signs or deploys anything.
+
+on:
+  push:
+    branches: [main, V2]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: Type-check, test and build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # package-lock.json is gitignored here, so there is no lockfile to install
+          # from and nothing to key the cache on but the manifest. A transitive
+          # release can therefore change what CI resolves without the repo changing.
+          cache: npm
+          cache-dependency-path: package.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Type-check the scene
+        run: npx tsc --noEmit -p tsconfig.json
+
+      - name: Type-check the tests
+        run: npx tsc --noEmit -p tsconfig.test.json
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
