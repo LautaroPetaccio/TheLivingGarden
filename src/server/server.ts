@@ -65,11 +65,10 @@ import {
   BOX_WATER_MAX,
   plantSpeciesById,
   rarityTierById,
-  FLAIR_TIERS,
   AVENUE_POSITIONS,
   AVENUE_MIN_TIER,
   AVENUE_NEVER_TIDY_TIER,
-  avenueSlotsFor,
+  avenueSlotCap,
 } from '../shared/config'
 
 // ---------------------------------------------------------------
@@ -343,16 +342,13 @@ function tierOf(address: string): number {
   return flairTier(lifetime.get(address)?.total ?? 0)
 }
 
-/** "N lifetime waters — your name now carries X" — plus a one-time Avenue-unlock line the
- *  FIRST time a slot opens (tier 1 = 100 waters = AVENUE_SLOTS_BY_FLAIR[1] = the first slot).
- *  Shared by the real crossing (waterPlant) and the test-panel shortcut (adminGrantWaters),
- *  so a tester granting waters gets told about the Avenue exactly like a real player would. */
+/** "N lifetime waters — your name now carries X". Shared by the real crossing (waterPlant)
+ *  and the test-panel shortcut (adminGrantWaters). (The Avenue no longer unlocks by flair —
+ *  AVENUE_SLOT_CAP — so the unlock line that used to ride on tier 1 is gone; the onboarding
+ *  'avenue' stage does that job the moment a player actually has a Rare to display.) */
 function flairTierMessage(tier: number, total: number): string {
   const names = ['', 'a sprout', 'a flower', 'a golden flower']
-  const avenueHint = tier === 1 && AVENUE_POSITIONS.length > 0
-    ? ` — and a slot has opened on the Avenue: display your best flowers by the garden entrance`
-    : ''
-  return `${total} lifetime waters — your name now carries ${names[tier]}${avenueHint}`
+  return `${total} lifetime waters — your name now carries ${names[tier]}`
 }
 
 // Almanac rung count per gardener, mirrored in memory so the watering and board paths can
@@ -383,6 +379,16 @@ function boardJson(board: Map<string, LeaderboardEntry>): string {
   )
 }
 
+/** Where one gardener stands on a board — ranked against EVERY entry, not the top-10 slice,
+ *  so someone outside the list still gets a real number. rank 0 = not on the board. */
+function standingIn(board: Map<string, LeaderboardEntry>, address: string): { rank: number; count: number } {
+  const mine = board.get(address)
+  if (!mine) return { rank: 0, count: 0 }
+  let ahead = 0
+  for (const other of board.values()) if (other.total > mine.total) ahead++
+  return { rank: ahead + 1, count: mine.total }
+}
+
 function broadcastLeaderboard(to?: string[]): void {
   void ensureWeeklyReset().catch(err => console.error('[Server] weekly reset failed:', err))
   const payload = { entriesJson: boardJson(leaderboard), allTimeJson: boardJson(lifetime), weeklyResetAt }
@@ -392,6 +398,13 @@ function broadcastLeaderboard(to?: string[]): void {
   } else {
     // Broadcast — reaches all connected clients including the triggering player
     room.send('leaderboardUpdate', payload)
+  }
+  // Each recipient also gets their OWN standing — one small per-player message rather than
+  // a per-player board, since the board itself is identical for everyone.
+  for (const address of to ?? [...new Set(playerAddresses.values())]) {
+    const w = standingIn(leaderboard, address)
+    const a = standingIn(lifetime, address)
+    room.send('yourStanding', { weeklyRank: w.rank, weeklyCount: w.count, allTimeRank: a.rank, allTimeCount: a.count }, { to: [address] })
   }
 }
 
@@ -951,7 +964,7 @@ async function markDiscovered(address: string, flower: string, tier: number): Pr
 async function sendCollection(address: string): Promise<void> {
   const flowers = await loadFlowers(address)
   const cap     = await planterCap(address)
-  const free    = Math.max(0, avenueSlotsFor(lifetime.get(address)?.total ?? 0) - avenueSlotsOwnedBy(address))
+  const free    = Math.max(0, avenueSlotCap() - avenueSlotsOwnedBy(address))
   room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap, avenueSlotsFree: free }, { to: [address] })
 }
 
@@ -1827,8 +1840,7 @@ export async function server(): Promise<void> {
   // ── The Avenue: display / recall / inspect ───────────────────
   onRoomMessage<{ slotId: string; flowerIndex: number }>('displayFlower', async (data, playerAddress) => {
     if (avenue.size === 0) { sendNotice(playerAddress, 'The Avenue is not open yet'); return }
-    const cap = avenueSlotsFor(lifetime.get(playerAddress)?.total ?? 0)
-    if (cap === 0) { sendNotice(playerAddress, `Your first Avenue slot opens at ${FLAIR_TIERS[0]} lifetime waters`); return }
+    const cap = avenueSlotCap()   // every slot when AVENUE_SLOT_CAP is 0 — then only a full wall stops you
     if (avenueSlotsOwnedBy(playerAddress) >= cap) { sendNotice(playerAddress, cap === 1 ? 'You already have a flower on the Avenue — take it back first' : `You already have ${cap} flowers on the Avenue`); return }
     const flowers = await loadFlowers(playerAddress)
     const idx = Math.floor(data.flowerIndex)

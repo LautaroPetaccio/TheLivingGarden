@@ -17,7 +17,7 @@
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
 import { PLANT_SPECIES, RARITY_TIERS, rarityTierById, plantSpeciesById, nextMilestone, milestoneTarget, milestoneTitle, growMsForTier, shortGrowTime, AVENUE_MIN_TIER } from './shared/config'
-import { setPreferredTier, nextSeedTier, getPouch, getFlowers, getDiscovered, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed, displayOnAvenue } from './playerInventory'
+import { setPreferredTier, nextSeedTier, getPouch, getFlowers, getDiscovered, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed, displayOnAvenue, armAvenuePlacement } from './playerInventory'
 import { showToast } from './notifications'
 
 /** 128 px thumbnails made from each species' asset-pack thumbnail.png (assets/images/plantThumbs). */
@@ -39,7 +39,7 @@ export function isSeedMenuOpen(): boolean { return open }
 export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; page = 0; almanacPage = 0; almanacSel = null; tierFilter = null; avenueSlot = null } }
 export function openSeedMenu(): void { open = true }
 /** Tapped an empty Avenue planter with nothing in hand: open Flowers so they can pick one for it. */
-export function openSeedMenuForAvenue(slotId: string): void { open = true; tab = 'flowers'; avenueSlot = slotId; selectedKey = ''; giftMode = false; page = 0 }
+export function openSeedMenuForAvenue(slotId: string): void { open = true; tab = 'flowers'; avenueSlot = slotId; selectedKey = ''; giftMode = false; page = 0; armAvenuePlacement(null) }
 
 /** The keepsake index the menu currently has selected for gifting, or null if none —
  *  the world tap-a-player shortcut reuses this instead of guessing "the newest one". */
@@ -390,9 +390,16 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
           onMouseDown={() => {
             if (!sel) return
             if (sel.rarityTier < AVENUE_MIN_TIER) { showToast(`The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`, 4_000, false); return }
-            displayOnAvenue(avenueSlot ?? '', sel.lastIndex); selectedKey = ''; avenueSlot = null; open = false
+            // Opened FROM a slot: straight in, that slot was the choice. Opened from the
+            // pouch: arm it and let them tap the spot they want (KJ 2026-09-22).
+            if (avenueSlot !== null) { displayOnAvenue(avenueSlot, sel.lastIndex) }
+            else {
+              armAvenuePlacement(sel.lastIndex)
+              showToast('Now tap the spot on the Avenue wall where you want it', 6_000, false)
+            }
+            selectedKey = ''; avenueSlot = null; open = false
           }}>
-          <Label value={avenueSlot ? 'Display here' : 'Avenue'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
+          <Label value={avenueSlot ? 'Display here' : 'Avenue…'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
       </UiEntity>

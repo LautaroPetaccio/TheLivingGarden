@@ -181,6 +181,11 @@ export const room = registerMessages({
    *  entriesJson = this week's board (resets at weeklyResetAt, epoch ms);
    *  allTimeJson = lifetime board, never resets. Entries: {displayName, count, tier}. */
   leaderboardUpdate: Schemas.Map({ entriesJson: Schemas.String, allTimeJson: Schemas.String, weeklyResetAt: Schemas.Int64 }),
+  /** Server → ONE player, alongside every leaderboardUpdate: where THEY stand, ranked
+   *  against the whole board rather than the top-10 slice — so the weekly board can show
+   *  "you are #23" to someone who will never appear in the list itself (KJ 2026-09-22).
+   *  rank 0 = not on the board at all (no waters yet this week). */
+  yourStanding:      Schemas.Map({ weeklyRank: Schemas.Number, weeklyCount: Schemas.Number, allTimeRank: Schemas.Number, allTimeCount: Schemas.Number }),
   // (v2 seed messages registered at the FRONT — see top of registry)
 
   // ── Test-panel only — parked at the tail (see header note) ──

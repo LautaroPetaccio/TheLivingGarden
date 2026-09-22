@@ -50,7 +50,7 @@ import { flairIcon, almanacTitleByRank, bloomSustainMs, bloomVariantById, bloomF
 import { setBloomSparklePalette } from './sparkleSystem'
 import { setAmbientPalette } from './ambientFX'
 import { startMoonlight, stopMoonlight } from './moonlight'
-import { setupLeaderboardBoards, updateLeaderboardDisplay, BoardEntry }   from './leaderboardSystem'
+import { setupLeaderboardBoards, updateLeaderboardDisplay, setYourStanding, BoardEntry }   from './leaderboardSystem'
 import { setupFairyLights, setFairyLightsBloom }             from './fairyLightSystem'
 import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersistent, showBannerIdle, showBannerCountdown, updateBannerCountdown, showBannerBloom, updateBannerHealth, updatePlayerCount, updateBloomRemaining, formatBloomCountdown, getMsUntilBloom, setNextBloomLocalTime } from './notifications'
 import { clockSync } from './shared/clockSync'
@@ -1279,7 +1279,6 @@ function setupPlant(plantName: string) {
   // No Billboard: the drop is a 3D teardrop, symmetric about Y, so facing the camera changed
   // nothing — yet the explorer re-rotated all 38 every frame.
   waterDropMap.set(entity, dropEnt)
-  shownDrops.add(dropEnt)
   pendingDropAnimators.add(dropEnt)
 
   // "Watered by" label — hidden until plant is watered
@@ -1647,6 +1646,10 @@ export function setupWateringSystem(): void {
     updateLeaderboardDisplay({ weekly: parse(data.entriesJson), allTime: parse(data.allTimeJson), weeklyResetAt: Number(data.weeklyResetAt) })
   })
 
+  room.onMessage('yourStanding', (data) => {
+    setYourStanding({ weeklyRank: data.weeklyRank, weeklyCount: data.weeklyCount, allTimeRank: data.allTimeRank, allTimeCount: data.allTimeCount })
+  })
+
   room.onMessage('plantStateUpdate', (data) => {
     const entity = plantNameToEntity.get(data.plantId)
     if (!entity) return
@@ -1775,6 +1778,12 @@ export function setupWateringSystem(): void {
           showRose(entity)
           setDropFade(entity, 'in')
         }
+      } else if (!wasWatered && !isBloomActive() && !bloomActive) {
+        // Droopy from the start (the join snapshot, or never watered this session): the drop
+        // now starts hidden, so this is what makes it appear — before, a full-scale default
+        // did that by accident. Still suppressed during a bloom (KJ 2026-09-22: "no drops on
+        // plants when I loaded in").
+        setDropFade(entity, 'in')
       }
     }
 

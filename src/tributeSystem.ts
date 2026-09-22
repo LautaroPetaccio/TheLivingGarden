@@ -28,7 +28,7 @@ import {
 } from '@dcl/sdk/ecs'
 import { Color4, Quaternion } from '@dcl/sdk/math'
 import { room } from './shared/messages'
-import { TRIBUTE_PLOTS, TRIBUTE_HERO_PLOTS, TRIBUTE_REGISTER_POS, TRIBUTE_MILESTONE, TRIBUTE_MODEL_FOUNDING, TRIBUTE_MODEL_STANDARD } from './shared/config'
+import { TRIBUTE_PLOTS, TRIBUTE_HERO_PLOTS, TRIBUTE_REGISTER_POS, TRIBUTE_REGISTER_ENABLED, TRIBUTE_MILESTONE, TRIBUTE_MODEL_FOUNDING, TRIBUTE_MODEL_STANDARD } from './shared/config'
 import { showToast } from './notifications'
 import { createSign, removeSign, setupSignSystem, Sign } from './signs'
 
@@ -152,10 +152,12 @@ function registerPagerSystem(dt: number): void {
 
 /** Register handlers — MUST be called after wateringSystem's room.clear(). */
 export function setupTributeSystem(): void {
-  const reg = createSign({ ...TRIBUTE_REGISTER_POS }, 0, REGISTER_SIZE, 0.75)
-  registerText = reg.text
-  refreshRegister()
-  engine.addSystem(registerPagerSystem)
+  if (TRIBUTE_REGISTER_ENABLED) {   // registerText stays null otherwise — refreshRegister is a no-op
+    const reg = createSign({ ...TRIBUTE_REGISTER_POS }, 0, REGISTER_SIZE, 0.75)
+    registerText = reg.text
+    refreshRegister()
+    engine.addSystem(registerPagerSystem)
+  }
 
   room.onMessage('tributesUpdate', (data) => {
     let records: TributeRecord[] = []

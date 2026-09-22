@@ -28,12 +28,12 @@ import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
 import {
   AVENUE_POSITIONS, AVENUE_CUBE_FRONT_OFFSET, AVENUE_CUBE_HEIGHT, AVENUE_FLOWER_SCALE,
-  AVENUE_WILD_TINT, PLANT_SPECIES, PlantSpecies, plantSpeciesById, rarityTierById,
+  AVENUE_WILD_TINT, AVENUE_MIN_TIER, PLANT_SPECIES, PlantSpecies, plantSpeciesById, rarityTierById,
 } from './shared/config'
 import { PLANT_MATERIALS } from './plantMaterials'
 import { showToast } from './notifications'
 import { attachPlantVfx, detachPlantVfx } from './plantVfx'
-import { getHeld, heldFlowerIndex, registerAvenueApi } from './playerInventory'
+import { getHeld, heldFlowerIndex, registerAvenueApi, getArmedAvenueFlower, armAvenuePlacement } from './playerInventory'
 import { openSeedMenuForAvenue } from './seedMenu'
 import { createSign, moveSign, Sign } from './signs'
 import { showAvenueCard, closeAvenueCard, isAvenueCardOpen } from './avenueCard'
@@ -50,7 +50,11 @@ const TOAST_MS       = 5_000
 // row above: rows are 0.65 m apart and the first cut (0.5 m box ABOVE each soil) overlapped
 // the cube above it, so the whole wall read as one target (KJ 2026-09-22).
 const HIT_ABOVE_SOIL = 0.18
-const HIT_SIZE       = { x: 0.54, y: AVENUE_CUBE_HEIGHT + HIT_ABOVE_SOIL, z: AVENUE_CUBE_FRONT_OFFSET + 0.05 }
+// Reaches 0.35 m FURTHER out than the cube's own face so a click aimed just in front of a
+// slot still lands (nothing blocks it — scene.glb's visible meshes carry no collision).
+// Width stays inside the 0.77 m column pitch and height inside the 0.65 m row pitch, so
+// neighbouring slots still can't steal each other's taps.
+const HIT_SIZE       = { x: 0.62, y: AVENUE_CUBE_HEIGHT + HIT_ABOVE_SOIL, z: AVENUE_CUBE_FRONT_OFFSET + 0.35 }
 // Plaque on the cube's front face, just proud of it, centred on the face
 const PLAQUE_OUT     = AVENUE_CUBE_FRONT_OFFSET + 0.02
 const PLAQUE_DROP    = AVENUE_CUBE_HEIGHT / 2
@@ -118,13 +122,21 @@ export function avenueSlotIds(): string[] { return [...views.keys()] }
 /** Onboarding: the nearest EMPTY slot to a point — mirrors boxSystem's
  *  nearestFreePlanter, same purpose (a shell highlight to make one findable among 72). */
 export function nearestFreeAvenueSlot(from: { x: number; z: number }): { slotId: string; x: number; y: number; z: number; rot: number } | null {
+  // Columns hold two slots (y 1.13 and 2.43) at the SAME x/z, so distance alone ties and
+  // array order always won — which meant the marker usually pointed overhead at the top
+  // row. Break the tie toward eye height so the prompt lands on a slot you can easily hit.
+  const EYE = 1.6
   let best: { slotId: string; x: number; y: number; z: number; rot: number } | null = null
-  let bestSq = Infinity
+  let bestSq = Infinity, bestDy = Infinity
   for (const v of views.values()) {
     if (v.owner) continue
     const dx = v.pos.x - from.x, dz = v.pos.z - from.z
     const sq = dx * dx + dz * dz
-    if (sq < bestSq) { bestSq = sq; best = { slotId: v.slotId, x: v.pos.x, y: v.pos.y, z: v.pos.z, rot: v.pos.rot } }
+    const dy = Math.abs(v.pos.y - EYE)
+    if (sq < bestSq - 0.01 || (Math.abs(sq - bestSq) <= 0.01 && dy < bestDy)) {
+      bestSq = Math.min(sq, bestSq); bestDy = dy
+      best = { slotId: v.slotId, x: v.pos.x, y: v.pos.y, z: v.pos.z, rot: v.pos.rot }
+    }
   }
   return best
 }
@@ -264,9 +276,26 @@ function plaqueHomeSystem(dt: number): void {
 // ---------------------------------------------------------------
 
 function onTap(v: SlotView): void {
+  console.log(`[Avenue] tap ${v.slotId} (owner ${v.owner ? v.owner.slice(0, 8) + '…' : 'free'}, armed ${getArmedAvenueFlower() ?? 'none'})`)
   if (!v.owner) {
-    const idx = getHeld() ? heldFlowerIndex() : null
-    if (idx !== null) { console.log(`[Avenue] displaying keepsake ${idx} at ${v.slotId}`); room.send('displayFlower', { slotId: v.slotId, flowerIndex: idx }); return }
+    // 1. A flower armed from the menu goes exactly where they tapped — this is how a
+    //    player chooses their own slot.
+    const armed = getArmedAvenueFlower()
+    if (armed !== null) {
+      armAvenuePlacement(null)
+      room.send('displayFlower', { slotId: v.slotId, flowerIndex: armed })
+      return
+    }
+    // 2. Shortcut: holding an ELIGIBLE flower puts it straight in. Holding an ineligible
+    //    one used to fire a request the server could only refuse, which read as nothing
+    //    happening — now it opens the menu for this slot and says why.
+    const held = getHeld()
+    const idx  = held ? heldFlowerIndex() : null
+    if (held && idx !== null && held.rarityTier >= AVENUE_MIN_TIER) {
+      room.send('displayFlower', { slotId: v.slotId, flowerIndex: idx })
+      return
+    }
+    if (held && idx !== null) showToast(`Your ${speciesName(held.flower)} is a ${rarityTierById(held.rarityTier).name} — the Avenue takes ${rarityTierById(AVENUE_MIN_TIER).name} and up`, TOAST_MS, false)
     openSeedMenuForAvenue(v.slotId)
     return
   }
@@ -322,7 +351,7 @@ export function setupAvenueSystem(): void {
     refresh(v)
     if (isAvenueCardOpen() && openCardSlot === v.slotId) { if (v.owner) openCard(v); else closeAvenueCard() }
     const at = { x: v.pos.x, y: v.pos.y, z: v.pos.z }
-    if (live && !wasOwned && v.owner) playSfx('plant', at)
+    if (live && !wasOwned && v.owner) { playSfx('plant', at); if (isMine(v)) armAvenuePlacement(null) }
     if (live && wasMine && !v.owner) playSfx('harvest')
   })
 

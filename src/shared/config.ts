@@ -166,7 +166,9 @@ export function plantDecayMs(plantId: string, gardeners: number): number {
 // rot = degrees about Y; 0 = front (sign side) faces +z. Ids are stable: box_1..box_8
 // kept their records (planted seeds moved onto these first eight spots).
 // BAKED from KJ's in-world planter editor (planterLayoutTool). 96 -> 51 (2026-09-21)
-// -> 54 (2026-09-22, WIP). KJ is laying ONE SIDE
+// -> 54 (2026-09-22) -> re-baked 2026-09-22 15:37 from the saved draft (10 planters
+// nudged, none added or removed; Storage draft and KJ's pasted export agreed exactly).
+// KJ is laying ONE SIDE
 // out first and will mirror it across afterwards, so the current list is deliberately
 // lopsided — do not "fix" the asymmetry. A planted planter that leaves this list is not
 // lost: loadBoxes collects it into orphanedBoxes and tidyPlanter returns the contents to
@@ -200,30 +202,30 @@ export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number; ro
   { id: 'box_70', x: 30.9, z: -0.3, rot: 270 },
   { id: 'box_71', x: 30.9, z: 1.9, rot: 270 },
   { id: 'box_72', x: 30.9, z: 3, rot: 270 },
-  { id: 'box_73', x: 26.3, z: 8.3, rot: 180 },
+  { id: 'box_73', x: 26.5, z: 10.4, rot: 180 },
   { id: 'box_74', x: 30.9, z: 5.4, rot: 270 },
   { id: 'box_75', x: 30.9, z: 6.5, rot: 270 },
-  { id: 'box_76', x: 24.5, z: 10.1, rot: 180 },
+  { id: 'box_76', x: 25.4, z: 10.4, rot: 180 },
   { id: 'box_77', x: 30.9, z: 7.9, rot: 270 },
-  { id: 'box_78', x: 22.7, z: 10, rot: 180 },
+  { id: 'box_78', x: 21.9, z: 10, rot: 180 },
   { id: 'box_79', x: 30.9, z: 9, rot: 270 },
-  { id: 'box_80', x: 26.4, z: 10.1, rot: 90 },
-  { id: 'box_81', x: 26.4, z: 12, rot: 90 },
-  { id: 'box_82', x: 24.5, z: 14, rot: 0 },
+  { id: 'box_80', x: 26.5, z: 11.6, rot: 90 },
+  { id: 'box_81', x: 26.5, z: 12.8, rot: 90 },
+  { id: 'box_82', x: 25.4, z: 14, rot: 0 },
   { id: 'box_83', x: 30.9, z: 14.9, rot: 270 },
   { id: 'box_84', x: 30.9, z: 17.6, rot: 270 },
   { id: 'box_85', x: 22.9, z: -2, rot: 270 },
   { id: 'box_86', x: 26.1, z: 0, rot: 90 },
   { id: 'box_87', x: 24.4, z: -1.7, rot: 180 },
-  { id: 'box_88', x: 22.6, z: 13.9, rot: 0 },
-  { id: 'box_89', x: 20.9, z: 13.9, rot: 270 },
-  { id: 'box_90', x: 26.3, z: 13.8, rot: 0 },
+  { id: 'box_88', x: 21.4, z: 14.1, rot: 0 },
+  { id: 'box_89', x: 20.9, z: 12.5, rot: 270 },
+  { id: 'box_90', x: 26.5, z: 14, rot: 0 },
   { id: 'box_91', x: 6.5, z: 9.4, rot: 0 },
   { id: 'box_92', x: 7.1, z: -1.9, rot: 180 },
   { id: 'box_93', x: 30.9, z: 16.3, rot: 270 },
   { id: 'box_94', x: 30.9, z: -1.5, rot: 270 },
   { id: 'box_97', x: 6, z: -0.8, rot: 270 },
-  { id: 'box_98', x: 20.8, z: 12, rot: 270 },
+  { id: 'box_98', x: 20.9, z: 11.4, rot: 270 },
   { id: 'box_99', x: 23.2, z: 20.7, rot: 270 },
   { id: 'box_100', x: 23.2, z: 19.5, rot: 270 },
 ]
@@ -353,6 +355,9 @@ export const ONBOARDING_POUCH_HINT = 'Open your seed pouch below - your seeds an
  *  pointing the player back at the verb that starts the whole thing again. */
 export const ONBOARDING_LOOP_TOAST    = 'Planted! Now water the garden to start a bloom and collect more seeds'
 export const ONBOARDING_LOOP_TOAST_MS = 10_000
+/** First harvest: the three things a kept flower is FOR, in one line (KJ 2026-09-22). */
+export const ONBOARDING_HARVEST_TOAST    = 'Harvested! Open your pouch to hold it, gift it to a gardener, or put a Rare on the Avenue'
+export const ONBOARDING_HARVEST_TOAST_MS = 10_000
 /** Stage 4 — their own flower has opened and is standing in its planter. */
 export const ONBOARDING_HARVEST_HINT  = 'Your flower opened — tap it to keep it, or leave it on show'
 /** Stage 5 — shown only while another gardener is actually here. */
@@ -681,6 +686,11 @@ export const PODIUM_PAGE_OFFSET = 0.75
  *  render a small emissive panel with a label on it, at roughly chest height on the rail. */
 export const PODIUM_PAGE_SIZE   = { x: 0.55, y: 0.55, z: 0.08 }
 export const PODIUM_PAGE_Y      = 1.15   // above the rail top
+/** The pager arrows are the tutorial's ground-decal chevron stood on end: rolled about
+ *  the arrow's own tip axis so its face turns toward the garden (+Z). Sign is applied per
+ *  direction in podium.ts. If they come out facing the fence instead, flip to −90 (KJ
+ *  2026-09-22: "need rotating 90° maybe on X or Z" — it's Z in the arrow's frame). TUNING */
+export const PODIUM_ARROW_ROLL  = 90
 
 // ── Test tooling ─────────────────────────────────────────────
 /** Wallets allowed to use test handlers that write PERMANENT data (lifetime board /
@@ -764,6 +774,9 @@ export const TRIBUTE_HEDGE_PLOTS: ReadonlyArray<TributePlot> = []
 export const TRIBUTE_PLOTS: ReadonlyArray<TributePlot> = [...TRIBUTE_HERO_PLOTS, ...TRIBUTE_HEDGE_PLOTS]
 /** The permanent roll of every tribute (one text entity, paged) — in front of the bed. */
 export const TRIBUTE_REGISTER_POS = { x: 8.7, y: 1.25, z: 20.3 } as const
+/** The register board is OFF for now (KJ 2026-09-22, removed with the founding tribute);
+ *  flip to true and it comes back at TRIBUTE_REGISTER_POS unchanged. */
+export const TRIBUTE_REGISTER_ENABLED = false
 export interface FoundingTribute { displayName: string; address: string; note: string }
 /** Seeded on first run — v2 ships with the first tribute already grown (GDD §4.2).
  *  address: fill in the honoree's wallet when known → the server also seeds their
@@ -899,6 +912,12 @@ export const AVENUE_FLOWER_SCALE = 0.85
  *  shader; GltfNodeModifiers can only dim the albedo uniformly (see plantVfx.ts's own
  *  note on what that component can and can't retint). */
 export const AVENUE_WILD_TINT = 0.4
+/** How far out from a slot the onboarding marker arrow floats. Deliberately SHORT: at the
+ *  tutorial trail's 1.2 m the arrow hung a metre in front of a 0.54 m cube, so a click
+ *  aimed at the arrow projected past the cube edge and hit nothing — which is what "the
+ *  arrow pointed at it and clicking did nothing" looks like (KJ 2026-09-22). Close in, a
+ *  click on the arrow carries through to the slot behind it. TUNING */
+export const AVENUE_ARROW_STANDOFF = 0.45
 /** Inspect card (design/communal-planters.md "zooms in on plant") camera move — OFF for
  *  now (2026-09-22). Two blind attempts (a fixed-point placement, then a two-camera eased
  *  "return to the exact starting pose" close) both read as worse than no camera move at
@@ -919,9 +938,13 @@ export const AVENUE_CAMERA_MS            = 600    // transition duration
 export const AVENUE_MIN_TIER = 2
 /** Mythic and Unique are never tidied off the Avenue by the crowding rule. */
 export const AVENUE_NEVER_TIDY_TIER = 6
-/** Avenue slots a player may hold, by flair tier (0 none / 1 sprout / 2 flower / 3 golden):
- *  1 at 100 lifetime waters, 2 at 500, 3 at 1,000 — the existing FLAIR_TIERS, no new currency. */
-export const AVENUE_SLOTS_BY_FLAIR: ReadonlyArray<number> = [0, 1, 2, 3]   // TUNING
-export function avenueSlotsFor(lifetimeWaters: number): number {
-  return AVENUE_SLOTS_BY_FLAIR[flairTier(lifetimeWaters)] ?? 0
+/** Per-player Avenue slot cap. 0 = NO per-player limit (KJ 2026-09-22): Rare+ flowers are
+ *  scarce enough to be the limiter and the crowding rule handles a full wall, and the old
+ *  flair-tier ladder (1/2/3 slots at 100/500/1,000 waters) gated the feature behind 100
+ *  waters for no design gain. Set a number to reinstate a flat cap if one player ever
+ *  wallpapers the wall. TUNING */
+export const AVENUE_SLOT_CAP = 0
+/** How many Avenue slots a player may hold — the cap, or every slot when uncapped. */
+export function avenueSlotCap(): number {
+  return AVENUE_SLOT_CAP > 0 ? AVENUE_SLOT_CAP : AVENUE_POSITIONS.length
 }

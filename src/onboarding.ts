@@ -35,7 +35,7 @@ import { PlantData } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
 import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters, myPlanters } from './boxSystem'
 import { nearestFreeAvenueSlot } from './avenueSystem'
-import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened, getAvenueSlotsFree } from './playerInventory'
+import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened, getAvenueSlotsFree, getArmedAvenueFlower } from './playerInventory'
 import { showPersistent, hidePersistent, showToast } from './notifications'
 import {
   ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW, ARROW_STANDOFF, ARROW_GROUND_LIFT,
@@ -48,7 +48,8 @@ import {
   ONBOARDING_POUCH_HINT, ONBOARDING_AVENUE_HINT,
   ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS,
   ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS,
-  PLANTER_RESERVE_RETRY_S, AVENUE_MIN_TIER,
+  ONBOARDING_HARVEST_TOAST, ONBOARDING_HARVEST_TOAST_MS,
+  PLANTER_RESERVE_RETRY_S, AVENUE_MIN_TIER, AVENUE_ARROW_STANDOFF,
 } from './shared/config'
 
 type Stage = 'none' | 'water' | 'plant' | 'pouch' | 'harvest' | 'gift' | 'avenue'
@@ -247,7 +248,7 @@ function showAvenueArrow(slot: { x: number; y: number; z: number; rot: number } 
   if (!slot) return
   const r = (slot.rot * Math.PI) / 180
   const t = Transform.getMutable(e)
-  t.position = Vector3.create(slot.x + ARROW_STANDOFF * Math.sin(r), slot.y, slot.z + ARROW_STANDOFF * Math.cos(r))
+  t.position = Vector3.create(slot.x + AVENUE_ARROW_STANDOFF * Math.sin(r), slot.y, slot.z + AVENUE_ARROW_STANDOFF * Math.cos(r))
   t.rotation = Quaternion.fromEulerDegrees(0, (slot.rot + 180) % 360 + ARROW_FORWARD_YAW, 0)
 }
 
@@ -343,7 +344,9 @@ function onboardingSystem(dt: number): void {
     // plants its pool at ground level (y=0), which is already wrong for a wall cube at
     // one of three different heights — and KJ 2026-09-22 also flagged the shell model
     // itself as the wrong fit for a wall slot. An arrow (see ensureAvenueArrow) fixes both.
-    showAvenueArrow(stage === 'avenue' ? nearestFreeAvenueSlot(player) : null)
+    // Also while a flower is armed from the menu — the marker is then "a free spot", not
+    // a tutorial step, so it shows for veterans mid-placement too.
+    showAvenueArrow(stage === 'avenue' || getArmedAvenueFlower() !== null ? nearestFreeAvenueSlot(player) : null)
   }
 
   if (stage === 'none') return
@@ -431,7 +434,8 @@ export function setupOnboarding(): void {
     // Stage 3 is a one-off beat, not a stage: the moment their first seed goes in, point
     // them back at the verb that starts the whole loop again. Fires only on the
     // false→true transition, so it never replays on a later join.
-    const justPlanted = !planted && !!data.planted
+    const justPlanted   = !planted && !!data.planted
+    const justHarvested = !harvested && !!data.harvested   // same one-off beat for the first harvest
     watered     = !!data.watered
     planted     = !!data.planted
     harvested   = !!data.harvested
@@ -439,6 +443,7 @@ export function setupOnboarding(): void {
     pouchOpened = !!data.pouchOpened
     avenueUsed  = !!data.avenueUsed
     if (justPlanted) showToast(ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS)
+    if (justHarvested) showToast(ONBOARDING_HARVEST_TOAST, ONBOARDING_HARVEST_TOAST_MS)
     applyStage()
   })
   room.onMessage('pouchUpdate', (data) => {

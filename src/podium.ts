@@ -25,7 +25,7 @@ import { Quaternion, Vector3 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
 import {
   PODIUM_SLOTS, PODIUM_ROTATION_Y, PODIUM_COUNT,
-  PODIUM_PAGE_OFFSET, PODIUM_PAGE_SIZE, PODIUM_PAGE_Y,
+  PODIUM_PAGE_OFFSET, PODIUM_PAGE_SIZE, PODIUM_PAGE_Y, PODIUM_ARROW_ROLL,
   ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW,
 } from './shared/config'
 
@@ -121,10 +121,18 @@ function makePageButton(dir: -1 | 1): void {
   const endX = dir > 0 ? Math.max(...xs) : Math.min(...xs)
   const z = PODIUM_SLOTS.reduce((a, p) => a + p.z, 0) / PODIUM_SLOTS.length
   const at = Vector3.create(endX + dir * PODIUM_PAGE_OFFSET, PODIUM_SLOTS[0].y + PODIUM_PAGE_Y, z)
-  const yaw = Math.atan2(-dir, 0) * 180 / Math.PI + ARROW_FORWARD_YAW
+  // drawTrail's rule: yaw = atan2(d.x, d.z) + the model's authored-forward offset points the
+  // tip along d. (The first cut had the sign flipped — Next pointed −X.) d = (dir, 0, 0).
+  const yaw = Math.atan2(dir, 0) * 180 / Math.PI + ARROW_FORWARD_YAW
 
+  // Two entities, not one composed quaternion: the parent yaws the flat chevron to point
+  // along ±X, the child rolls it about its OWN tip axis (local Z) so the decal's face turns
+  // from up (+Y) to the garden (+Z). Which way it rolls depends on which way it points, hence
+  // the −dir; the hierarchy makes the order of the two rotations unambiguous.
+  const pivot = engine.addEntity()
+  Transform.create(pivot, { position: at, rotation: Quaternion.fromEulerDegrees(0, yaw, 0) })
   const e = engine.addEntity()
-  Transform.create(e, { position: at, rotation: Quaternion.fromEulerDegrees(0, yaw, 0), scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
+  Transform.create(e, { parent: pivot, rotation: Quaternion.fromEulerDegrees(0, 0, -dir * PODIUM_ARROW_ROLL), scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
   GltfContainer.create(e, { src: ARROW_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
 
   // The arrow GLB carries no collision (decorative everywhere else it's used) — a
