@@ -1,9 +1,11 @@
 // =============================================================
 // The Living Garden — Authoritative Server
 // Runs headlessly alongside the scene. Owns all game state:
-//   • Plant watered/expired state  (PlantSync component + Storage)
-//   • Per-player daily water count (Storage.player)
+//   • Plant watered/expired state  (PlantSync component, persisted)
 //   • Bloom trigger + reset        (threshold check + timer)
+//   • Boards, tributes, planters, pouches, keepsakes, almanac (persisted)
+// Memory is authoritative. persistence.ts holds every save until its key has been
+// read, orders and retries them, and never reports a failed read as an empty key.
 // =============================================================
 
 import {
@@ -12,13 +14,12 @@ import {
   PlayerIdentityData,
   executeTask,
 } from '@dcl/sdk/ecs'
-import { Storage } from '@dcl/sdk/server'
+import { loadScene, loadPlayer, createSceneWriter, createPlayerWriter, KeyWriter } from './persistence'
 import { PlantSync }          from '../shared/schemas'
 import { room }               from '../shared/messages'
 import {
   PLANT_NAMES,
   BLOOM_THRESHOLD,
-  DAILY_WATER_LIMIT,
   WATERED_EXPIRY_MS,
   FAST_PLANT_EXPIRY_MS,
   FAST_PLANT_NAMES,
@@ -79,12 +80,10 @@ import {
 const plantEntities   = new Map<string, Entity>()   // plantId → entity
 const knownPlayers    = new Set<Entity>()            // entities seen this session
 const playerAddresses = new Map<Entity, string>()    // entity → address (for disconnect cleanup)
-const testOverrides   = new Set<string>()            // addresses with daily-limit bypass (test panel)
 const syncRateLimits  = new Map<string, number>()    // address → last requestFullSync ms
 const SYNC_RATE_MS    = 5_000                        // min ms between full syncs per player
 let   bloomActive      = false
 let   bloomStartedAt:  number | null = null   // ms timestamp when current bloom began
-let   countdownPaused  = false
 let   bloomScale       = 1                    // bloomScaleFor(gardeners) of the active bloom
 let   bloomVariant     = 'classic'            // BLOOM_VARIANTS id of the active bloom (Phase 6)
 let   bloomDuration    = BLOOM_RESET_DELAY_MS // ms length of the active bloom (bloomDurationMs)
@@ -98,29 +97,73 @@ const cycleWatersBy = new Map<string, number>()                                 
 const cycleSeedsBy  = new Map<string, { seeds: number; rares: number }>()       // address → gathered this bloom
 
 
-// ── Storage write queue ──────────────────────────────────────
-// ONE storage write in flight at a time. The local preview's storage service serves each
-// PUT as read-whole-file → set one key → write-whole-file with no lock, so overlapping
-// writes erase each other: on 2026-09-17 a harvest's 'boxes' write lost to its own
-// 'flowers' write (box stayed "opened" after restart) and the seed pouch never reached
-// disk. Every write goes through here; it is harmless on the Worlds key-value store.
-let storageQueue: Promise<unknown> = Promise.resolve()
-function queuedWrite<T>(write: () => Promise<T>): Promise<T> {
-  const run = storageQueue.then(write, write)
-  storageQueue = run.catch(() => undefined)
-  return run
+// ── Persistence ──────────────────────────────────────────────
+// One writer per scene key. Each holds its saves until its key has been read, so a
+// blob that failed to load is never overwritten by the emptier state we started
+// with; a failed load is retried in the background until it can be merged, and on
+// merge memory wins for anything touched this session. persistence.ts keeps ONE
+// write in flight across every key — the preview storage service reads and rewrites
+// the whole file per PUT, so concurrent writes to different keys erase each other
+// (2026-09-17: a harvest's 'boxes' write lost to its own 'flowers' write).
+//
+// Every value carries a shape version. Bump a key's version here when its stored
+// shape changes, and handle the older one where it is read: persistence.ts reports
+// the version each value was written with, and a value stored before versioning
+// reads back as LEGACY_VERSION.
+const V = {
+  plants: 1, leaderboard: 1, lifetimeTop: 1, leaderboardResetAt: 1,
+  tributes: 1, boxes: 1, lastSeen: 1, planterDraft: 1,
+  avenue: 1, plantDraft: 1, tributeDraft: 1,
+} as const
+
+/** Shape version per player-scoped key, stamped when its writer is created. */
+const PLAYER_KEY_VERSION: Record<string, number> = {
+  seeds: 1, flowers: 1, boxCap: 1, lifetime: 1,
+  onboarding: 1, discovered: 1, milestones: 1, keptSafe: 1,
 }
-async function setWorld(key: string, value: string): Promise<void> {
-  const ok: unknown = await queuedWrite(() => Storage.set(key, value))
-  if (ok === false) console.error(`[Server] Storage.set('${key}') returned false — NOT persisted`)
+
+const plantsWriter       = createSceneWriter('plants',             V.plants)
+const leaderboardWriter  = createSceneWriter('leaderboard',        V.leaderboard)
+const lifetimeTopWriter  = createSceneWriter('lifetimeTop',        V.lifetimeTop)
+const resetAtWriter      = createSceneWriter('leaderboardResetAt', V.leaderboardResetAt)
+const tributesWriter     = createSceneWriter('tributes',           V.tributes)
+const boxesWriter        = createSceneWriter('boxes',              V.boxes)
+const lastSeenWriter     = createSceneWriter('lastSeen',           V.lastSeen)
+const planterDraftWriter = createSceneWriter('planterDraft',       V.planterDraft)   // admin overwrite target, never merged
+const plantDraftWriter   = createSceneWriter('plantDraft',         V.plantDraft)     // admin overwrite target, never merged
+const tributeDraftWriter = createSceneWriter('tributeDraft',       V.tributeDraft)   // admin overwrite target, never merged
+const avenueWriter       = createSceneWriter('avenue',             V.avenue)
+
+/** A draft is stored as the JSON text the editor sent. One written before versioning
+ *  reads back parsed (persistence.ts parses legacy JSON strings), so re-serialise it. */
+function draftText(res: { ok: boolean; value?: unknown }): string {
+  if (!res.ok || res.value == null) return ''
+  return typeof res.value === 'string' ? res.value : JSON.stringify(res.value)
 }
-async function setPlayer(address: string, key: string, value: string): Promise<void> {
-  const ok: unknown = await queuedWrite(() => Storage.player.set(address, key, value))
-  if (ok === false) console.error(`[Server] Storage.player.set('${key}') returned false — NOT persisted`)
+
+const RELOAD_INTERVAL_MS = 30_000
+
+/** Keeps retrying a failed startup load until it succeeds, then merges it in. */
+function scheduleReload(label: string, load: () => Promise<boolean>): void {
+  setTimeout(() => executeTask(async () => {
+    if (await load()) {
+      console.log(`[Server] ${label}: late load succeeded — merged into live state, saves resumed`)
+      checkBloomThreshold()
+      return
+    }
+    scheduleReload(label, load)
+  }), RELOAD_INTERVAL_MS)
 }
 
 // ── Leaderboard ──────────────────────────────────────────────
-interface LeaderboardEntry { displayName: string; total: number }
+interface LeaderboardEntry {
+  displayName: string
+  total: number
+  /** Flair tier at the time this entry last changed. Stored on WEEKLY entries so the
+   *  board still shows the right flair for a gardener who is offline and outside the
+   *  lifetime top-N, whose lifetime total the server therefore does not hold. */
+  tier?: number
+}
 const leaderboard = new Map<string, LeaderboardEntry>()  // address → entry
 
 // ---------------------------------------------------------------
@@ -158,18 +201,18 @@ function armExpiry(plantId: string, entity: Entity, now: number): number {
   return expiresAt
 }
 
-async function loadPlantStates(): Promise<void> {
-  const raw = await Storage.get<string>('plants')
-  if (!raw) { console.log('[Server] No persisted plant states — starting fresh'); return }
-
-  const records: PlantRecord[] = JSON.parse(raw)
+/** Load (or late-load) plant states. False when the read failed. */
+async function loadPlantStates(): Promise<boolean> {
+  const res = await loadScene<PlantRecord[]>('plants')
+  if (!res.ok) { console.error('[Server] plants: load failed — saves held until a reload succeeds'); return false }
+  const records = Array.isArray(res.value) ? res.value : []
   const now = Date.now()
   let restored = 0
 
   for (const rec of records) {
     const entity = plantEntities.get(rec.plantId)
-    if (!entity) continue
-    if (!rec.isWatered) continue
+    if (!entity || !rec.isWatered) continue
+    if (PlantSync.getOrNull(entity)?.isWatered) continue   // watered this session — memory wins
 
     // Pre-rework records have no expiresAt: fall back to the base (v1) decay
     const expiresAt = rec.expiresAt ?? rec.wateredAt + (FAST_PLANT_NAMES.has(rec.plantId) ? FAST_PLANT_EXPIRY_MS : WATERED_EXPIRY_MS)
@@ -182,19 +225,22 @@ async function loadPlantStates(): Promise<void> {
     if (rec.tier) wateredTierMap.set(rec.plantId, rec.tier)
     plantExpiresAt.set(rec.plantId, expiresAt)
     scheduleExpiry(rec.plantId, entity, rec.wateredAt, expiresAt - now)
+    room.send('plantStateUpdate', { plantId: rec.plantId, isWatered: true, wateredAt: rec.wateredAt, wateredBy: rec.wateredBy ?? '', expiresInMs: expiresAt - now, tier: rec.tier ?? 0, almanac: 0 })
     restored++
   }
-  console.log(`[Server] Restored ${restored} watered plants from Storage`)
+  console.log(res.value === null ? '[Server] No persisted plant states — starting fresh' : `[Server] Restored ${restored} watered plants from storage`)
+  plantsWriter.enable()
+  return true
 }
 
-async function savePlantStates(): Promise<void> {
+function savePlantStates(): void {
   const records: PlantRecord[] = []
   for (const [plantId, entity] of plantEntities) {
     const ps = PlantSync.getOrNull(entity)
     if (!ps) continue
     records.push({ plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresAt: plantExpiresAt.get(plantId), tier: wateredTierMap.get(plantId) })
   }
-  await setWorld('plants', JSON.stringify(records))
+  plantsWriter.save(records)
 }
 
 // ── Leaderboard helpers ──────────────────────────────────────
@@ -202,40 +248,80 @@ async function savePlantStates(): Promise<void> {
 // `leaderboard` is THIS WEEK's board (resets); `lifetime` never resets and is the
 // source of milestone flair (GDD §4.3 hook 2, §5 recognition — the v1 complaint
 // was 1,000+ waters vanishing on reset).
+// A gardener's lifetime total lives in THEIR OWN player record, not in a scene blob.
+// The blob was rewritten in full on every water and grew with every player who ever
+// watered, so its cost climbed with the population on the hottest path. What stays
+// scene-level is `lifetimeTop`: the top LIFETIME_TOP_N gardeners, so the all-time
+// board still works for players who are offline. The old `lifetime` blob is read once
+// at boot as a floor and never written again — a gardener's record is seeded from it
+// the first time they load.
 const lifetime = new Map<string, LeaderboardEntry>()   // address → entry, never reset
+const LIFETIME_TOP_N = 50
+let lifetimeTopJson = ''                                // last top-N written, to skip no-op saves
 let weeklyResetAt = 0                                   // epoch ms when the weekly board next clears
 
-async function loadLeaderboard(): Promise<void> {
-  const raw = await Storage.get<string>('leaderboard')
-  if (raw) {
-    const records: Array<{ address: string; displayName: string; total: number }> = JSON.parse(raw)
-    for (const r of records) leaderboard.set(r.address, { displayName: r.displayName, total: r.total })
-    console.log(`[Server] Loaded leaderboard: ${leaderboard.size} players`)
+interface BoardRecord extends LeaderboardEntry { address: string }
+
+/** Merge stored totals into a live board: totals earned this session are added on top. */
+function mergeBoard(board: Map<string, LeaderboardEntry>, records: unknown): void {
+  if (!Array.isArray(records)) return
+  for (const r of records as BoardRecord[]) {
+    const live = board.get(r.address)
+    if (live) { live.total += r.total; live.tier = r.tier ?? live.tier }
+    else board.set(r.address, { displayName: r.displayName, total: r.total, tier: r.tier })
   }
-  const rawLifetime = await Storage.get<string>('lifetime')
-  if (rawLifetime) {
-    const records: Array<{ address: string; displayName: string; total: number }> = JSON.parse(rawLifetime)
-    for (const r of records) lifetime.set(r.address, { displayName: r.displayName, total: r.total })
-    console.log(`[Server] Loaded lifetime board: ${lifetime.size} players`)
+}
+
+// Stored totals are ADDED to live ones, so the boards may be merged only once. A retry
+// that happens because only the tributes read failed must not merge them again.
+let boardsMerged = false
+
+/** Load (or late-load) both boards, the reset clock and the tributes. False when a read failed. */
+async function loadLeaderboard(): Promise<boolean> {
+  if (boardsMerged) return loadTributes()   // boards are already in; only tributes were missing
+  const [board, legacy, top, resetAt] = await Promise.all([
+    loadScene<BoardRecord[]>('leaderboard'),
+    loadScene<BoardRecord[]>('lifetime'),      // legacy blob: read as a floor, never written
+    loadScene<BoardRecord[]>('lifetimeTop'),
+    loadScene<number>('leaderboardResetAt'),
+  ])
+  if (!board.ok || !legacy.ok || !top.ok || !resetAt.ok) {
+    console.error('[Server] leaderboard: load failed — saves held until a reload succeeds')
+    return false
+  }
+  boardsMerged = true
+  leaderboardWriter.enable()
+  lifetimeTopWriter.enable()
+  resetAtWriter.enable()
+
+  mergeBoard(leaderboard, board.value)
+  console.log(`[Server] Loaded leaderboard: ${leaderboard.size} players`)
+  // Both are floors, never sums: the top-N is derived from records that were
+  // themselves seeded from the legacy blob, so adding them would double-count.
+  seedLifetime(legacy.value)
+  seedLifetime(top.value)
+  if (lifetime.size > 0) {
+    console.log(`[Server] Lifetime: ${lifetime.size} gardener(s) known (legacy blob + top ${LIFETIME_TOP_N})`)
   } else {
-    // First run after the Phase 5 upgrade: the current weekly totals are the best
-    // floor we have for lifetime — never start veterans from zero.
+    // Fresh world: this week's totals are the best floor we have — never start
+    // veterans from zero. Records are written as each of them next waters.
     for (const [address, e] of leaderboard) lifetime.set(address, { ...e })
-    await saveLifetime()
-    console.log(`[Server] Lifetime board seeded from weekly (${lifetime.size} players)`)
+    console.log(`[Server] Lifetime seeded from weekly (${lifetime.size} players)`)
   }
 
   // Weekly reset clock — persisted so restarts don't move the reset moment
-  const rawResetAt = await Storage.get<string>('leaderboardResetAt')
-  if (!rawResetAt) {
-    await setWorld('leaderboardResetAt', String(Date.now()))
+  const storedResetAt = Number(resetAt.value ?? 0)
+  if (!storedResetAt) {
+    resetAtWriter.save(Date.now())
     console.log('[Server] Leaderboard weekly reset clock started')
     weeklyResetAt = Date.now() + WEEKLY_RESET_MS
   } else {
-    weeklyResetAt = parseInt(rawResetAt) + WEEKLY_RESET_MS
+    weeklyResetAt = storedResetAt + WEEKLY_RESET_MS
   }
-  await ensureWeeklyReset()
-  await loadTributes()
+  ensureWeeklyReset()
+  saveLeaderboard()
+  refreshLifetimeTop()
+  return loadTributes()
 }
 
 // ── Tribute plants (Phase 5b, GDD §4.2) ──────────────────────
@@ -257,17 +343,24 @@ function nextFreePlot(): number {
   return -1
 }
 
-async function saveTributes(): Promise<void> {
-  await setWorld('tributes', JSON.stringify(tributes))
+function saveTributes(): void {
+  tributesWriter.save(tributes)
 }
 
 function sendTributes(to?: string[]): void {
   room.send('tributesUpdate', { json: JSON.stringify(tributes) }, to ? { to } : undefined)
 }
 
-async function loadTributes(): Promise<void> {
-  const raw = await Storage.get<string>('tributes')
-  if (raw) { try { tributes = JSON.parse(raw) } catch { tributes = [] } }
+/** Load (or late-load) the tributes. False when the read failed. Stored entries are
+ *  merged in rather than replacing the list, so a grant made during an outage survives. */
+async function loadTributes(): Promise<boolean> {
+  const res = await loadScene<TributeRecord[]>('tributes')
+  if (!res.ok) { console.error('[Server] tributes: load failed — saves held until a reload succeeds'); return false }
+  for (const r of Array.isArray(res.value) ? res.value : []) {
+    const already = tributes.some(t => (r.address && t.address === r.address) || (t.founding && r.founding && t.displayName === r.displayName))
+    if (!already) tributes.push(r)
+  }
+  tributesWriter.enable()
   let changed = false
   // Retract any founding tribute no longer listed in FOUNDING_TRIBUTES (KJ 2026-09-22:
   // "remove the tribute plaque and plant to Peter for now") — its plot frees up, and
@@ -293,12 +386,13 @@ async function loadTributes(): Promise<void> {
       const e = lifetime.get(address)
       if (!e || e.total < TRIBUTE_MILESTONE) {
         lifetime.set(address, { displayName: f.displayName, total: Math.max(e?.total ?? 0, TRIBUTE_MILESTONE) })
-        await saveLifetime()
+        void saveLifetimeFor(address)   // honorees are rarely connected, so load-then-write
       }
     }
   }
-  if (changed) await saveTributes()
+  if (changed) saveTributes()
   console.log(`[Server] Tributes: ${tributes.length} (${tributes.filter(t => t.founding).length} founding, ${TRIBUTE_PLOTS.length - tributes.filter(t => t.plot >= 0).length} plots free)`)
+  return true
 }
 
 /** Call after a lifetime total changes. Grows the plant the moment the milestone is crossed. */
@@ -310,7 +404,7 @@ async function grantTributeIfEarned(address: string): Promise<void> {
   const plot = nextFreePlot()
   if (plot < 0) console.log(`[Server] ${entry.displayName} earned a tribute; all plots taken → register only (add TRIBUTE_HEDGE_PLOTS)`)
   tributes.push({ address, displayName: entry.displayName, earnedAt: Date.now(), plot, founding: false, note: '' })
-  await saveTributes()
+  saveTributes()
   sendTributes()
   room.send('notice', { text: `${entry.displayName}'s tribute plant has grown - ${TRIBUTE_MILESTONE} lifetime waters` })
   console.log(`[Server] Tribute granted: ${entry.displayName} → plot ${plot}`)
@@ -318,25 +412,73 @@ async function grantTributeIfEarned(address: string): Promise<void> {
 
 /** Clears the weekly board once its reset moment has passed — runs at startup and
  *  on every broadcast, so a long-lived server resets on time (GDD: stated, visible time). */
-async function ensureWeeklyReset(): Promise<void> {
+function ensureWeeklyReset(): void {
   const now = Date.now()
   if (now < weeklyResetAt) return
   // Advance by whole periods so the moment stays on the same weekday/hour
   while (weeklyResetAt <= now) weeklyResetAt += WEEKLY_RESET_MS
   leaderboard.clear()
-  await saveLeaderboard()
-  await setWorld('leaderboardResetAt', String(weeklyResetAt - WEEKLY_RESET_MS))
+  saveLeaderboard()
+  resetAtWriter.save(weeklyResetAt - WEEKLY_RESET_MS)
   console.log(`[Server] Weekly leaderboard reset complete — next at ${new Date(weeklyResetAt).toISOString()}`)
 }
 
-async function saveLeaderboard(): Promise<void> {
-  const records = [...leaderboard.entries()].map(([address, e]) => ({ address, ...e }))
-  await setWorld('leaderboard', JSON.stringify(records))
+function saveLeaderboard(): void {
+  leaderboardWriter.save([...leaderboard.entries()].map(([address, e]) => ({ address, ...e })))
 }
 
-async function saveLifetime(): Promise<void> {
-  const records = [...lifetime.entries()].map(([address, e]) => ({ address, ...e }))
-  await setWorld('lifetime', JSON.stringify(records))
+/** Seed live totals from a stored board. A floor, never a sum: a stored total can
+ *  raise a live one but never lower it, so re-running this cannot double-count. */
+function seedLifetime(records: unknown): void {
+  if (!Array.isArray(records)) return
+  for (const r of records as BoardRecord[]) {
+    if (!r || typeof r.address !== 'string') continue
+    const total = Number(r.total) || 0
+    const live  = lifetime.get(r.address)
+    if (live) {
+      if (total > live.total) live.total = total
+      if (r.displayName) live.displayName = r.displayName
+    } else {
+      lifetime.set(r.address, { displayName: String(r.displayName ?? ''), total })
+    }
+  }
+}
+
+/** Rewrite the bounded all-time board, but only when its content actually changed —
+ *  most waters do not move the top LIFETIME_TOP_N at all. */
+function refreshLifetimeTop(): void {
+  const top = [...lifetime.entries()]
+    .sort((a, b) => b[1].total - a[1].total)
+    .slice(0, LIFETIME_TOP_N)
+    .map(([address, e]) => ({ address, displayName: e.displayName, total: e.total }))
+  const json = JSON.stringify(top)
+  if (json === lifetimeTopJson) return
+  lifetimeTopJson = json
+  lifetimeTopWriter.save(top)
+}
+
+/** One gardener's lifetime record. The object it returns IS their entry in `lifetime`,
+ *  so bumping the board bumps the record and one save persists both. */
+async function loadLifetimeRecord(address: string): Promise<LeaderboardEntry> {
+  const seeded = lifetime.get(address)
+  const rec = await loadPlayerRecord<LeaderboardEntry>(address, 'lifetime', stored => {
+    if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+      const r = stored as Partial<LeaderboardEntry>
+      // The legacy blob is a floor: an older record must never lower a known total.
+      return { displayName: String(r.displayName ?? seeded?.displayName ?? ''), total: Math.max(Number(r.total) || 0, seeded?.total ?? 0) }
+    }
+    return { displayName: seeded?.displayName ?? '', total: seeded?.total ?? 0 }
+  })
+  lifetime.set(address, rec)
+  return rec
+}
+
+/** Persist one gardener's lifetime total, and the all-time board if they moved it.
+ *  Loads the record first so a total is never written before it has been read. */
+async function saveLifetimeFor(address: string): Promise<void> {
+  await loadLifetimeRecord(address)
+  savePlayerJson(address, 'lifetime')
+  refreshLifetimeTop()
 }
 
 function tierOf(address: string): number {
@@ -366,6 +508,9 @@ function bumpWaterTotals(address: string): void {
     if (entry) entry.total += 1
     else board.set(address, { displayName: leaderboard.get(address)?.displayName ?? address.slice(0, 8) + '…', total: 1 })
   }
+  // Stamp the weekly entry so the board keeps its flair once the gardener is gone.
+  const weekly = leaderboard.get(address)
+  if (weekly) weekly.tier = flairTier(lifetime.get(address)?.total ?? 0)
 }
 
 /** Top-10 sorted entries of a board as JSON, ready to send over the wire. */
@@ -376,7 +521,9 @@ function boardJson(board: Map<string, LeaderboardEntry>): string {
       .slice(0, 10)
       // address travels too (v2): the podium renders each top gardener's AvatarShape,
       // which needs their wallet to look the profile up. Names alone are not enough.
-      .map(([address, e]) => ({ displayName: e.displayName, count: e.total, tier: tierOf(address), almanac: almanacRankOf(address), address }))
+      // A stamped tier wins: for a weekly entry it may be the only record of the
+      // gardener's flair, since their lifetime total is no longer held for everyone.
+      .map(([address, e]) => ({ displayName: e.displayName, count: e.total, tier: e.tier ?? tierOf(address), almanac: almanacRankOf(address), address }))
   )
 }
 
@@ -391,7 +538,7 @@ function standingIn(board: Map<string, LeaderboardEntry>, address: string): { ra
 }
 
 function broadcastLeaderboard(to?: string[]): void {
-  void ensureWeeklyReset().catch(err => console.error('[Server] weekly reset failed:', err))
+  ensureWeeklyReset()
   const payload = { entriesJson: boardJson(leaderboard), allTimeJson: boardJson(lifetime), weeklyResetAt }
   if (to) {
     // Targeted send — used on player join to push current state to one client
@@ -408,29 +555,6 @@ function broadcastLeaderboard(to?: string[]): void {
     room.send('yourStanding', { weeklyRank: w.rank, weeklyCount: w.count, allTimeRank: a.rank, allTimeCount: a.count }, { to: [address] })
   }
 }
-
-function dailyKey(date: string): string { return `daily:${date}` }
-
-async function getPlayerDailyCount(address: string): Promise<number> {
-  try {
-    const today = new Date().toISOString().slice(0, 10)
-    const raw   = await Storage.player.get<string>(address, dailyKey(today))
-    return raw ? parseInt(raw) : DAILY_WATER_LIMIT
-    //return raw ? parseInt(raw) : 0
-  } catch {
-return DAILY_WATER_LIMIT
-  }
-}
-
-/*
-async function incrementPlayerDailyCount(address: string): Promise<number> {
-  const today    = new Date().toISOString().slice(0, 10)
-  const newCount = (await getPlayerDailyCount(address)) + 1
-  await setPlayer(address, dailyKey(today), String(newCount))
-  return newCount
-}
-*/
-
 
 // ---------------------------------------------------------------
 // Bloom
@@ -497,7 +621,6 @@ function cancelBloomSustain(): void {
   }
   bloomSustainStartedAt = null
   bloomSustainElapsedMs = 0
-  countdownPaused       = false
 }
 
 /** Call after any change to watered count.
@@ -508,7 +631,6 @@ function checkBloomThreshold(): void {
   const count     = getWateredCount()
   const threshold = currentBloomThreshold()
   if (count >= threshold) {
-    countdownPaused = false
     if (bloomSustainTimer === null) {
       const remaining = Math.max(0, bloomSustainMs(knownPlayers.size) - bloomSustainElapsedMs)
       bloomSustainStartedAt = Date.now()
@@ -531,7 +653,6 @@ function checkBloomThreshold(): void {
       }, remaining)
     }
   } else {
-    countdownPaused = true
     pauseBloomSustain()
   }
 }
@@ -667,61 +788,86 @@ function remainingSeeds(address: string): SeedRecord[] {
 type SeedPouch = number[]
 function emptyPouch(): SeedPouch { return new Array(RARITY_TIERS.length).fill(0) }
 
-// In-memory pouch per player is the source of truth for the session; Storage is
-// write-through. Without this, concurrent gathers each read→modified→wrote the
-// stored value and overwrote each other (11 gathers persisted as 6).
-// Keyed LOWERCASE, like heldFlowers/heldSeeds — join hands over `identity.address`, messages
-// `context.from` (mixed case), and this was the last per-player map still keyed raw. Two
-// live pouches per player meant the hand and the chip could read different ones
-// (week-2 playtest 2026-09-22: "seed in my hand but my inventory says no seeds yet").
-// The Storage address is passed through as given — only the in-memory key is normalised.
-const pouches     = new Map<string, SeedPouch>()          // lowercase address → live pouch
-const pouchWrites = new Map<string, Promise<void>>()      // lowercase address → last queued write
+// ── Per-player records ───────────────────────────────────────
+// One cached object per (address, key) is the session's source of truth, each with
+// its own writer — without this, concurrent gathers each read→modified→wrote the
+// stored value and overwrote each other (11 gathers persisted as 6). Concurrent loads
+// of one record share a request, and records are dropped once the player leaves and
+// their writes have landed. If a read FAILS (only a rejected get — the realm lookup),
+// the default is returned but NOT cached, so nothing can be written over what is
+// stored; a save for an uncached record is logged as dropped rather than lost silently.
+interface PlayerRecord { value: unknown; writer: KeyWriter }
+const playerRecords = new Map<string, PlayerRecord>()       // `${lowercase address}:${key}` → live record
+const playerLoads   = new Map<string, Promise<unknown>>()   // in-flight loads for the same key
 
-async function loadPouch(address: string): Promise<SeedPouch> {
-  const key  = address.toLowerCase()
-  const live = pouches.get(key)
-  if (live) return live
-  let pouch: SeedPouch = emptyPouch()
-  try {
-    const raw = await Storage.player.get<string>(address, 'seeds')
-    if (raw) {
-      const parsed = JSON.parse(raw)
-      if (Array.isArray(parsed)) {
-        pouch = emptyPouch().map((_, i) => Number(parsed[i]) || 0)
-      } else if (parsed && typeof parsed === 'object') {
-        // Pre-2026-09-18 shape { normal, rare } — migrate onto the new tier array
-        // (Common ← normal, Uncommon ← rare) so nobody's existing seeds vanish.
-        pouch = emptyPouch()
-        pouch[0] = Number(parsed.normal) || 0
-        pouch[1] = Number(parsed.rare) || 0
-      }
-    }
-  } catch { /* fall through to empty pouch */ }
-  // Another handler may have loaded it while we awaited — keep the first object
-  const raced = pouches.get(key)
-  if (raced) return raced
-  pouches.set(key, pouch)
+// Keyed LOWERCASE, like heldFlowers/heldSeeds — join hands over `identity.address`, messages
+// `context.from` (mixed case). Two live pouches per player meant the hand and the chip read
+// different ones (week-2 playtest 2026-09-22: "seed in my hand but my inventory says no
+// seeds yet"). The Storage address is passed through as given — only the cache key is normalised.
+function recordKey(address: string, key: string): string { return `${address.toLowerCase()}:${key}` }
+
+async function loadPlayerRecord<T>(address: string, key: string, parse: (stored: unknown) => T): Promise<T> {
+  const k    = recordKey(address, key)
+  const live = playerRecords.get(k)
+  if (live) return live.value as T
+  const inFlight = playerLoads.get(k)
+  if (inFlight) return inFlight as Promise<T>
+
+  const load = (async (): Promise<T> => {
+    const res = await loadPlayer<unknown>(address, key)
+    if (!res.ok) { console.error(`[Server] ${key} for ${address.slice(0, 8)}…: load failed — using the default, not cached`); return parse(null) }
+    const value  = parse(res.value)
+    const writer = createPlayerWriter(address, key, PLAYER_KEY_VERSION[key] ?? 1)
+    writer.enable()
+    playerRecords.set(k, { value, writer })
+    return value
+  })()
+  playerLoads.set(k, load)
+  try { return await load } finally { playerLoads.delete(k) }
+}
+
+/** Object records: the stored object, or `def()` when the key holds nothing usable. */
+function loadPlayerJson<T>(address: string, key: string, def: () => T): Promise<T> {
+  return loadPlayerRecord<T>(address, key, stored => (stored !== null && typeof stored === 'object' ? stored as T : def()))
+}
+
+/** Queue the record's current state; the writer orders and retries it. */
+function savePlayerJson(address: string, key: string): void {
+  const rec = playerRecords.get(recordKey(address, key))
+  if (rec) rec.writer.save(rec.value)
+  else console.error(`[Server] ${key} for ${address.slice(0, 8)}…: save dropped — record never loaded`)
+}
+
+/** Forget a departed player's records once their pending writes have landed. */
+function evictPlayerRecords(address: string): void {
+  const prefix = `${address.toLowerCase()}:`
+  const keys   = [...playerRecords.keys()].filter(k => k.startsWith(prefix))
+  if (keys.length === 0) return
+  executeTask(async () => {
+    await Promise.all(keys.map(k => playerRecords.get(k)?.writer.idle() ?? Promise.resolve()))
+    if (isConnected(address)) return   // came back while flushing — keep the cache warm
+    for (const k of keys) playerRecords.delete(k)
+  })
+}
+
+/** Tier array, tolerating the pre-2026-09-18 `{ normal, rare }` shape. */
+function parsePouch(stored: unknown): SeedPouch {
+  if (Array.isArray(stored)) return emptyPouch().map((_, i) => Number(stored[i]) || 0)
+  const pouch = emptyPouch()
+  if (stored && typeof stored === 'object') {
+    // Common ← normal, Uncommon ← rare, so nobody's existing seeds vanish.
+    const old = stored as { normal?: unknown; rare?: unknown }
+    pouch[0] = Number(old.normal) || 0
+    pouch[1] = Number(old.rare) || 0
+  }
   return pouch
 }
 
-/** Persist a player's pouch; writes for the same player are serialized so an
- *  earlier (lower) snapshot can never land after a later one. Fail-open. */
-function savePouch(address: string): Promise<void> {
-  const key   = address.toLowerCase()
-  const pouch = pouches.get(key)
-  if (!pouch) return Promise.resolve()
-  const snapshot = JSON.stringify(pouch)
-  const prev = pouchWrites.get(key) ?? Promise.resolve()
-  const next: Promise<void> = prev
-    .then(async () => { await setPlayer(address, 'seeds', snapshot) })
-    .catch(err => { console.error('[Server] savePouch failed:', err) })
-  pouchWrites.set(key, next)
-  return next
-}
+const loadPouch = (a: string) => loadPlayerRecord<SeedPouch>(a, 'seeds', parsePouch)
+const savePouch = (a: string) => savePlayerJson(a, 'seeds')
 
 function sendPouch(address: string): void {
-  const p = pouches.get(address.toLowerCase())
+  const p = playerRecords.get(recordKey(address, 'seeds'))?.value as SeedPouch | undefined
   if (p) room.send('pouchUpdate', { countsJson: JSON.stringify(p) }, { to: [address] })
   else console.error(`[Server] sendPouch: no live pouch for ${address} — call loadPouch first`)
   refreshHandSeed(address)   // the rarest seed they hold may have changed
@@ -771,8 +917,6 @@ function boxesOwnedBy(address: string): number {
   return n
 }
 
-// ── Per-player JSON records (collection, box cap) — same cache + serialized
-// write-through pattern as the pouch, so concurrent handlers can't lose updates.
 interface FlowerKeepsake {
   flower: string; rarityTier: number; at: number; from?: string
   // Provenance (2026-09-22, for the Avenue plaque) — set at harvest, carried through gifts.
@@ -783,38 +927,7 @@ interface FlowerKeepsake {
   helpers?:  string[]   // display names of the visitors who watered its planter
   avenue?:   number     // how many times it has stood on the Avenue
 }
-const playerJson       = new Map<string, unknown>()          // `${address}:${key}` → live object
-const playerJsonWrites = new Map<string, Promise<void>>()
-
-async function loadPlayerJson<T>(address: string, key: string, def: () => T): Promise<T> {
-  const k = `${address}:${key}`
-  const live = playerJson.get(k)
-  if (live !== undefined) return live as T
-  let value = def()
-  try {
-    const raw = await Storage.player.get<string>(address, key)
-    if (raw) value = JSON.parse(raw)
-  } catch { /* fall through to default */ }
-  const raced = playerJson.get(k)
-  if (raced !== undefined) return raced as T
-  playerJson.set(k, value)
-  return value
-}
-
-function savePlayerJson(address: string, key: string): Promise<void> {
-  const k = `${address}:${key}`
-  const value = playerJson.get(k)
-  if (value === undefined) return Promise.resolve()
-  const snapshot = JSON.stringify(value)
-  const prev = playerJsonWrites.get(k) ?? Promise.resolve()
-  const next: Promise<void> = prev
-    .then(async () => { await setPlayer(address, key, snapshot) })
-    .catch(err => { console.error(`[Server] save ${key} failed:`, err) })
-  playerJsonWrites.set(k, next)
-  return next
-}
-
-const loadFlowers = (a: string) => loadPlayerJson<FlowerKeepsake[]>(a, 'flowers', () => [])
+const loadFlowers = (a: string) => loadPlayerRecord<FlowerKeepsake[]>(a, 'flowers', v => (Array.isArray(v) ? v as FlowerKeepsake[] : []))
 
 // ── Onboarding (v2): the two firsts the in-world tutorial waits on. Persisted per
 // wallet so the lesson never replays for a gardener who has done it — and a gardener
@@ -987,12 +1100,12 @@ async function sendCollection(address: string): Promise<void> {
 // In memory only: an empty hand on rejoin is fine; the flower itself stays in the collection.
 const heldFlowers = new Map<string, { flower: string; rarityTier: number }>()   // lowercase address →
 
-/** ⚠️ Two key spaces meet here: `pouches` is keyed by the address exactly as the room
- *  handed it over (mixed case), `heldFlowers` by the LOWERCASED address. Crossing them
- *  silently reports "no keepsake held" and wipes the player's held flower, so every
+/** ⚠️ Two key spaces meet here: player records are keyed by the address exactly as the
+ *  room handed it over (mixed case), `heldFlowers` by the LOWERCASED address. Crossing
+ *  them silently reports "no keepsake held" and wipes the player's held flower, so every
  *  lookup below goes through these two helpers rather than indexing a map directly. */
 function pouchOf(address: string): SeedPouch | undefined {
-  return pouches.get(address.toLowerCase())
+  return playerRecords.get(recordKey(address, 'seeds'))?.value as SeedPouch | undefined
 }
 
 /** Seeds a gardener has EXPLICITLY equipped (lowercase key). An equip replaces whatever
@@ -1055,12 +1168,8 @@ function isConnected(address: string): boolean {
   return false
 }
 
-async function saveBoxes(): Promise<void> {
-  try {
-    await setWorld('boxes', JSON.stringify([...boxes.values()]))
-  } catch (err) {
-    console.error('[Server] saveBoxes failed:', err)   // fail-open: in-memory state stays authoritative
-  }
+function saveBoxes(): void {
+  boxesWriter.save([...boxes.values()])
 }
 
 /** The box's timer elapsed: reveal the species, persist, tell everyone. Rarity tier
@@ -1086,14 +1195,16 @@ function scheduleOpen(b: BoxRecord): void {
   boxTimers.set(b.boxId, setTimeout(() => executeTask(async () => openBox(b.boxId)), delay))
 }
 
-/** Planted records whose planter is no longer in BOX_POSITIONS — handed back at startup. */
-const orphanedBoxes: BoxRecord[] = []
-
-async function loadBoxes(): Promise<void> {
-  for (const p of BOX_POSITIONS) boxes.set(p.id, emptyBox(p.id))
-  const raw = await Storage.get<string>('boxes')
-  if (raw) {
-    const records: Array<Partial<BoxRecord> & { boxId: string }> = JSON.parse(raw)
+/** Load (or late-load) the planters. False when the read failed. A planter claimed
+ *  this session keeps its claim over the stored record. A stored record whose planter
+ *  is no longer in BOX_POSITIONS (planter editor bake) is tidied: contents go back to
+ *  the owner with a 'kept safe' note. */
+async function loadBoxes(): Promise<boolean> {
+  const res = await loadScene<Array<Partial<BoxRecord> & { boxId: string }>>('boxes')
+  if (!res.ok) { console.error('[Server] boxes: load failed — saves held until a reload succeeds'); return false }
+  const orphaned: BoxRecord[] = []
+  {
+    const records = Array.isArray(res.value) ? res.value : []
     // Records saved before Phase 4 lack the watering fields; an undefined string
     // makes every boxState send throw in the event bus, so backfill on load.
     // Records saved before 2026-09-18 have `rare: boolean` instead of `rarityTier` —
@@ -1101,17 +1212,25 @@ async function loadBoxes(): Promise<void> {
     // (Common) default takes over. Fine for pre-production test data; a live-player
     // migration would need to map old rare:true → rarityTier:1 explicitly.
     for (const r of records) {
-      if (!boxes.has(r.boxId)) {
+      const live = boxes.get(r.boxId)
+      if (!live) {
         // Planter removed from the layout (planter editor bake) — contents go back to the owner
-        if (r.owner) orphanedBoxes.push({ ...emptyBox(r.boxId), ...r, waterers: r.waterers ?? [] })
+        if (r.owner) orphaned.push({ ...emptyBox(r.boxId), ...r, waterers: r.waterers ?? [] })
         continue
       }
-      boxes.set(r.boxId, { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '' })
+      if (live.owner) continue   // claimed this session — memory wins
+      const restored: BoxRecord = { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '' }
+      boxes.set(r.boxId, restored)
+      if (restored.owner) sendBox(restored)
     }
   }
   let growing = 0
-  for (const b of boxes.values()) if (b.owner && !b.opened) { scheduleOpen(b); growing++ }
+  for (const b of boxes.values()) if (b.owner && !b.opened && !boxTimers.has(b.boxId)) { scheduleOpen(b); growing++ }
   console.log(`[Server] Boxes: ${boxes.size} total, ${[...boxes.values()].filter(b => b.owner).length} planted, ${growing} growing (timers rescheduled)`)
+  boxesWriter.enable()
+  for (const r of orphaned) await tidyPlanter(r)   // owners get a 'kept safe' note next visit
+  if (orphaned.length > 0) console.log(`[Server] ${orphaned.length} planted planter(s) left the layout — contents returned`)
+  return true
 }
 
 // ── Crowding rule (GDD §3.1) ─────────────────────────────────
@@ -1121,15 +1240,20 @@ async function loadBoxes(): Promise<void> {
 // to their pouch — never lost — and they're told on their next visit.
 const lastSeen = new Map<string, number>()   // lowercase address → ms of last join/leave
 
-async function loadLastSeen(): Promise<void> {
-  try {
-    const raw = await Storage.get<string>('lastSeen')
-    if (raw) for (const [a, t] of Object.entries(JSON.parse(raw) as Record<string, number>)) lastSeen.set(a, Number(t) || 0)
-  } catch (err) { console.error('[Server] loadLastSeen failed:', err) }
+/** Load (or late-load) last-seen times. False when the read failed. A time recorded
+ *  this session wins over the stored one. */
+async function loadLastSeen(): Promise<boolean> {
+  const res = await loadScene<Record<string, number>>('lastSeen')
+  if (!res.ok) { console.error('[Server] lastSeen: load failed — saves held until a reload succeeds'); return false }
+  if (res.value && typeof res.value === 'object') {
+    for (const [a, t] of Object.entries(res.value)) if (!lastSeen.has(a)) lastSeen.set(a, Number(t) || 0)
+  }
+  lastSeenWriter.enable()
+  return true
 }
 function markSeen(address: string): void {
   lastSeen.set(address.toLowerCase(), Date.now())
-  void setWorld('lastSeen', JSON.stringify(Object.fromEntries(lastSeen)))
+  lastSeenWriter.save(Object.fromEntries(lastSeen))
 }
 const loadKeptSafe = (a: string) => loadPlayerJson<string[]>(a, 'keptSafe', () => [])
 
@@ -1211,7 +1335,6 @@ interface AvenueRecord {
 }
 const avenue = new Map<string, AvenueRecord>()           // slotId → record
 const avenueLooked = new Set<string>()                   // `${address}:${slotId}` — one look each per session
-const orphanedAvenue: AvenueRecord[] = []
 
 function emptySlot(slotId: string): AvenueRecord { return { slotId, owner: '', ownerName: '', keepsake: null, since: 0, looks: 0 } }
 
@@ -1234,23 +1357,31 @@ function sendAvenue(r: AvenueRecord, to?: string[]): void {
 }
 function sendAllAvenue(to: string[]): void { for (const r of avenue.values()) sendAvenue(r, to) }
 
-async function saveAvenue(): Promise<void> {
-  try { await setWorld('avenue', JSON.stringify([...avenue.values()])) }
-  catch (err) { console.error('[Server] saveAvenue failed:', err) }
+function saveAvenue(): void {
+  avenueWriter.save([...avenue.values()])
 }
 
-async function loadAvenue(): Promise<void> {
-  for (const p of AVENUE_POSITIONS) avenue.set(p.id, emptySlot(p.id))
-  const raw = await Storage.get<string>('avenue')
-  if (raw) {
-    const records: Array<Partial<AvenueRecord> & { slotId: string }> = JSON.parse(raw)
-    for (const r of records) {
-      const rec = { ...emptySlot(r.slotId), ...r }
-      if (!avenue.has(r.slotId)) { if (rec.owner) orphanedAvenue.push(rec); continue }   // slot left the layout → flower goes home
-      avenue.set(r.slotId, rec)
-    }
+/** Load (or late-load) the Avenue. False when the read failed. A slot claimed this
+ *  session wins over the stored one; a stored slot no longer in the layout sends its
+ *  flower home. */
+async function loadAvenue(): Promise<boolean> {
+  for (const p of AVENUE_POSITIONS) if (!avenue.has(p.id)) avenue.set(p.id, emptySlot(p.id))
+  const res = await loadScene<Array<Partial<AvenueRecord> & { slotId: string }>>('avenue')
+  if (!res.ok) { console.error('[Server] avenue: load failed — saves held until a reload succeeds'); return false }
+  const orphaned: AvenueRecord[] = []
+  const records = Array.isArray(res.value) ? res.value : []
+  for (const r of records) {
+    const rec = { ...emptySlot(r.slotId), ...r }
+    const live = avenue.get(r.slotId)
+    if (!live) { if (rec.owner) orphaned.push(rec); continue }   // slot left the layout → flower goes home
+    if (live.owner) continue   // claimed this session — memory wins
+    avenue.set(r.slotId, rec)
   }
   console.log(`[Server] Avenue: ${avenue.size} slots, ${[...avenue.values()].filter(r => r.owner).length} on show`)
+  avenueWriter.enable()
+  for (const r of orphaned) await returnAvenueFlower(r, 'tidy')
+  if (orphaned.length > 0) { console.log(`[Server] ${orphaned.length} Avenue slot(s) left the layout — flowers returned`); saveAvenue() }
+  return true
 }
 
 function avenueSlotsOwnedBy(address: string): number {
@@ -1361,8 +1492,6 @@ async function resetGarden(): Promise<void> {
     room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0, tier: 0, almanac: 0 })
   }
 
-  // Send bloomReset BEFORE persisting — a Storage failure must never prevent clients
-  // from leaving bloom state. The in-memory state is already authoritative.
   room.send('bloomReset', {})
   // The garden may still be above threshold — hold the next trigger, then re-check once
   // the hold ends (nothing else calls checkBloomThreshold until the next water).
@@ -1370,11 +1499,7 @@ async function resetGarden(): Promise<void> {
   setTimeout(() => executeTask(async () => { if (!bloomActive) checkBloomThreshold() }), BLOOM_TRIGGER_COOLDOWN_MS)
   console.log(`[Server] Garden reset complete — ${kept} watered plants kept, next bloom possible in ${BLOOM_TRIGGER_COOLDOWN_MS / 1000}s`)
 
-  try {
-    await savePlantStates()
-  } catch (err) {
-    console.error('[Server] resetGarden: failed to persist plant states:', err)
-  }
+  savePlantStates()
 }
 
 // ---------------------------------------------------------------
@@ -1399,12 +1524,7 @@ function scheduleExpiry(
       wateredTierMap.delete(plantId)
     wateredAlmanacMap.delete(plantId)
       plantExpiresAt.delete(plantId)
-      // Fail-open: persistence failure must not block the expiry broadcast
-      try {
-        await savePlantStates()
-      } catch (err) {
-        console.error('[Server] scheduleExpiry: failed to persist state:', err)
-      }
+      savePlantStates()
       room.send('plantStateUpdate', { plantId, isWatered: false, wateredAt: 0, wateredBy: '', expiresInMs: 0, tier: 0, almanac: 0 })
       console.log(`[Server] Plant expired: ${plantId}`)
       // Pause (not cancel) — preserves elapsed progress; timer resumes when health recovers.
@@ -1471,8 +1591,8 @@ function playerJoinSystem(): void {
       playerAddresses.delete(entity)
       if (address) {
         syncRateLimits.delete(address)
-        testOverrides.delete(address)
         for (const k of avenueLooked) if (k.startsWith(address.toLowerCase() + ':')) avenueLooked.delete(k)
+        evictPlayerRecords(address)
         markSeen(address)
         void ensureFreePlanters()
         heldSeeds.delete(address.toLowerCase())
@@ -1489,7 +1609,6 @@ function playerJoinSystem(): void {
     const address = identity.address
     playerAddresses.set(entity, address)
     executeTask(async () => {
-      const wateredToday = await getPlayerDailyCount(address)
       room.send('playerDailyState', dailyStatePayload(), { to: [address] })
 
       // Send current state of all plants so the client can restore visuals
@@ -1499,6 +1618,7 @@ function playerJoinSystem(): void {
         room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId), tier: wateredTierMap.get(plantId) ?? 0, almanac: wateredAlmanacMap.get(plantId) ?? 0 }, { to: [address] })
       }
 
+      await loadLifetimeRecord(address)   // authoritative total before the board goes out
       broadcastLeaderboard([address])
       sendThreshold([address])
       await loadPouch(address)
@@ -1516,7 +1636,7 @@ function playerJoinSystem(): void {
       sendAllHeld([address])
       markSeen(address)
       await deliverKeptSafe(address)
-      console.log(`[Server] Player joined: ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
+      console.log(`[Server] Player joined: ${address} (${getWateredCount()}/${currentBloomThreshold()} watered, bloom=${bloomActive})`)
     })
   }
 
@@ -1558,31 +1678,23 @@ export async function server(): Promise<void> {
 
   console.log(`[Server] ${plantEntities.size} plants registered`)
 
-  // Restore persisted plant states and leaderboard.
-  // Fail-open: a Storage API outage must never abort server() — if these throw,
-  // message handlers below would never register and the whole game goes inert.
-  try {
-    await loadPlantStates()
-  } catch (err) {
-    console.error('[Server] loadPlantStates failed — starting with fresh plant state:', err)
-  }
-  try {
-    await loadLeaderboard()
-  } catch (err) {
-    console.error('[Server] loadLeaderboard failed — starting with empty leaderboard:', err)
-  }
-  try {
-    await loadBoxes()
-    await loadAvenue()
-  } catch (err) {
-    console.error('[Server] loadBoxes failed — starting with empty boxes:', err)
-    for (const p of BOX_POSITIONS) if (!boxes.has(p.id)) boxes.set(p.id, emptyBox(p.id))
-  }
-  await loadLastSeen()
-  for (const r of orphanedBoxes) await tidyPlanter(r)   // owners get a 'kept safe' note next visit
-  for (const r of orphanedAvenue) await returnAvenueFlower(r, 'tidy')   // slot left AVENUE_POSITIONS
-  if (orphanedAvenue.length > 0) { console.log(`[Server] ${orphanedAvenue.length} Avenue slot(s) left the layout — flowers returned`); void saveAvenue() }
-  if (orphanedBoxes.length > 0) { console.log(`[Server] ${orphanedBoxes.length} planted planter(s) left the layout — contents returned`); void saveBoxes() }
+  for (const p of BOX_POSITIONS) boxes.set(p.id, emptyBox(p.id))
+  for (const w of [planterDraftWriter, plantDraftWriter, tributeDraftWriter]) w.enable()   // admin overwrite targets; nothing to read first
+
+  // Restore persisted state. Loads never throw; a key that could not be read starts
+  // empty, keeps its saves held and is reloaded in the background until it can be
+  // merged — so an outage at boot neither aborts server() nor lets the first save
+  // overwrite good data. Tributes load with the boards: they seed lifetime totals
+  // for founding honorees, so they must follow them.
+  const loads: Array<[string, () => Promise<boolean>]> = [
+    ['plants',      loadPlantStates],
+    ['leaderboard', loadLeaderboard],
+    ['boxes',       loadBoxes],
+    ['avenue',      loadAvenue],
+    ['lastSeen',    loadLastSeen],
+  ]
+  const outcomes = await Promise.all(loads.map(([, load]) => load()))
+  loads.forEach(([label, load], i) => { if (!outcomes[i]) scheduleReload(label, load) })
   await ensureFreePlanters()
   setInterval(() => executeTask(ensureFreePlanters), 60 * 60 * 1000)   // owners age past the min-away while nobody joins
   const restoredCount = getWateredCount()
@@ -1629,7 +1741,10 @@ export async function server(): Promise<void> {
       watered.isWatered = true
       watered.wateredAt = now
 
-      // Count on both boards: this week's (resets) and lifetime (flair source)
+      // Count on both boards: this week's (resets) and lifetime (flair source). The
+      // record loads before the bump so a stored total is never overwritten by one
+      // that started from the legacy floor.
+      await loadLifetimeRecord(playerAddress)
       const tierBefore = tierOf(playerAddress)
       const cycleKey = playerAddress.toLowerCase()
       cycleContributors.add(cycleKey)
@@ -1642,14 +1757,9 @@ export async function server(): Promise<void> {
       wateredTierMap.set(plantId, tier)
       wateredAlmanacMap.set(plantId, almanacRankOf(playerAddress))
 
-      // Fail-open: persistence failure must not block the state broadcast below
-      try {
-        await savePlantStates()
-        await saveLeaderboard()
-        await saveLifetime()
-      } catch (err) {
-        console.error('[Server] waterPlant: failed to persist state:', err)
-      }
+      savePlantStates()
+      saveLeaderboard()
+      void saveLifetimeFor(playerAddress)
       const expiresAt = armExpiry(plantId, entity, now)
 
       room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now, tier, almanac: almanacRankOf(playerAddress) })
@@ -2007,7 +2117,7 @@ export async function server(): Promise<void> {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     if (!data.json) {
       let saved = ''
-      try { saved = (await Storage.get<string>('plantDraft')) ?? '' } catch { /* none yet */ }
+      saved = draftText(await loadScene<unknown>('plantDraft'))
       room.send('plantDraft', { json: saved }, { to: [address] })
       return
     }
@@ -2015,7 +2125,7 @@ export async function server(): Promise<void> {
       const map = JSON.parse(data.json) as Record<string, { x: number; y: number; z: number; rotY: number; scale: number }>
       const names = Object.keys(map)
       if (typeof map !== 'object' || names.length === 0 || names.length > 300) throw new Error('not a map of 1..300 plants')
-      await setWorld('plantDraft', data.json)
+      plantDraftWriter.save(data.json)
       const ts = names.map(n => `  '${n}': { x: ${map[n].x}, y: ${map[n].y}, z: ${map[n].z}, rotY: ${map[n].rotY}, scale: ${map[n].scale} },`).join('\n')
       console.log(`[Server] Plant draft saved: ${names.length} plants — bake into shared/layout.ts PLANT_LAYOUT:\n${ts}`)
       room.send('plantDraft', { json: data.json }, { to: [address] })   // ack — the client warns without it
@@ -2032,14 +2142,14 @@ export async function server(): Promise<void> {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     if (!data.json) {
       let saved = ''
-      try { saved = (await Storage.get<string>('tributeDraft')) ?? '' } catch { /* none yet */ }
+      saved = draftText(await loadScene<unknown>('tributeDraft'))
       room.send('tributeDraft', { json: saved }, { to: [address] })
       return
     }
     try {
       const list = JSON.parse(data.json)
       if (!Array.isArray(list) || list.length > 100) throw new Error('not a list of ≤ 100 plots')
-      await setWorld('tributeDraft', data.json)
+      tributeDraftWriter.save(data.json)
       const ts = list.map((p: { x: number; z: number; rot: number }) => `  { x: ${p.x}, z: ${p.z}, rot: ${p.rot} },`).join('\n')
       console.log(`[Server] Tribute draft saved: ${list.length} plots — bake into TRIBUTE_HERO_PLOTS:\n${ts}`)
     } catch (err) {
@@ -2053,15 +2163,14 @@ export async function server(): Promise<void> {
   onRoomMessage<{ json: string }>('adminPlanterDraft', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     if (!data.json) {
-      let saved = ''
-      try { saved = (await Storage.get<string>('planterDraft')) ?? '' } catch { /* none yet */ }
+      const saved = draftText(await loadScene<unknown>('planterDraft'))
       room.send('planterDraft', { json: saved }, { to: [address] })
       return
     }
     try {
       const list = JSON.parse(data.json)
       if (!Array.isArray(list) || list.length > 300) throw new Error('not a list of ≤ 300 planters')
-      await setWorld('planterDraft', data.json)
+      planterDraftWriter.save(data.json)
       console.log(`[Server] Planter draft saved: ${list.length} planters`)
     } catch (err) {
       sendNotice(address, 'Planter draft not saved — bad data')
@@ -2073,10 +2182,12 @@ export async function server(): Promise<void> {
   onRoomMessage<{ amount: number }>('adminGrantWaters', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const amount = Math.max(1, Math.min(1000, Math.floor(data?.amount ?? 0)))
+    await loadLifetimeRecord(address)
     const tierBefore = tierOf(address)
     for (let i = 0; i < amount; i++) bumpWaterTotals(address)
     const tier = tierOf(address)
-    try { await saveLeaderboard(); await saveLifetime() } catch (err) { console.error('[Server] adminGrantWaters: persist failed:', err) }
+    saveLeaderboard()
+    await saveLifetimeFor(address)
     broadcastLeaderboard()
     const total = lifetime.get(address)?.total ?? 0
     console.log(`[Server] [Test] granted ${amount} waters to ${address} → lifetime ${total}, tier ${tierBefore}→${tier}`)
@@ -2110,7 +2221,7 @@ export async function server(): Promise<void> {
         watered++
       }
     }
-    if (watered > 0) await savePlantStates()
+    if (watered > 0) savePlantStates()
     console.log(`[Server] forceWater80: watered ${watered} plants (${getWateredCount()}/${currentBloomThreshold()} total)`)
     checkBloomThreshold()
   })
@@ -2124,13 +2235,13 @@ export async function server(): Promise<void> {
       return
     }
     syncRateLimits.set(address, now)
-    const wateredToday = await getPlayerDailyCount(address)
     room.send('playerDailyState', dailyStatePayload(), { to: [address] })
     for (const [plantId, plantEntity] of plantEntities) {
       const ps = PlantSync.getOrNull(plantEntity)
       if (!ps) continue
       room.send('plantStateUpdate', { plantId, isWatered: ps.isWatered, wateredAt: Number(ps.wateredAt), wateredBy: wateredByMap.get(plantId) ?? '', expiresInMs: expiresInMs(plantId), tier: wateredTierMap.get(plantId) ?? 0, almanac: wateredAlmanacMap.get(plantId) ?? 0 }, { to: [address] })
     }
+    await loadLifetimeRecord(address)
     broadcastLeaderboard([address])
     sendThreshold([address])
     await loadPouch(address)
@@ -2145,7 +2256,7 @@ export async function server(): Promise<void> {
     sendTributes([address])
     sendAllAvenue([address])
     sendAllHeld([address])
-    console.log(`[Server] Full sync sent to ${address} (${wateredToday}/${DAILY_WATER_LIMIT} today, ${getWateredCount()}/${currentBloomThreshold()} watered)`)
+    console.log(`[Server] Full sync sent to ${address} (${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 
   // ── Message: markPouchOpened ─────────────────────────────────
@@ -2164,32 +2275,16 @@ export async function server(): Promise<void> {
     console.log(`[Server] Onboarding reset for ${address}`)
   })
 
-  // ── Message: setTestOverride ─────────────────────────────────
-  onRoomMessage<{ enabled: boolean }>('setTestOverride', async (data, address) => {
-    if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
-    if (data.enabled) {
-      testOverrides.add(address)
-      console.log(`[Server] Test override ENABLED for ${address}`)
-    } else {
-      testOverrides.delete(address)
-      console.log(`[Server] Test override DISABLED for ${address}`)
-    }
-  })
-
   // ── Message: registerPlayer ──────────────────────────────────
   onRoomMessage<{ displayName: string }>('registerPlayer', async (data, address) => {
+    await loadLifetimeRecord(address)
     for (const board of [leaderboard, lifetime]) {
       const entry = board.get(address)
       if (entry) entry.displayName = data.displayName
       else board.set(address, { displayName: data.displayName, total: 0 })
     }
-    // Fail-open: persistence failure must not block the leaderboard broadcast
-    try {
-      await saveLeaderboard()
-      await saveLifetime()
-    } catch (err) {
-      console.error('[Server] registerPlayer: failed to persist leaderboard:', err)
-    }
+    saveLeaderboard()
+    await saveLifetimeFor(address)
     broadcastLeaderboard([address])
     console.log(`[Server] Registered player: ${data.displayName} (${address})`)
   })

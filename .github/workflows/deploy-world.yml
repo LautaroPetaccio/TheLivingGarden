@@ -1,0 +1,149 @@
+name: Deploy world
+
+# Deploys this scene to its Decentraland world. Manual only: a deploy replaces what
+# the world holds, so it should never ride on a push.
+#
+# The run happens in two stages. `inspect` verifies the scene and reports what the
+# deploy would do — most importantly whether it changes who can find the world, and
+# which scenes it replaces. Nothing is signed or uploaded in that stage. `deploy` then
+# waits for a human to approve it, through the environment's protection rule.
+#
+# One-time setup, see .github/DEPLOYING.md:
+#   - Environment `world-deploy` with at least one required reviewer (the approval gate)
+#   - Secret   DCL_PRIVATE_KEY   deploying wallet's key, on that environment
+#   - Variable DEPLOYER_ADDRESS  that wallet's address, so permissions are checked up front
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type the world name from scene.json to confirm (e.g. name.dcl.eth)'
+        required: true
+        type: string
+      target_content:
+        description: 'Worlds content server'
+        required: false
+        default: 'https://worlds-content-server.decentraland.org'
+        type: string
+      multi_scene:
+        description: 'Add alongside existing scenes instead of replacing them'
+        required: false
+        default: false
+        type: boolean
+
+# Never let two deploys to the same world overlap, and never cancel one midway.
+concurrency:
+  group: deploy-world
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  inspect:
+    name: Inspect world and verify scene
+    runs-on: ubuntu-latest
+    outputs:
+      world: ${{ steps.check.outputs.world }}
+      world_registered: ${{ steps.check.outputs.world_registered }}
+      listed_after: ${{ steps.check.outputs.listed_after }}
+      listing_changes: ${{ steps.check.outputs.listing_changes }}
+      existing_scenes: ${{ steps.check.outputs.existing_scenes }}
+      permission: ${{ steps.check.outputs.permission }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # No package-lock.json in this repo (it is gitignored), so cache on package.json.
+          cache: npm
+          cache-dependency-path: package.json
+
+      - name: Confirm the world name
+        run: |
+          world=$(node -p "require('./scene.json').worldConfiguration?.name ?? ''")
+          if [ -z "$world" ]; then
+            echo "::error::scene.json has no worldConfiguration.name — this workflow only deploys worlds."
+            exit 1
+          fi
+          if [ "$world" != "${{ inputs.confirm }}" ]; then
+            echo "::error::Confirmation mismatch. scene.json deploys to '$world'."
+            exit 1
+          fi
+          echo "Confirmed: $world"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: What will this deploy do?
+        id: check
+        env:
+          TARGET_CONTENT: ${{ inputs.target_content }}
+          DEPLOYER_ADDRESS: ${{ vars.DEPLOYER_ADDRESS }}
+        run: node scripts/check-world-deployment.mjs
+
+      - name: Flag a listing change for the reviewer
+        if: steps.check.outputs.listing_changes == 'true'
+        run: |
+          if [ "${{ steps.check.outputs.listed_after }}" = "true" ]; then
+            echo "::warning::After this deploy ${{ steps.check.outputs.world }} becomes publicly listed."
+          else
+            echo "::warning::After this deploy ${{ steps.check.outputs.world }} stops being publicly listed."
+          fi
+
+  deploy:
+    name: Deploy (requires approval)
+    needs: inspect
+    runs-on: ubuntu-latest
+    # The approval gate. Configure `world-deploy` with required reviewers, and the run
+    # pauses here until one of them approves, with the inspect summary already visible.
+    environment:
+      name: world-deploy
+      url: https://decentraland.org/play/?realm=${{ needs.inspect.outputs.world }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: package.json
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Deploy
+        env:
+          # Signs the deployment without a browser. Scoped to this environment.
+          DCL_PRIVATE_KEY: ${{ secrets.DCL_PRIVATE_KEY }}
+        run: |
+          if [ -z "$DCL_PRIVATE_KEY" ]; then
+            echo "::error::DCL_PRIVATE_KEY is not set on the world-deploy environment."
+            exit 1
+          fi
+          npx sdk-commands deploy \
+            --target-content "${{ inputs.target_content }}" \
+            --skip-build \
+            --no-browser \
+            --yes \
+            ${{ inputs.multi_scene && '--multi-scene' || '' }}
+
+      - name: Record what shipped
+        run: |
+          {
+            echo "## Deployed \`${{ needs.inspect.outputs.world }}\`"
+            echo ""
+            echo "- Commit \`${{ github.sha }}\`"
+            echo "- Target \`${{ inputs.target_content }}\`"
+            echo "- Publicly listed: ${{ needs.inspect.outputs.listed_after }}"
+          } >> "$GITHUB_STEP_SUMMARY"

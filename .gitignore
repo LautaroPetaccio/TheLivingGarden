@@ -1,5 +1,7 @@
 package-lock.json
 *.js
+# ...but the Jest config is source, not build output
+!jest.config.js
 node_modules
 bin/
 .DS_Store
@@ -10,3 +12,4 @@ yarn-error.log*
 .editor
 # local Claude session tooling
 .claude/
+

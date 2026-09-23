@@ -12,12 +12,16 @@
     "upgrade-sdk:next": "npm install --save-dev @dcl/sdk@next",
     "server-logs": "sdk-commands sdk-server-logs",
     "postinstall": "node patch-node-modules.cjs",
-    "check-glb": "node check-glb.cjs"
+    "check-glb": "node check-glb.cjs",
+    "test": "jest"
   },
   "devDependencies": {
     "@dcl/gltf-validator-ts": "^1.0.19",
     "@dcl/js-runtime": "7.26.1-32160793830.commit-0b97733",
-    "@dcl/sdk": "7.26.1-32160793830.commit-0b97733"
+    "@dcl/sdk": "7.26.1-32160793830.commit-0b97733",
+    "@types/jest": "^29.5.14",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.2.5"
   },
   "engines": {
     "node": ">=16.0.0",

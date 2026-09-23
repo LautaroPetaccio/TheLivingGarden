@@ -19,3 +19,7 @@ README.md
 *.rar
 *.md
 src
+scripts
+test
+jest.config.js
+tsconfig.test.json
