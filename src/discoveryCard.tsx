@@ -37,6 +37,23 @@ const INK   = { r: 0.07,  g: 0.065, b: 0.06 }
 const PLATE = { r: 1, g: 1, b: 1, a: 0.12 }
 const NEW   = { r: 0.98, g: 0.78, b: 0.46 }
 
+// Week-2 playtest: "new discovery UI needs an X". Both cards were fire-and-forget with
+// no input at all. Dismissing skips the fade-out; a queued milestone pumps in as usual.
+function dismissDiscovery(): void { card = null }
+function dismissMilestone(): void { milestone = null }
+
+function closeButton(px: (n: number) => number, fs: (n: number) => number, a: number, onTap: () => void) {
+  return (
+    <UiEntity
+      uiTransform={{ positionType: 'absolute', position: { top: px(10), right: px(10) }, width: px(34), height: px(34), alignItems: 'center', justifyContent: 'center', borderRadius: px(17) }}
+      uiBackground={{ color: { ...PLATE, a: PLATE.a * a } }}
+      onMouseDown={onTap}
+    >
+      <Label value="x" fontSize={fs(16)} color={{ ...DIM, a }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ width: '100%', height: '100%' }} />
+    </UiEntity>
+  )
+}
+
 /** Show the card for a flower that has just opened in one of my planters.
  *  Read BEFORE the server's discoveredUpdate lands, so `isNew` still sees the set as it
  *  was a moment ago — which is exactly the question being asked. If the push wins the
@@ -106,7 +123,9 @@ export function MilestoneCardUi(props: { px: (n: number) => number; fs: (n: numb
       <UiEntity
         uiTransform={{ width: px(props.mobile ? 440 : 380), flexDirection: 'column', alignItems: 'center', padding: { left: px(24), right: px(24), top: px(20), bottom: px(20) }, borderRadius: px(22) }}
         uiBackground={{ color: { ...DARK, a: DARK.a * a } }}
+        onMouseDown={dismissMilestone}
       >
+        {closeButton(px, fs, a, dismissMilestone)}
         <Label value={`${m.species} species discovered`} fontSize={fs(15)} color={{ ...DIM, a }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: fs(22) }} />
         <Label value={m.title} fontSize={fs(30)} color={{ ...NEW, a }} textAlign="middle-center" textWrap="wrap" uiTransform={{ width: '100%', height: fs(40), margin: { top: px(2) } }} />
         <UiEntity uiTransform={{ height: px(34), padding: { left: px(18), right: px(18) }, margin: { top: px(10) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(17) }} uiBackground={{ color: { ...tier.seedColor, a } }}>
@@ -140,7 +159,9 @@ export function DiscoveryCardUi(props: { px: (n: number) => number; fs: (n: numb
       <UiEntity
         uiTransform={{ width: px(props.mobile ? 420 : 340), flexDirection: 'column', alignItems: 'center', padding: { left: px(24), right: px(24), top: px(18), bottom: px(20) }, borderRadius: px(22) }}
         uiBackground={{ color: { ...DARK, a: DARK.a * a } }}
+        onMouseDown={dismissDiscovery}
       >
+        {closeButton(px, fs, a, dismissDiscovery)}
         <Label value={c.isNew ? 'New species!' : c.newTier ? 'A rarity you have never seen!' : 'You discovered'} fontSize={fs(17)} color={{ ...(c.isNew || c.newTier ? NEW : DIM), a }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: fs(24) }} />
 
         {plantSpeciesById(c.flower)

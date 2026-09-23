@@ -45,14 +45,14 @@ import {
   TOON_HIGHLIGHT_SRC, TOON_HIGHLIGHT_SCALE,
   ONBOARDING_REPICK_S, ONBOARDING_MAX_RANGE,
   ONBOARDING_WATER_HINT, ONBOARDING_PLANT_HINT, ONBOARDING_HARVEST_HINT, ONBOARDING_GIFT_HINT,
-  ONBOARDING_POUCH_HINT, ONBOARDING_AVENUE_HINT,
+  ONBOARDING_POUCH_HINT, ONBOARDING_AVENUE_HINT, ONBOARDING_BLOOM_HINT, ONBOARDING_SEEDS_FALLING_HINT,
   ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS,
   ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS,
   ONBOARDING_HARVEST_TOAST, ONBOARDING_HARVEST_TOAST_MS,
   PLANTER_RESERVE_RETRY_S, AVENUE_MIN_TIER, AVENUE_ARROW_STANDOFF,
 } from './shared/config'
 
-type Stage = 'none' | 'water' | 'plant' | 'pouch' | 'harvest' | 'gift' | 'avenue'
+type Stage = 'none' | 'water' | 'bloom' | 'plant' | 'pouch' | 'harvest' | 'gift' | 'avenue'
 
 // All four assume DONE until the server says otherwise, so a dropped message never
 // nags a veteran with a tutorial they finished long ago.
@@ -292,6 +292,9 @@ function drawTrail(player: Vector3, to: Vector3): void {
 
 function currentStage(): Stage {
   if (!watered) return 'water'
+  // First water done, no seed yet: the seed comes from the bloom their watering earns (KJ
+  // 2026-09-22 playtest 2). Hint only — the ring already shows how far the garden is.
+  if (!planted && !hasSeeds) return 'bloom'
   if (!planted && hasSeeds) return 'plant'
   // Straight after the first planting: Fin 2026-09-21 never noticed the pouch existed, so
   // the seeds and the whole flower collection behind it were invisible. No trail - the
@@ -351,18 +354,19 @@ function onboardingSystem(dt: number): void {
 
   if (stage === 'none') return
 
-  // Nothing droops during a bloom and the server rejects watering outright — telling a
-  // new player to tap a plant right then would only earn them a rejection.
-  if (stage === 'water' && isBloomActive()) { clearVisuals(); return }
+  // (Watering during a bloom is allowed since 2026-09-22, so the water stage no longer
+  // pauses for one — plants droop and carry drops under the spectacle too.)
 
   if (!player) return
 
-  if (stage === 'gift' || stage === 'pouch') {
-    // No trail: gift's target is another player, who moves, and pouch's is a HUD chip.
-    // The line (plus, for pouch, the chip's own pulse) is the whole lesson.
+  if (stage === 'gift' || stage === 'pouch' || stage === 'bloom') {
+    // No trail: gift's target is another player, who moves; pouch's is a HUD chip; bloom's
+    // is the whole garden. The line (plus, for pouch, the chip's own pulse) is the lesson.
     showChevrons(false)
     showBeacons(false)
-    showPersistent(stage === 'pouch' ? ONBOARDING_POUCH_HINT : ONBOARDING_GIFT_HINT)
+    showPersistent(stage === 'pouch' ? ONBOARDING_POUCH_HINT
+                 : stage === 'gift'  ? ONBOARDING_GIFT_HINT
+                 : isBloomActive()   ? ONBOARDING_SEEDS_FALLING_HINT : ONBOARDING_BLOOM_HINT)
     return
   }
 

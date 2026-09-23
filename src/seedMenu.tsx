@@ -32,11 +32,13 @@ let almanacSel: string | null = null   // species id whose rarity breakdown is o
 let tierFilter: number | null = null   // Flowers tab: show one rarity only; null = all
 let selectedKey = ''      // `${flower}|${rarityTier}` of the tile picked in Flowers
 let giftMode = false      // choosing who to give the selected flower to
+let giftPage = 0          // week-2 playtest: "only get a choice of the same 5 people"
+const GIFT_PAGE = 5
 let page = 0              // Flowers page (pagination — scrolling isn't verified on both explorers)
 let avenueSlot: string | null = null   // set when opened by tapping an empty Avenue planter: Display goes THERE
 
 export function isSeedMenuOpen(): boolean { return open }
-export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; page = 0; almanacPage = 0; almanacSel = null; tierFilter = null; avenueSlot = null } }
+export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; giftPage = 0; page = 0; almanacPage = 0; almanacSel = null; tierFilter = null; avenueSlot = null } }
 export function openSeedMenu(): void { open = true }
 /** Tapped an empty Avenue planter with nothing in hand: open Flowers so they can pick one for it. */
 export function openSeedMenuForAvenue(slotId: string): void { open = true; tab = 'flowers'; avenueSlot = slotId; selectedKey = ''; giftMode = false; page = 0; armAvenuePlacement(null) }
@@ -160,6 +162,8 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
   const earnedTitle  = milestoneTitle(speciesFound)
   const sel    = groups.find(g => g.key === selectedKey) ?? null
   const here   = giftMode ? gardenersHere() : []
+  const giftPages = Math.max(1, Math.ceil(here.length / GIFT_PAGE))
+  if (giftPage > giftPages - 1) giftPage = giftPages - 1   // someone left mid-page
   const tileW  = Math.floor((W - PAD * 2 - px(8) * (TILE_COLS - 1)) / TILE_COLS)
   const held   = getHeld()
   const isHeld = (g: Group) => !!held && held.flower === g.flower && held.rarityTier === g.rarityTier
@@ -381,7 +385,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
         <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: RAISED }} onMouseDown={() => { if (sel) holdFlower(isHeld(sel) ? -1 : sel.lastIndex) }}>
           <Label value={sel && isHeld(sel) ? 'Put away' : 'Hold'} fontSize={fs(17)} color={CREAM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
-        <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: MOSS }} onMouseDown={() => { giftMode = true }}>
+        <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), margin: { right: px(8) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: MOSS }} onMouseDown={() => { giftMode = true; giftPage = 0 }}>
           <Label value="Gift" fontSize={fs(17)} color={CREAM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
         {/* The Avenue (design/communal-planters.md): Rare+ only — the server re-checks. Goes to the
@@ -407,16 +411,26 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       {/* who to give it to */}
       <UiEntity uiTransform={{ display: sel && giftMode ? 'flex' : 'none', width: '100%', flexDirection: 'column', margin: { top: px(6) } }}>
         <Label value={here.length > 0 ? `Give your ${sel ? speciesName(sel.flower) : ''} to` : 'No other gardeners here right now - you can also tap a gardener in the garden'} fontSize={fs(14)} color={DIM} textAlign="middle-left" uiTransform={{ width: '100%', height: fs(26) }} />
-        {here.slice(0, 5).map((g) => (
+        {here.slice(giftPage * GIFT_PAGE, giftPage * GIFT_PAGE + GIFT_PAGE).map((g) => (
           <UiEntity
             key={g.address}
             uiTransform={{ width: '100%', height: px(44), margin: { top: px(6) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }}
             uiBackground={{ color: RAISED }}
-            onMouseDown={() => { if (sel) giveFlower(g.address, sel.lastIndex); selectedKey = ''; giftMode = false }}
+            onMouseDown={() => { if (sel) giveFlower(g.address, sel.lastIndex); selectedKey = ''; giftMode = false; giftPage = 0 }}
           >
             <Label value={g.name} fontSize={fs(16)} color={CREAM} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
           </UiEntity>
         ))}
+        {/* same Prev · n / N · Next as the flower grid — only when more than one page of gardeners */}
+        <UiEntity uiTransform={{ display: giftPages > 1 ? 'flex' : 'none', width: '100%', height: px(44), flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { top: px(6) } }}>
+          <UiEntity uiTransform={{ width: px(96), height: px(40), alignItems: 'center', justifyContent: 'center', borderRadius: px(20) }} uiBackground={{ color: giftPage > 0 ? RAISED : { ...RAISED, a: 0.03 } }} onMouseDown={() => { if (giftPage > 0) giftPage-- }}>
+            <Label value="Prev" fontSize={fs(15)} color={giftPage > 0 ? CREAM : { ...DIM, a: 0.4 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+          </UiEntity>
+          <Label value={`${giftPage + 1} / ${giftPages}`} fontSize={fs(15)} color={DIM} textAlign="middle-center" uiTransform={{ height: '100%' }} />
+          <UiEntity uiTransform={{ width: px(96), height: px(40), alignItems: 'center', justifyContent: 'center', borderRadius: px(20) }} uiBackground={{ color: giftPage < giftPages - 1 ? RAISED : { ...RAISED, a: 0.03 } }} onMouseDown={() => { if (giftPage < giftPages - 1) giftPage++ }}>
+            <Label value="Next" fontSize={fs(15)} color={giftPage < giftPages - 1 ? CREAM : { ...DIM, a: 0.4 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
+          </UiEntity>
+        </UiEntity>
       </UiEntity>
       </UiEntity>
 

@@ -46,7 +46,7 @@ import {
 import { Quaternion } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS, BOX_WATER_MAX, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById, withArticle } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX, WATER_DROP_MODEL_SRC, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById, withArticle } from './shared/config'
 import { showToast } from './notifications'
 import { attachPlantVfx, attachSeedlingVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
@@ -55,6 +55,7 @@ import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
 import { createSign, moveSign, setupSignSystem, Sign } from './signs'
 import { BALLOON_TEXT_TRACK } from './balloonTextTrack'
 import { playSfx } from './sounds'
+import { playWateringBeat } from './wateringSystem'
 
 // ---------------------------------------------------------------
 // Config (greybox visuals)
@@ -115,6 +116,7 @@ interface BoxView {
   opensLocalAt: number          // local-clock ms; derived from opensAt − serverNow
   waters:       number
   lastWaterer:  string
+  drop:         Entity | null   // water-drop marker: a growing seed of someone else's that I can still help
 }
 
 const views  = new Map<string, BoxView>()
@@ -394,10 +396,36 @@ function plantRevealSystem(): void {
   best.plantKey = plantKeyFor(best)
 }
 
+// Week-2 playtest 2026-09-22 ("add a water drop icon"): the same marker the garden plants
+// carry, on any growing seed a visitor can still help. Not my own (I cannot water it), not
+// one I already watered this session (the server would refuse — after a rejoin it just
+// toasts, since boxState does not carry the waterer list). Bounded by players x planter cap.
+const wateredByMe = new Set<string>()   // boxIds I watered this session, client-side only
+const SEEDLING_DROP_Y = 0.8             // above the rim, like WATER_DROP_Y over a garden plant
+
+function wantsDrop(v: BoxView): boolean {
+  return !!v.owner && !v.opened && !isMine(v) && v.waters < BOX_WATER_MAX && !wateredByMe.has(v.boxId)
+}
+function removeSeedlingDrop(v: BoxView): void {
+  if (v.drop === null) return
+  engine.removeEntity(v.drop)
+  v.drop = null
+}
+function setSeedlingDrop(v: BoxView, pos: PlanterPos): void {
+  if (!wantsDrop(v)) { removeSeedlingDrop(v); return }
+  if (v.drop !== null) return
+  const e = engine.addEntity()
+  Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y + SEEDLING_DROP_Y, z: pos.z } })
+  GltfContainer.create(e, { src: WATER_DROP_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  Animator.create(e, { states: [{ clip: 'Bob', playing: true, loop: true, speed: 0.85 + Math.random() * 0.3 }] })
+  v.drop = e
+}
+
 function refresh(v: BoxView): void {
   if (deleted.has(v.boxId)) return   // removed in the layout editor — stays hidden until the bake
   const pos = layout.get(v.boxId)!
   if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
+  setSeedlingDrop(v, pos)
   setBalloonVisual(v, pos)
   if (v.balloonText !== null) setBalloonText(v, Date.now())
   setLabel(v, labelFor(v))
@@ -436,7 +464,10 @@ function onTap(v: BoxView): void {
   if (v.opened) { showToast(`${v.ownerName}'s ${flowerName(v)}, on show`, TOAST_MS, false); return }
   if (v.waters >= BOX_WATER_MAX) { showToast(`${v.ownerName}'s seed has had all the water it can take`, TOAST_MS, false); return }
   console.log(`[Boxes] watering ${v.ownerName}'s ${v.boxId}`)
+  playWateringBeat()   // same optimistic timing as a garden plant; the server still validates
   room.send('waterBox', { boxId: v.boxId })
+  wateredByMe.add(v.boxId)
+  removeSeedlingDrop(v)   // one water per visitor — the marker's job here is done
 }
 
 // ---------------------------------------------------------------
@@ -461,7 +492,7 @@ function createBox(p: PlanterPos & { id: string }): BoxView {
   Transform.create(hit, { parent: base, position: PLANTER_COLLIDER_CENTER, scale: PLANTER_COLLIDER_SIZE })
   MeshCollider.setBox(hit, ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS)
 
-  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, balloonLive: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '' }
+  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, balloonLive: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '', drop: null }
   pointerEventsSystem.onPointerDown(
     { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
@@ -534,6 +565,7 @@ export function deletePlanter(id: string): void {
   if (!v || deleted.has(id)) return
   deleted.add(id)
   detachPlantVfx(id)
+  removeSeedlingDrop(v)
   if (v.plant !== null) { retirePlant(v.plant); v.plant = null }
   const zero = { x: 0, y: 0, z: 0 }
   Transform.getMutable(v.base).scale = zero

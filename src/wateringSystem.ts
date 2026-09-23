@@ -56,7 +56,7 @@ import { showToast, showDailyLimit, hideDailyLimit, showPersistent, hidePersiste
 import { clockSync } from './shared/clockSync'
 import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
-import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS, DROP_RANGE, DROP_RANGE_OUT } from './shared/config'
+import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS, DROP_RANGE, DROP_RANGE_OUT, BLOOM_TRIGGER_COOLDOWN_MS, EXPIRY_TELL_MS, WATER_DROP_MODEL_SRC } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
 import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
@@ -131,7 +131,7 @@ const WATER_FX_MS   = 400
 const WATER_ANIM_MS = 1500
 
 // ── Water drop indicator ──────────────────────────────────────
-const WATER_DROP_SRC = 'assets/scene/Models/waterDrop/waterDrop_bob.glb'   // waterDrop.glb + baked 'Bob' clip
+const WATER_DROP_SRC = WATER_DROP_MODEL_SRC   // waterDrop.glb + baked 'Bob' clip (shared with boxSystem's seedling drops)
 const WATER_DROP_Y   = 0.8   // local Y above plant pivot
 const DROP_FADE_MS   = 1600  // ms for scale-in / scale-out tween
 
@@ -319,9 +319,8 @@ function plantAnimatorInitSystem(): void {
         { clip: ANIM_CLOSE_PLAY,    playing: false, loop: false, speed: ANIM_CLOSE_PLAY_SPEED },
       ],
     })
-    // The state as of NOW: watered, or held healthy by a bloom (bloomTriggered snaps
-    // unwatered plants to healthy; its playSingleAnimation was a no-op before this existed).
-    const healthy = (PlantData.getOrNull(entity)?.isWatered ?? false) || isBloomActive() || bloomActive
+    // The state as of NOW. A bloom no longer holds plants green (2026-09-22).
+    const healthy = PlantData.getOrNull(entity)?.isWatered ?? false
     if (isShown(entity)) Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
   }
   for (const drop of [...pendingDropAnimators]) {
@@ -379,7 +378,7 @@ let animSweepIn = 0
 
 /** Re-assert the idle a plant and its rose should be playing, given its watered state. */
 function resumeIdles(entity: Entity): void {
-  const healthy = (PlantData.getOrNull(entity)?.isWatered ?? false) || isBloomActive() || bloomActive
+  const healthy = PlantData.getOrNull(entity)?.isWatered ?? false
   if (Animator.has(entity) && isShown(entity)) {
     Animator.playSingleAnimation(entity, healthy ? ANIM_HEALTHY_STATE : ANIM_DROOPY_STATE, true)
   }
@@ -932,6 +931,16 @@ function emoteWatchSystem(): void {
   }
 }
 
+/** The tap feedback a garden plant gets — emote now, pour sound at WATER_FX_MS — for
+ *  other tap targets that water something (seedlings, boxSystem). Week-2 playtest:
+ *  watering a friend's seed played nothing. */
+export function playWateringBeat(): void {
+  if (emoteActive) return
+  playClickSound()
+  triggerWateringEmote(engine.PlayerEntity)
+  timers.setTimeout(playWateringSound, WATER_FX_MS)
+}
+
 function triggerWateringEmote(_plantEntity: Entity) {
   // movePlayerTo retired (Clean The Club precedent) — teleport-stepping players
   // to the plant put them inside geometry; the emote now plays where they stand.
@@ -967,13 +976,28 @@ function plantExpiryMs(plantId: string): number {
 // decay than our guess) must supersede the earlier timer, not race it.
 const expiryGen = new Map<Entity, number>()
 
+/** Watered plants inside their last EXPIRY_TELL_MS: drop showing, a tap is a top-up. */
+const expiryTell = new Set<Entity>()
+
 function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: number) {
   const gen = (expiryGen.get(entity) ?? 0) + 1
   expiryGen.set(entity, gen)
+  expiryTell.delete(entity)
+  // Expiry tell (week-2 playtest 2026-09-22, "add a skill check to watering"): the drop
+  // comes back EXPIRY_TELL_MS before the plant dries, while it is still green. Which to
+  // water first — the one about to go, or the one already gone — is the decision.
+  timers.setTimeout(() => {
+    if (expiryGen.get(entity) !== gen) return
+    const pd = PlantData.get(entity)
+    if (!pd.isWatered || pd.wateredAt !== sessionTimestamp) return
+    expiryTell.add(entity)
+    setDropFade(entity, 'in')
+  }, Math.max(0, delayMs - EXPIRY_TELL_MS))
   timers.setTimeout(() => {
     if (expiryGen.get(entity) !== gen) return
     const pd = PlantData.getMutable(entity)
     if (!pd.isWatered || pd.wateredAt !== sessionTimestamp) return
+    expiryTell.delete(entity)
 
     // Mark expired immediately so progress & clicks are correct.
     // Another player can water during the ClosePlay animation — the timer
@@ -989,10 +1013,9 @@ function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: numbe
     const expiredLabel = wateredByLabelMap.get(entity)
     if (expiredLabel) TextShape.getMutable(expiredLabel).text = ''
 
-    // During bloom all plants stay visually healthy regardless of server-side decay.
-    // Game state (isWatered, wateredAt) updated above — this block is aesthetic only.
-    // The plantStateUpdate handler has an identical guard for server-pushed expiries.
-    if (!isBloomActive() && !bloomActive) {
+    // Wilt plays during a bloom too (2026-09-22: watering during bloom is allowed, so a
+    // dry plant has to LOOK dry under the spectacle).
+    {
       // Only play ClosePlay if the healthy plant mesh is currently visible.
       // If it's not visible (e.g. the player loaded after this plant had already
       // expired and the server sent isWatered=false on join), snap straight to droopy.
@@ -1016,18 +1039,12 @@ function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: numbe
 }
 
 function waterPlant(entity: Entity, plantId: string) {
-  if (isBloomActive()) {
-    const now = Date.now()
-    if (now - lastBlockedClickMs > BLOCKED_CLICK_COOLDOWN_MS) {
-      lastBlockedClickMs = now
-      showToast("Can't water during bloom event", TOAST_WATERED_MS, false)
-    }
-    return
-  }
+  // Watering during a bloom is allowed (2026-09-22) — the old "Can't water during bloom" gate is gone.
   if (emoteActive)     return
 
-  // Gate: plant already watered — inform without using water or wiggling
-  if (PlantData.get(entity).isWatered) {
+  // Gate: already watered and not yet showing its expiry tell — inform without using water.
+  // Inside the tell the tap is a top-up (the server re-arms the full timer).
+  if (PlantData.get(entity).isWatered && !expiryTell.has(entity)) {
     const now = Date.now()
     if (now - lastBlockedClickMs > BLOCKED_CLICK_COOLDOWN_MS) {
       lastBlockedClickMs = now
@@ -1037,8 +1054,9 @@ function waterPlant(entity: Entity, plantId: string) {
   }
 
   const pd = PlantData.getMutable(entity)
-  const wasAlreadyWatered = false   // top-up path no longer reachable
+  const wasAlreadyWatered = pd.isWatered   // top-up: only reachable inside the expiry tell
   const prevWateredAt     = pd.wateredAt
+  expiryTell.delete(entity)
 
   const now = Date.now()
   pd.isWatered = true
@@ -1112,18 +1130,19 @@ export function resetAllPlants(): void {
   setFairyLightsBloom(false)
   hidePersistent()
 
-  // Clear all "Watered by" labels
-  for (const [, labelEntity] of wateredByLabelMap) {
+  // Plants watered during the bloom and still fresh survive its end (2026-09-22) — the
+  // server has already sent isWatered=false for every plant it DID reset, so local state
+  // is authoritative here. Only the dry ones lose their label and go back to droopy.
+  for (const [plant, labelEntity] of wateredByLabelMap) {
+    if (PlantData.getOrNull(plant)?.isWatered) continue
     TextShape.getMutable(labelEntity).text = ''
+    wateredByNames.delete(plant)
+    setLabelFlair(plant, 0)
   }
-  wateredByNames.clear()
-  for (const plant of flairIconMap.keys()) setLabelFlair(plant, 0)
 
   reset.queue = []
   for (const [entity] of engine.getEntitiesWith(PlantData)) {
-    const pd   = PlantData.getMutable(entity)
-    pd.isWatered = false
-    pd.wateredAt = 0
+    if (PlantData.get(entity).isWatered) continue
     reset.queue.push(entity)
   }
   reset.phase = 'to_droopy'
@@ -1547,10 +1566,6 @@ export function setupWateringSystem(): void {
       }
       stopWateringEmote()
     }
-
-    if (data.reason === 'bloom_active') {
-      updateProgressText()
-    }
   })
 
   room.onMessage('thresholdUpdate', (data) => {
@@ -1600,22 +1615,10 @@ export function setupWateringSystem(): void {
       updateSceneAssets()
     }
 
-    // Snap every currently-unwatered plant to healthy appearance for the bloom event.
-    // Purely aesthetic — PlantData state is unchanged; resetAllPlants() restores visuals on bloomReset.
-    // DIAGNOSTIC 2026-09-17: a late-joining mobile player saw water drops on every plant
-    // during an active bloom — this loop should have hidden all of them. Logging counts to
-    // catch it live next time (registry not yet populated / drops not yet snapped / etc).
-    let snappedCount = 0
-    for (const [entity] of plantRegistry) {
-      if (!PlantData.getOrNull(entity)?.isWatered) {
-        hideRose(entity)
-        showPlant(entity)
-        setDropFade(entity, 'out')
-        Animator.playSingleAnimation(entity, ANIM_HEALTHY_STATE)
-        snappedCount++
-      }
-    }
-    console.log(`[Client] bloomTriggered: registry=${plantRegistry.size} snappedToHealthy=${snappedCount} elapsedMs=${data?.elapsedMs ?? 0}`)
+    // Unwatered plants used to be snapped to healthy here for the spectacle. Since 2026-09-22
+    // watering during a bloom is allowed, so a dry plant keeps its droop and its drop — the
+    // bloom is a layer over the garden, not a pause in it.
+    console.log(`[Client] bloomTriggered: registry=${plantRegistry.size} elapsedMs=${data?.elapsedMs ?? 0}`)
   })
 
   room.onMessage('bloomReset', () => {
@@ -1633,11 +1636,11 @@ export function setupWateringSystem(): void {
     resetAllPlants()         // stops bloom, resets visuals + audio via endBloom()
     updateSceneAssets()      // endBloom() cleared isBloomActive() — switch center text immediately
     startBloomCooldown()     // gradual 5-min wind-down of lights + audio
-    timers.setTimeout(() => { bloomActive = false }, 65_000)  // matches step(60) — last cooldown step
+    timers.setTimeout(() => { bloomActive = false }, BLOOM_TRIGGER_COOLDOWN_MS)  // = the server's trigger hold, so no countdown shows while none can start
     startPlayerTrail()       // 10-min sparkle trail on all players after bloom
     clearBloomLabels()
     showBannerIdle()
-    updateBannerHealth(0)
+    updateBannerHealth(computeWateredCount() / TOTAL_PLANTS)   // kept plants mean it is rarely 0 now
     hideDailyLimit()
   })
 
@@ -1746,18 +1749,22 @@ export function setupWateringSystem(): void {
         }
 
       }
-      // Case D (remote top-up): drop already hidden, nothing to change visually
+      else {
+        // ── Case D: remote top-up (only possible inside the expiry tell) ─────
+        // The tell drop is showing — hide it and re-arm the tell from the fresh timer.
+        expiryTell.delete(entity)
+        setDropFade(entity, 'out')
+        if (data.expiresInMs > 0) scheduleExpiry(entity, wateredAt, data.expiresInMs)
+      }
 
     } else {
       PlantData.getMutable(entity).isWatered = false
       PlantData.getMutable(entity).wateredAt = 0
+      expiryTell.delete(entity)
       enablePlantClick(entity)
 
-      if (wasWatered && !isBloomActive() && !bloomActive) {
-        // During bloom the garden looks fully alive until bloomReset fires —
-        // suppress wilt visuals. State (isWatered=false) is already updated above
-        // so no duplicate bloom can occur; resetAllPlants() on bloomReset handles visuals.
-        //
+      if (wasWatered) {
+        // Wilt plays during a bloom too (2026-09-22).
         // Mirror scheduleExpiry: play ClosePlay if the plant mesh is visible,
         // snap immediately if not. This handles the race where the server's
         // expiry broadcast arrives before the client-side timer fires (common
@@ -1778,11 +1785,11 @@ export function setupWateringSystem(): void {
           showRose(entity)
           setDropFade(entity, 'in')
         }
-      } else if (!wasWatered && !isBloomActive() && !bloomActive) {
+      } else if (!wasWatered) {
         // Droopy from the start (the join snapshot, or never watered this session): the drop
         // now starts hidden, so this is what makes it appear — before, a full-scale default
-        // did that by accident. Still suppressed during a bloom (KJ 2026-09-22: "no drops on
-        // plants when I loaded in").
+        // did that by accident. Drops DO show during a bloom now (2026-09-22: watering during
+        // bloom is allowed — this reverses the same-day "no drops when I loaded in" call).
         setDropFade(entity, 'in')
       }
     }

@@ -78,6 +78,19 @@ export const WATERED_EXPIRY_MS  = 3 * 60 * 1000        // 3 minutes
 export const FAST_PLANT_EXPIRY_MS = 75_000               // 75 seconds
 /** How long after bloom triggers before the server resets all plants. */
 export const BLOOM_RESET_DELAY_MS = 6 * 60_000          // 6 minutes — the LONGEST bloom (see bloomDurationMs)
+/** Watering is allowed DURING a bloom and unexpired plants survive its end (week-2 playtest
+ *  2026-09-22: "3 minutes with nothing to do", "two divorced games"), so the next cycle can
+ *  start above threshold. This cooldown is the only thing stopping a bloom re-firing the
+ *  moment the last one ends. The client's post-bloom wind-down (`bloomActive` in
+ *  wateringSystem) reads the SAME value, so the countdown banner stays hidden exactly as
+ *  long as the server is refusing to start one. */
+export const BLOOM_TRIGGER_COOLDOWN_MS = 65_000   // TUNING
+/** Expiry tell: a watered plant shows its drop again this long before it dries out, and a
+ *  water inside that window is accepted as a top-up — full timer again, counts as a water.
+ *  The in-pillar answer to "add a skill check": a decision, not a reflex. */
+export const EXPIRY_TELL_MS = 20_000   // TUNING
+/** The floating drop over a plant (or a friend's seedling) that needs water — bob is baked in. */
+export const WATER_DROP_MODEL_SRC = 'assets/scene/Models/waterDrop/waterDrop_bob.glb'
 
 /** Bloom length by CONTRIBUTORS this cycle (players who watered since the last reset —
  *  not just present, so idlers can't stretch it). KJ 2026-09-18: solo 2 min … 6+ → 6 min.
@@ -349,6 +362,12 @@ export const ONBOARDING_WATER_HINT = 'Tap a plant with a water drop'
  *  flower stands (KJ 2026-09-21, GDD 3.1 - planting is a world tap on a planter of your
  *  choosing), and the reservation is only there so the tutorial has something to point at. */
 export const ONBOARDING_PLANT_HINT = 'Tap any free planter to plant your seed - the glowing one is nearest'
+/** Between the first water and the first seed (KJ 2026-09-22 playtest 2: "the seed should come
+ *  from the big bloom" — a starter grant was built and REVERSED the same evening). The hint
+ *  names the goal and where seeds come from; the ring shows the progress. */
+export const ONBOARDING_BLOOM_HINT         = 'Keep watering - when the garden is healthy enough it blooms, and seeds fall for you to plant'
+/** Same stage while a bloom is running — the seeds are out right now. */
+export const ONBOARDING_SEEDS_FALLING_HINT = 'The garden is blooming - seeds are falling, walk through one to catch it'
 /** Stage 3 line, shown after the first planting until the seed pouch is opened once. */
 export const ONBOARDING_POUCH_HINT = 'Open your seed pouch below - your seeds and every flower you collect live in there'
 /** Stage 3 — fired once, the moment the first seed is planted: closes the loop by
@@ -810,7 +829,7 @@ export const PLANTER_TIDY_MIN_AWAY_MS = 24 * 60 * 60 * 1000  // TUNING
 export const FLOWER_COLLECTION_CAP = 500
 /** Another player watering your growing box shaves this off its timer… */
 /** …at most this many times per box, one water per visitor. */
-export const BOX_WATER_MAX         = 3
+export const BOX_WATER_MAX         = 5   // TUNING — was 3; week-2 testers wanted "more a day"
 
 // ── The Avenue — communal entrance planters (design/communal-planters.md, 2026-09-22) ──
 // A gallery, not a garden: harvested flowers only, nothing grows or wilts.

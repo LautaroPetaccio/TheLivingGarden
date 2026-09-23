@@ -63,6 +63,7 @@ import {
   PLANTER_TIDY_MIN_AWAY_MS,
   FLOWER_COLLECTION_CAP,
   BOX_WATER_MAX,
+  BLOOM_TRIGGER_COOLDOWN_MS, EXPIRY_TELL_MS,
   plantSpeciesById,
   rarityTierById,
   AVENUE_POSITIONS,
@@ -472,6 +473,7 @@ function sendThreshold(to?: string[]): void {
 let bloomSustainTimer:     ReturnType<typeof setTimeout> | null = null
 let bloomSustainStartedAt: number | null = null   // wall-clock ms when current run began
 let bloomSustainElapsedMs: number        = 0      // ms accumulated before current run
+let bloomCooldownUntil:    number        = 0      // no bloom may START before this (set by resetGarden)
 
 /** Pause the sustain countdown (health dipped below threshold).
  *  Preserves elapsed time so the timer resumes from where it left off. */
@@ -502,7 +504,7 @@ function cancelBloomSustain(): void {
  *  Resumes (or starts) the sustain countdown when health ≥ threshold;
  *  pauses it — without resetting — if health dips below. */
 function checkBloomThreshold(): void {
-  if (bloomActive) return
+  if (bloomActive || Date.now() < bloomCooldownUntil) return
   const count     = getWateredCount()
   const threshold = currentBloomThreshold()
   if (count >= threshold) {
@@ -668,11 +670,17 @@ function emptyPouch(): SeedPouch { return new Array(RARITY_TIERS.length).fill(0)
 // In-memory pouch per player is the source of truth for the session; Storage is
 // write-through. Without this, concurrent gathers each read→modified→wrote the
 // stored value and overwrote each other (11 gathers persisted as 6).
-const pouches     = new Map<string, SeedPouch>()          // address → live pouch
-const pouchWrites = new Map<string, Promise<void>>()      // address → last queued write
+// Keyed LOWERCASE, like heldFlowers/heldSeeds — join hands over `identity.address`, messages
+// `context.from` (mixed case), and this was the last per-player map still keyed raw. Two
+// live pouches per player meant the hand and the chip could read different ones
+// (week-2 playtest 2026-09-22: "seed in my hand but my inventory says no seeds yet").
+// The Storage address is passed through as given — only the in-memory key is normalised.
+const pouches     = new Map<string, SeedPouch>()          // lowercase address → live pouch
+const pouchWrites = new Map<string, Promise<void>>()      // lowercase address → last queued write
 
 async function loadPouch(address: string): Promise<SeedPouch> {
-  const live = pouches.get(address)
+  const key  = address.toLowerCase()
+  const live = pouches.get(key)
   if (live) return live
   let pouch: SeedPouch = emptyPouch()
   try {
@@ -691,29 +699,31 @@ async function loadPouch(address: string): Promise<SeedPouch> {
     }
   } catch { /* fall through to empty pouch */ }
   // Another handler may have loaded it while we awaited — keep the first object
-  const raced = pouches.get(address)
+  const raced = pouches.get(key)
   if (raced) return raced
-  pouches.set(address, pouch)
+  pouches.set(key, pouch)
   return pouch
 }
 
 /** Persist a player's pouch; writes for the same player are serialized so an
  *  earlier (lower) snapshot can never land after a later one. Fail-open. */
 function savePouch(address: string): Promise<void> {
-  const pouch = pouches.get(address)
+  const key   = address.toLowerCase()
+  const pouch = pouches.get(key)
   if (!pouch) return Promise.resolve()
   const snapshot = JSON.stringify(pouch)
-  const prev = pouchWrites.get(address) ?? Promise.resolve()
+  const prev = pouchWrites.get(key) ?? Promise.resolve()
   const next: Promise<void> = prev
     .then(async () => { await setPlayer(address, 'seeds', snapshot) })
     .catch(err => { console.error('[Server] savePouch failed:', err) })
-  pouchWrites.set(address, next)
+  pouchWrites.set(key, next)
   return next
 }
 
 function sendPouch(address: string): void {
-  const p = pouches.get(address)
+  const p = pouches.get(address.toLowerCase())
   if (p) room.send('pouchUpdate', { countsJson: JSON.stringify(p) }, { to: [address] })
+  else console.error(`[Server] sendPouch: no live pouch for ${address} — call loadPouch first`)
   refreshHandSeed(address)   // the rarest seed they hold may have changed
 }
 
@@ -742,6 +752,9 @@ const boxTimers = new Map<string, ReturnType<typeof setTimeout>>()  // boxId →
 function emptyBox(boxId: string): BoxRecord {
   return { boxId, owner: '', ownerName: '', rarityTier: 0, plantedAt: 0, opensAt: 0, opened: false, flower: '', waters: 0, waterers: [], lastWaterer: '' }
 }
+
+/** "12 s" at the playtest base, "24 minutes" at the production one. */
+function shaveText(ms: number): string { return ms < 90_000 ? `${Math.round(ms / 1000)} s` : formatGrowTime(ms) }
 
 function sendBox(b: BoxRecord, to?: string[]): void {
   const payload = {
@@ -862,6 +875,8 @@ async function markOnboarding(address: string, step: keyof OnboardingRecord): Pr
   const o = await loadOnboarding(address)
   if (o[step]) return
   o[step] = true
+  // No starter seed here: KJ 2026-09-22 playtest 2 — the first seed must come from the
+  // bloom the player's own watering earns, so the loop is the lesson (onboarding 'bloom' stage).
   void savePlayerJson(address, 'onboarding')
   await sendOnboarding(address)
 }
@@ -977,11 +992,7 @@ const heldFlowers = new Map<string, { flower: string; rarityTier: number }>()   
  *  silently reports "no keepsake held" and wipes the player's held flower, so every
  *  lookup below goes through these two helpers rather than indexing a map directly. */
 function pouchOf(address: string): SeedPouch | undefined {
-  const exact = pouches.get(address)
-  if (exact) return exact
-  const key = address.toLowerCase()
-  for (const [a, p] of pouches) if (a.toLowerCase() === key) return p
-  return undefined
+  return pouches.get(address.toLowerCase())
 }
 
 /** Seeds a gardener has EXPLICITLY equipped (lowercase key). An equip replaces whatever
@@ -1334,8 +1345,13 @@ async function resetGarden(): Promise<void> {
   bloomActive    = false
   bloomStartedAt = null
 
+  const now = Date.now()
+  let kept = 0
   for (const [plantId, entity] of plantEntities) {
     const ps     = PlantSync.getMutable(entity)
+    // Watered during the bloom and still fresh — it stays (2026-09-22). Only dry plants,
+    // or ones whose expiry is due this very tick, go back to droopy.
+    if (ps.isWatered && (plantExpiresAt.get(plantId) ?? 0) > now) { kept++; continue }
     ps.isWatered = false
     ps.wateredAt = 0
     wateredByMap.delete(plantId)
@@ -1348,7 +1364,11 @@ async function resetGarden(): Promise<void> {
   // Send bloomReset BEFORE persisting — a Storage failure must never prevent clients
   // from leaving bloom state. The in-memory state is already authoritative.
   room.send('bloomReset', {})
-  console.log('[Server] Garden reset complete')
+  // The garden may still be above threshold — hold the next trigger, then re-check once
+  // the hold ends (nothing else calls checkBloomThreshold until the next water).
+  bloomCooldownUntil = now + BLOOM_TRIGGER_COOLDOWN_MS
+  setTimeout(() => executeTask(async () => { if (!bloomActive) checkBloomThreshold() }), BLOOM_TRIGGER_COOLDOWN_MS)
+  console.log(`[Server] Garden reset complete — ${kept} watered plants kept, next bloom possible in ${BLOOM_TRIGGER_COOLDOWN_MS / 1000}s`)
 
   try {
     await savePlantStates()
@@ -1591,16 +1611,14 @@ export async function server(): Promise<void> {
       const ps = PlantSync.getOrNull(entity)
       if (!ps) return
 
-      // Reject if bloom is active
-      if (bloomActive) {
-        room.send('waterRejected', { plantId, reason: 'bloom_active' }, { to: [playerAddress] })
-        return
-      }
-
-      // Reject if already watered — prevents concurrent double-water when two players
-      // click the same unwatered plant before either receives the other's confirmation.
-      // isWatered is set synchronously before any await, so this check is race-free.
-      if (ps.isWatered) {
+      // Watering DURING a bloom is allowed (2026-09-22): the garden keeps drying under the
+      // spectacle and tending it is what fills the bloom's minutes.
+      // Reject if already watered and not yet inside its expiry tell — prevents concurrent
+      // double-water when two players click the same plant before either sees the other's
+      // confirmation (isWatered is set synchronously before any await, so this is race-free).
+      // Inside the tell window the water is a TOP-UP: full timer again, counts on the boards;
+      // the old expiry timer bails on its own because wateredAt moves.
+      if (ps.isWatered && expiresInMs(plantId) > EXPIRY_TELL_MS) {
         room.send('waterRejected', { plantId, reason: 'already_watered' }, { to: [playerAddress] })
         return
       }
@@ -1801,7 +1819,8 @@ export async function server(): Promise<void> {
     console.log(`[Server] ${name} watered ${b.ownerName}'s ${b.boxId} (${b.waters}/${BOX_WATER_MAX}, −${Math.round(growShaveMsForTier(b.rarityTier) / 1000)}s)`)
     sendBox(b)
     void saveBoxes()
-    sendNotice(playerAddress, `You watered ${b.ownerName}'s seed — it opens sooner`)
+    const left = BOX_WATER_MAX - b.waters
+    sendNotice(playerAddress, `You watered ${b.ownerName}'s seed — ${shaveText(growShaveMsForTier(b.rarityTier))} sooner${left > 0 ? `, ${left} more water${left === 1 ? '' : 's'} can help it` : ', and that is all it can take'}`)
     if (isConnected(b.owner)) sendNotice(b.owner, `${name} watered your seed`)
   })
 

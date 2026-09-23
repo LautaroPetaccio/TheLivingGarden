@@ -46,6 +46,7 @@ import {
   withArticle,
 } from './shared/config'
 import { showToast } from './notifications'
+import { getPouch } from './playerInventory'
 import { setupGoldenSeed } from './goldenSeed'
 import { playSfx } from './sounds'
 
@@ -374,8 +375,12 @@ export function setupSeedSystem(): void {
     if (localId && data.byAddress.toLowerCase() === localId.toLowerCase()) {
       // No emoji — the Unity client does not render them yet (PNG glyph in the FX pass)
       playSfx('seedCatch')
+      // Every catch says what it was and where it went (KJ 2026-09-22 playtest 2: seeds
+      // should read as coming from the bloom and piling up). pouchUpdate lands before
+      // seedGathered on the wire, so the store already counts this one.
       const tierName = rarityTierById(data.rarityTier).name
-      showToast(data.rarityTier > 0 ? `You caught ${withArticle(tierName)} seed!` : 'Seed gathered', TOAST_GATHER_MS, false, rarityTierById(data.rarityTier).seedColor)
+      const total = getPouch().reduce((a, n) => a + n, 0)
+      showToast(`Caught ${withArticle(tierName)} seed - ${total} in your pouch`, TOAST_GATHER_MS, false, rarityTierById(data.rarityTier).seedColor)
     }
   })
 

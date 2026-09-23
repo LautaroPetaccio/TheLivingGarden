@@ -37,14 +37,15 @@ export const INFO_SECTIONS: ReadonlyArray<InfoSection> = [
     title: 'The garden',
     lines: [
       'Plants droop and carry a floating water drop. Tap one and your gardener waters it — the plant revives and your name appears above it.',
-      'Watered plants dry out again after a few minutes, so the garden is always slipping back. Keeping it healthy is the whole job.',
+      'Watered plants dry out again after a few minutes — even during a bloom — so the garden is always slipping back. Keeping it healthy is the whole job.',
+      'A drop returning to a green plant means it is about to dry. Water it again and it starts fresh.',
       `When the garden is healthy enough for long enough, it blooms. It blooms faster and bigger with more gardeners — it takes ${DECAY_FULL_GARDENERS} to reach a full-garden bloom, but one gardener alone can still earn a quiet one.`,
     ],
   },
   {
     title: 'Seeds',
     lines: [
-      'Seeds fall during a bloom. You gather them by walking through them — no tapping, no aiming.',
+      'Seeds fall during a bloom — and only then. You gather them by walking through them, no tapping, no aiming.',
       'Everyone sees the same seeds and everyone can collect each one, so nobody is racing you.',
       `The best seeds come from the busiest blooms: more gardeners means more seeds and better odds, and from ${GUARANTEED_RARE_AT_CONTRIBUTORS} contributors you are guaranteed at least one Rare or better.`,
       'Watch for the rainbow seed — it appears once per bloom, drifts along its own path, and carries the best odds in the game.',
@@ -63,7 +64,7 @@ export const INFO_SECTIONS: ReadonlyArray<InfoSection> = [
     lines: [
       `Tap an empty planter to plant. It takes your name, and it opens about ${growTime()} later.`,
       'You choose which seed goes in from the seed pouch — the one you pick is the one you carry in your hand.',
-      `Other gardeners can water your growing seed to bring it forward a little, up to ${BOX_WATER_MAX} times. You cannot water your own.`,
+      `Other gardeners can water your growing seed to bring it forward a little, up to ${BOX_WATER_MAX} times. You cannot water your own — a seedling you CAN help carries a water drop.`,
     ],
   },
   {
