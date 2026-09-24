@@ -5,10 +5,14 @@
 // this module never talks to the storage service itself.
 //
 // The SDK serializes and coalesces writes per key, shares concurrent reads of
-// the same key, caches confirmed values and absences, memoizes the realm lookup
-// and skips a write whose value is provably already stored. What it leaves to
-// the caller is retrying a write it reports as failed: set() does not retry, and
-// a false result is a lost save unless someone acts on it.
+// the same key, caches confirmed values and absences, makes a read wait for the
+// writes to its key already pending, and skips a write whose value is provably
+// already stored. A read that fails rejects instead of resolving null, so a
+// failure is never mistaken for an empty key. What it leaves to the caller is
+// retrying a write it reports as failed: set() resolves false and does not retry.
+// set() throws a TypeError, before sending anything, for a value it would store
+// changed (NaN, a Map, undefined in an array, ...) or an invalid key or address;
+// retrying that cannot help, so such a snapshot is dropped and logged.
 // =============================================================
 
 import { Storage } from '@dcl/sdk/server'
@@ -58,10 +62,10 @@ function parseLegacy(stored: unknown): unknown {
  *  rejects the rest with "fetch: too many concurrent requests" (bevy-explorer
  *  SERVER_MAX_CONCURRENT_FETCHES, enforced in server mode only; hammurabi-headless
  *  mirrors it as maxConcurrentFetches). The cap counts every fetch the scene makes,
- *  and a slow one holds its slot for up to the 15 s fetch timeout. The SDK turns
- *  that rejection into a plain null, which is indistinguishable from an empty key,
- *  so pacing our own calls well below the cap is what keeps a join burst from
- *  reading a player's pouch as empty. Costs nothing when nothing is queued. */
+ *  and a slow one holds its slot for up to the 15 s fetch timeout. A rejected read
+ *  now surfaces as a failed load rather than an empty key, but it still fails:
+ *  pacing our own calls well below the cap keeps a join burst from failing a
+ *  player's loads at all. Costs nothing when nothing is queued. */
 const MAX_IN_FLIGHT = 8
 let   inFlight      = 0
 const waiting: Array<() => void> = []
@@ -78,12 +82,11 @@ async function withSlot<T>(fn: () => Promise<T>): Promise<T> {
   }
 }
 
-/** One write in flight at a time, across every key. The preview storage service
- *  serves a PUT as read-whole-file, set one key, write-whole-file with no lock, so
- *  concurrent writes to DIFFERENT keys erase each other: on 2026-09-17 a harvest's
- *  'boxes' write lost to its own 'flowers' write and the box stayed opened after a
- *  restart. The SDK only orders writes per key, so the global chain stays. Harmless
- *  on the Worlds key-value store, and it keeps writes to one slot of the fetch cap. */
+/** One write in flight at a time, across every key. It keeps writes to one slot of
+ *  the fetch cap, so a burst of saves cannot starve the reads of players joining.
+ *  (It was introduced because the 7.26.1 preview storage server lost concurrent
+ *  writes to different keys, as a harvest's 'boxes' write did to its 'flowers' write
+ *  on 2026-09-17; the preview server in this sdk-commands locks each write.) */
 let writeChain: Promise<unknown> = Promise.resolve()
 
 /** Runs `write` after every earlier write has settled. */
@@ -102,7 +105,7 @@ async function load<T>(read: () => Promise<unknown>): Promise<LoadResult<T>> {
   try {
     return { ok: true, ...unwrap<T>(await withSlot(read)) }
   } catch {
-    return { ok: false }   // get() rejects when the realm lookup fails
+    return { ok: false }   // get() rejects whenever the read fails
   }
 }
 
@@ -154,12 +157,17 @@ function createWriter(label: string, version: number, write: (value: unknown) =>
     for (const resolve of waiters) resolve()
   }
 
-  /** One write attempt. A throw counts as a failure, like a false result. */
-  async function attempt(value: unknown): Promise<boolean> {
+  /** One write attempt: whether it landed, failed and is worth retrying, or was refused. */
+  async function attempt(value: unknown): Promise<'landed' | 'failed' | 'refused'> {
     try {
-      return await queuedWrite(() => write(value))
-    } catch {
-      return false
+      return (await queuedWrite(() => write(value))) ? 'landed' : 'failed'
+    } catch (error) {
+      if (error instanceof TypeError) {
+        // The SDK refused the value, key or address before sending it; the same snapshot would be refused again.
+        console.error(`[Persistence] ${label}: save refused, snapshot dropped — ${error.message}`)
+        return 'refused'
+      }
+      return 'failed'
     }
   }
 
@@ -170,7 +178,8 @@ function createWriter(label: string, version: number, write: (value: unknown) =>
     while (hasPending) {
       const snapshot = pending
       hasPending = false
-      if (await attempt(snapshot)) { failures = 0; continue }
+      const outcome = await attempt(snapshot)
+      if (outcome !== 'failed') { failures = 0; continue }
       if (hasPending) continue        // a newer snapshot arrived; write that instead
       hasPending = true               // keep this one for the retry
       pending    = snapshot

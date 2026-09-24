@@ -310,6 +310,45 @@ describe('when saving through a key writer', () => {
     })
   })
 
+  describe('and the SDK refuses the value with a TypeError', () => {
+    let writer: KeyWriter
+    let errors: jest.SpyInstance
+
+    beforeEach(async () => {
+      errors = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+      mockSceneSet.mockRejectedValueOnce(new TypeError("Storage.set('boxes'): value must be JSON-serializable"))
+      writer = persistence.createSceneWriter('boxes', 1)
+      writer.enable()
+      writer.save({ bad: NaN })
+      await writer.idle()
+      await settle(1500) // past the first retry delay, had it been scheduled
+    })
+
+    afterEach(() => {
+      errors.mockRestore()
+    })
+
+    it('should not retry a snapshot the SDK will refuse again', () => {
+      expect(mockSceneSet).toHaveBeenCalledTimes(1)
+    })
+
+    it('should log that the snapshot was dropped, naming the key', () => {
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('[Persistence] boxes: save refused, snapshot dropped'))
+    })
+
+    describe('and a valid snapshot is saved afterwards', () => {
+      beforeEach(async () => {
+        mockSceneSet.mockResolvedValue(true)
+        writer.save({ good: 1 })
+        await writer.idle()
+      })
+
+      it('should write it', () => {
+        expect(mockSceneSet).toHaveBeenLastCalledWith('boxes', { v: 1, d: { good: 1 } })
+      })
+    })
+  })
+
   describe('and a newer snapshot arrives while an earlier one is failing', () => {
     let writer: KeyWriter
 
