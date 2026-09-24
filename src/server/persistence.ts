@@ -11,8 +11,10 @@
 // failure is never mistaken for an empty key. What it leaves to the caller is
 // retrying a write it reports as failed: set() resolves false and does not retry.
 // set() throws a TypeError, before sending anything, for a value it would store
-// changed (NaN, a Map, undefined in an array, ...) or an invalid key or address;
-// retrying that cannot help, so such a snapshot is dropped and logged.
+// changed (NaN, a Map, undefined in an array, ...) or an invalid key or address.
+// Retrying the same snapshot cannot help: the writer stores a cleaned copy instead
+// (see toStorable), logging every path it changed, and drops only what cannot be
+// cleaned. A listener can surface either case (see onSaveProblem).
 // =============================================================
 
 import { Storage } from '@dcl/sdk/server'
@@ -120,6 +122,118 @@ export function loadPlayer<T>(address: string, key: string): Promise<LoadResult<
 }
 
 // ---------------------------------------------------------------
+// Values the SDK refuses
+// ---------------------------------------------------------------
+
+const LONE_SURROGATE = /[\ud800-\udbff](?![\udc00-\udfff])|(?<![\ud800-\udbff])[\udc00-\udfff]/g
+const MAX_CLEAN_DEPTH = 1_000
+
+/** Whether an address can key player storage: the SDK and the service accept only a 0x-prefixed 20-byte hex address. */
+export function isStorableAddress(address: string): boolean {
+  return /^0x[0-9a-fA-F]{40}$/.test(address)
+}
+
+/** A copy of `value` the SDK will store, and a description of every change made to get it. Each change is
+ *  what JSON.stringify would have done silently under the old SDK, or the closest storable equivalent. */
+export function toStorable(value: unknown): { value: unknown; changes: string[] } {
+  const changes: string[] = []
+  const ancestors = new Set<object>()
+
+  function text(s: string, path: string, what: string): string {
+    const clean = s.replace(/\u0000/g, '').replace(LONE_SURROGATE, '\ufffd')
+    if (clean !== s) changes.push(`${path || 'the value'}: ${what} with a NUL or an unpaired surrogate, cleaned`)
+    return clean
+  }
+
+  /** The storable form of `v`, or `undefined` to drop an object property. */
+  function walk(v: unknown, path: string, inArray: boolean, depth: number): unknown {
+    const at = path || 'the value'
+    const gone = inArray ? null : undefined
+    switch (typeof v) {
+      case 'number':
+        if (Number.isFinite(v)) return v
+        changes.push(`${at}: ${v} → null`)
+        return null
+      case 'bigint': {
+        const n = Number(v)
+        changes.push(`${at}: BigInt → ${Number.isSafeInteger(n) ? 'number' : 'string'}`)
+        return Number.isSafeInteger(n) ? n : String(v)
+      }
+      case 'string':
+        return text(v, path, 'text')
+      case 'undefined':
+        if (inArray) changes.push(`${at}: undefined → null`)
+        return gone
+      case 'function':
+      case 'symbol':
+        changes.push(`${at}: ${typeof v} dropped`)
+        return gone
+      case 'object':
+        break
+      default:
+        return v
+    }
+    if (v === null) return null
+    const o = v as Record<string, unknown>
+    if (depth > MAX_CLEAN_DEPTH) { changes.push(`${at}: nested too deeply, dropped`); return gone }
+    if (ancestors.has(o)) { changes.push(`${at}: circular reference dropped`); return gone }
+    if (typeof o.toJSON === 'function') {
+      const json = (o.toJSON as () => unknown)()
+      if (json === undefined) { changes.push(`${at}: toJSON() returned undefined, dropped`); return gone }
+      if (json !== o) return walk(json, path, inArray, depth + 1)
+    }
+
+    let converted: unknown = o
+    if (o instanceof Map) converted = Object.fromEntries([...o].map(([k, x]) => [String(k), x]))
+    else if (o instanceof Set) converted = [...o]
+    else if (ArrayBuffer.isView(o)) converted = Array.from(new Uint8Array(o.buffer, o.byteOffset, o.byteLength))
+    else if (o instanceof ArrayBuffer) converted = Array.from(new Uint8Array(o))
+    else if (o instanceof RegExp) converted = String(o)
+    else if (o instanceof Error) converted = { name: o.name, message: o.message }
+    else if (o instanceof Promise || o instanceof WeakMap || o instanceof WeakSet) {
+      changes.push(`${at}: ${o.constructor.name} dropped`)
+      return gone
+    }
+    if (converted !== o) {
+      changes.push(`${at}: ${o.constructor.name} converted`)
+      return walk(converted, path, inArray, depth + 1)
+    }
+
+    ancestors.add(o)
+    try {
+      if (Array.isArray(o)) {
+        const out: unknown[] = []
+        for (let i = 0; i < o.length; i++) {
+          if (!(i in o)) { changes.push(`${path}[${i}]: hole → null`); out.push(null); continue }
+          out.push(walk(o[i], `${path}[${i}]`, true, depth + 1))
+        }
+        return out
+      }
+      const out: Record<string, unknown> = {}
+      for (const key of Object.keys(o)) {
+        const cleanKey = text(key, `${path}.${key}`, 'key')
+        const item = walk(o[key], `${path}.${cleanKey}`, false, depth + 1)
+        if (item !== undefined) out[cleanKey] = item
+      }
+      return out
+    } finally {
+      ancestors.delete(o)
+    }
+  }
+
+  return { value: walk(value, '', false, 0), changes }
+}
+
+/** Receives every save the SDK refused: whether a cleaned copy was stored instead, and what was changed or why. */
+export type SaveProblemListener = (label: string, cleaned: boolean, detail: string) => void
+let saveProblemListener: SaveProblemListener | undefined
+
+/** Registers the one listener told about refused saves, e.g. to notify an admin. */
+export function onSaveProblem(listener: SaveProblemListener | undefined): void {
+  saveProblemListener = listener
+}
+
+// ---------------------------------------------------------------
 // Writes
 // ---------------------------------------------------------------
 
@@ -157,18 +271,34 @@ function createWriter(label: string, version: number, write: (value: unknown) =>
     for (const resolve of waiters) resolve()
   }
 
-  /** One write attempt: whether it landed, failed and is worth retrying, or was refused. */
+  /** One write attempt: whether it landed, failed and is worth retrying, or was refused. A value the SDK
+   *  refuses is stored as a cleaned copy instead; only a snapshot with nothing to clean is dropped. */
   async function attempt(value: unknown): Promise<'landed' | 'failed' | 'refused'> {
+    let refusal: string
     try {
       return (await queuedWrite(() => write(value))) ? 'landed' : 'failed'
     } catch (error) {
-      if (error instanceof TypeError) {
-        // The SDK refused the value, key or address before sending it; the same snapshot would be refused again.
-        console.error(`[Persistence] ${label}: save refused, snapshot dropped — ${error.message}`)
-        return 'refused'
-      }
-      return 'failed'
+      if (!(error instanceof TypeError)) return 'failed'
+      refusal = error.message
     }
+
+    const { value: cleaned, changes } = toStorable(value)
+    // Paths are relative to the envelope's payload, which is what the rest of the server calls this key.
+    const changed = changes.map((c) => c.replace(/^\.d(?=[.[:])/, label))
+    if (changed.length === 0) return refuse(refusal)
+    console.error(`[Persistence] ${label}: the SDK refused the value, storing a cleaned copy — ${changed.join('; ')}`)
+    saveProblemListener?.(label, true, changed.join('; '))
+    try {
+      return (await queuedWrite(() => write(cleaned))) ? 'landed' : 'failed'
+    } catch (error) {
+      return error instanceof TypeError ? refuse(error.message) : 'failed'
+    }
+  }
+
+  function refuse(reason: string): 'refused' {
+    console.error(`[Persistence] ${label}: save refused, snapshot dropped — ${reason}`)
+    saveProblemListener?.(label, false, reason)
+    return 'refused'
   }
 
   /** Writes the newest snapshot, retrying with backoff until one lands. */

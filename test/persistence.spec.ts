@@ -310,16 +310,54 @@ describe('when saving through a key writer', () => {
     })
   })
 
-  describe('and the SDK refuses the value with a TypeError', () => {
+  describe('and the SDK refuses a value it can clean', () => {
     let writer: KeyWriter
     let errors: jest.SpyInstance
+    let problems: jest.Mock
 
     beforeEach(async () => {
       errors = jest.spyOn(console, 'error').mockImplementation(() => undefined)
-      mockSceneSet.mockRejectedValueOnce(new TypeError("Storage.set('boxes'): value must be JSON-serializable"))
+      problems = jest.fn()
+      persistence.onSaveProblem(problems)
+      mockSceneSet
+        .mockRejectedValueOnce(new TypeError("Storage.set('boxes'): value must be JSON-serializable"))
+        .mockResolvedValue(true)
       writer = persistence.createSceneWriter('boxes', 1)
       writer.enable()
-      writer.save({ bad: NaN })
+      writer.save([{ boxId: 'b1', x: 1 }, { boxId: 'b2', x: NaN }])
+      await writer.idle()
+    })
+
+    afterEach(() => {
+      errors.mockRestore()
+    })
+
+    it('should store a cleaned copy, keeping every other record', () => {
+      expect(mockSceneSet).toHaveBeenLastCalledWith('boxes', { v: 1, d: [{ boxId: 'b1', x: 1 }, { boxId: 'b2', x: null }] })
+    })
+
+    it('should log the path of what it cleaned', () => {
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('boxes[1].x: NaN → null'))
+    })
+
+    it('should tell the listener a cleaned copy was stored', () => {
+      expect(problems).toHaveBeenCalledWith('boxes', true, 'boxes[1].x: NaN → null')
+    })
+  })
+
+  describe('and the SDK refuses a snapshot there is nothing to clean in', () => {
+    let writer: KeyWriter
+    let errors: jest.SpyInstance
+    let problems: jest.Mock
+
+    beforeEach(async () => {
+      errors = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+      problems = jest.fn()
+      persistence.onSaveProblem(problems)
+      mockPlayerSet.mockRejectedValueOnce(new TypeError('Storage.player.set(): address must be a 0x-prefixed 20-byte hex address.'))
+      writer = persistence.createPlayerWriter('guest', 'seeds', 1)
+      writer.enable()
+      writer.save({ common: 1 })
       await writer.idle()
       await settle(1500) // past the first retry delay, had it been scheduled
     })
@@ -329,26 +367,25 @@ describe('when saving through a key writer', () => {
     })
 
     it('should not retry a snapshot the SDK will refuse again', () => {
-      expect(mockSceneSet).toHaveBeenCalledTimes(1)
+      expect(mockPlayerSet).toHaveBeenCalledTimes(1)
     })
 
-    it('should log that the snapshot was dropped, naming the key', () => {
-      expect(errors).toHaveBeenCalledWith(expect.stringContaining('[Persistence] boxes: save refused, snapshot dropped'))
+    it('should tell the listener the save was refused, with the reason', () => {
+      expect(problems).toHaveBeenCalledWith('seeds@guest', false, expect.stringContaining('address must be'))
     })
 
-    describe('and a valid snapshot is saved afterwards', () => {
+    describe('and a later snapshot is accepted', () => {
       beforeEach(async () => {
-        mockSceneSet.mockResolvedValue(true)
-        writer.save({ good: 1 })
+        mockPlayerSet.mockResolvedValue(true)
+        writer.save({ common: 2 })
         await writer.idle()
       })
 
       it('should write it', () => {
-        expect(mockSceneSet).toHaveBeenLastCalledWith('boxes', { v: 1, d: { good: 1 } })
+        expect(mockPlayerSet).toHaveBeenLastCalledWith('guest', 'seeds', { v: 1, d: { common: 2 } })
       })
     })
   })
-
   describe('and a newer snapshot arrives while an earlier one is failing', () => {
     let writer: KeyWriter
 
@@ -449,3 +486,59 @@ describe('when saving through a key writer', () => {
     })
   })
 })
+
+describe('when cleaning a value the SDK refused', () => {
+  let persistence: Persistence
+
+  beforeEach(async () => {
+    persistence = await loadPersistence()
+  })
+
+  it.each([
+    ['a non-finite number', { a: Infinity }, { a: null }, '.a: Infinity → null'],
+    ['undefined in an array', [1, undefined], [1, null], '[1]: undefined → null'],
+    ['an array hole', [1, , 3], [1, null, 3], '[1]: hole → null'], // eslint-disable-line no-sparse-arrays
+    ['a Map', new Map([['k', 1]]), { k: 1 }, 'the value: Map converted'],
+    ['a Set', { s: new Set([1, 2]) }, { s: [1, 2] }, '.s: Set converted'],
+    ['a typed array', new Uint8Array([7, 8]), [7, 8], 'the value: Uint8Array converted'],
+    ['a NUL in text', { t: 'a\u0000b' }, { t: 'ab' }, '.t: text with a NUL or an unpaired surrogate, cleaned'],
+    ['an unpaired surrogate', 'a\ud800', 'a\ufffd', 'the value: text with a NUL or an unpaired surrogate, cleaned'],
+    ['a small BigInt', { n: BigInt(5) }, { n: 5 }, '.n: BigInt → number'],
+    ['a function in an object', { f: () => 1, k: 1 }, { k: 1 }, '.f: function dropped'],
+    ['a nested toJSON returning undefined', { a: { toJSON: () => undefined }, k: 1 }, { k: 1 }, '.a: toJSON() returned undefined, dropped']
+  ])('should clean %s and say where', (_label, input, expected, change) => {
+    expect(persistence.toStorable(input)).toEqual({ value: expected, changes: [change] })
+  })
+
+  it('should drop a circular reference instead of recursing forever', () => {
+    const loop: Record<string, unknown> = { k: 1 }
+    loop.self = loop
+    expect(persistence.toStorable(loop)).toEqual({ value: { k: 1 }, changes: ['.self: circular reference dropped'] })
+  })
+
+  it('should leave a value that needs nothing unchanged, reporting no changes', () => {
+    expect(persistence.toStorable({ a: [1, 'x', null, { b: true }], at: new Date(0) })).toEqual({
+      value: { a: [1, 'x', null, { b: true }], at: '1970-01-01T00:00:00.000Z' },
+      changes: []
+    })
+  })
+})
+
+describe('when checking whether an address can key player storage', () => {
+  let persistence: Persistence
+
+  beforeEach(async () => {
+    persistence = await loadPersistence()
+  })
+
+  it.each([
+    ['a lowercase address', '0x1234567890abcdef1234567890abcdef12345678', true],
+    ['a checksummed address', '0x1234567890ABCDEF1234567890abcdef12345678', true],
+    ['a short address', '0x1234', false],
+    ['a guest name', 'guest', false],
+    ['a path segment', '..', false]
+  ])('should answer for %s', (_label, address, storable) => {
+    expect(persistence.isStorableAddress(address)).toBe(storable)
+  })
+})
+
