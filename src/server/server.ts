@@ -1695,12 +1695,10 @@ export async function server(): Promise<void> {
 
   // Tell any connected admin, once per key per session, that a save was refused; the log has the details.
   const reportedSaveProblems = new Set<string>()
-  onSaveProblem((label, cleaned) => {
+  onSaveProblem((label) => {
     if (reportedSaveProblems.has(label)) return
     reportedSaveProblems.add(label)
-    const text = cleaned
-      ? `Storage: ${label} held a value the SDK refused; a cleaned copy was saved (see server logs)`
-      : `Storage: ${label} could not be saved (see server logs)`
+    const text = `Storage: ${label} could not be saved (see server logs)`
     for (const address of new Set(playerAddresses.values())) if (isAdmin(address)) sendNotice(address, text)
   })
 
@@ -1855,6 +1853,11 @@ export async function server(): Promise<void> {
   // ── Message: adminSpawnSeed (test panel) ────────────────────
   onRoomMessage<{ x: number; z: number; rarityTier: number }>('adminSpawnSeed', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
+    // Gathering writes the tier into the pouch array; one past the last tier would leave holes the SDK refuses to store.
+    if (!Number.isInteger(data.rarityTier) || data.rarityTier < 0 || data.rarityTier >= RARITY_TIER_COUNT) {
+      sendNotice(address, `Test tools: rarity tier must be 0 to ${RARITY_TIER_COUNT - 1}`)
+      return
+    }
     const seed: SeedRecord = { id: `admin_${Date.now()}`, x: data.x, z: data.z, rarityTier: data.rarityTier, spawnedAt: Date.now(), gatheredBy: new Set() }
     activeSeeds.set(seed.id, seed)
     setTimeout(() => activeSeeds.delete(seed.id), SEED_LIFETIME_MS)
