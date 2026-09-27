@@ -26,8 +26,8 @@ import {
 import { Color4, Quaternion } from '@dcl/sdk/math'
 import { RARITY_TIERS, rarityTierById, seedModelSrc, SEED_MODEL_HEIGHT, withArticle } from './shared/config'
 import { PROP_LAYOUT } from './shared/layout'
-import { getPouch, setPreferredTier, nextSeedTier, holdSeed, getFlowers, gardenersHere, notePouchOpened } from './playerInventory'
-import { openSeedMenu, openSeedMenuFlowers } from './seedMenu'
+import { getPouch, setPreferredTier, nextSeedTier, holdSeed } from './playerInventory'
+import { openSeedMenu } from './seedMenu'
 import { showToast } from './notifications'
 import { playSfx } from './sounds'
 
@@ -72,7 +72,6 @@ interface Slot {
 }
 
 let slots: Slot[] = []
-let giftBoard: { root: Entity; text: Entity; tap: Entity } | null = null
 let lastKey = ''
 let accum = 0
 
@@ -150,7 +149,7 @@ export function setupPouchRack(): void {
   buildShelfFrame(root, w)
   label(root, { x: 0, y: 3.08, z: 0.22 }, 'SEED POUCH', FONT_SIGN, GOLD, w * 0.9, 0.5)
   label(root, { x: 0, y: 2.78, z: 0.22 }, 'tap a seed to hold it', 0.36, CREAM, w * 0.9, 0.2)
-  tapArea(root, { x: 0, y: 3.0, z: 0.2 }, { x: w * 0.9, y: 0.7, z: 0.1 }, 'Open your pouch', () => { notePouchOpened(); openSeedMenu() })
+  tapArea(root, { x: 0, y: 3.0, z: 0.2 }, { x: w * 0.9, y: 0.7, z: 0.1 }, 'Open your pouch', () => openSeedMenu())
 
   slots = []
   for (let i = 0; i < N; i++) {
@@ -193,14 +192,8 @@ export function setupPouchRack(): void {
     slots.push({ tier: i, glow, seed, ghost, ring, count, tap })
   }
 
-  // Gift board: stands at the right end; prompts gifting when it can be done
-  const gRoot = engine.addEntity()
-  Transform.create(gRoot, { parent: root, position: { x: w / 2 + 1.25, y: 1.6, z: 0.3 }, scale: ZERO })
-  box(gRoot, { x: 0, y: 0, z: 0 }, { x: 2.0, y: 1.0, z: 0.07 }, PLATE)
-  box(gRoot, { x: 0, y: -1.1, z: 0 }, { x: 0.14, y: 2.2, z: 0.14 }, WOOD_D)   // post to the ground
-  const gText = label(gRoot, { x: 0, y: 0, z: -0.05 }, '', 0.5, GOLD, 1.9, 0.9)
-  const gTap = tapArea(gRoot, { x: 0, y: 0, z: -0.04 }, { x: 2.0, y: 1.0, z: 0.1 }, 'Your flowers', () => { notePouchOpened(); openSeedMenuFlowers() })
-  giftBoard = { root: gRoot, text: gText, tap: gTap }
+  // (The "Your flowers" gift board moved to the flower shelf, collectionDisplay.ts, 2026-09-27:
+  // once the shed layout split the rack and the shelf, it hung off the seed wall.)
 
   engine.addSystem(rackSystem)
 }
@@ -211,9 +204,7 @@ function rackSystem(dt: number): void {
   accum = 0
   const pouch = getPouch()
   const next = nextSeedTier()
-  const flowers = getFlowers().length
-  const others = gardenersHere().length
-  const key = `${pouch.join(',')}|${next}|${flowers}|${others}`
+  const key = `${pouch.join(',')}|${next}`
   if (key === lastKey) return
   lastKey = key
 
@@ -228,15 +219,4 @@ function rackSystem(dt: number): void {
     setHover(s.tap, stocked ? `Hold ${withArticle(rarityTierById(s.tier).name)} seed (${n})` : `${rarityTierById(s.tier).name}: none yet`)
   }
 
-  if (giftBoard) {
-    if (flowers === 0) setScale(giftBoard.root, ZERO)
-    else {
-      setScale(giftBoard.root, { x: 1, y: 1, z: 1 })
-      TextShape.getMutable(giftBoard.text).text = others > 0
-        ? `Gift a flower\n${others} here`
-        : `Your flowers\n${flowers} kept`
-      TextShape.getMutable(giftBoard.text).textColor = others > 0 ? GOLD : CREAM
-      setHover(giftBoard.tap, others > 0 ? 'Gift a flower' : 'Your flowers')
-    }
-  }
 }

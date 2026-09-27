@@ -110,6 +110,12 @@ function fade(now: number, start: number, life: number): number {
 }
 const alpha = (now: number) => fade(now, shownAt, DISCOVERY_CARD_MS)
 
+/** True while the discovery or milestone card is on screen — the tutorial card gives way (ui.tsx). */
+export function isDiscoveryShowing(): boolean {
+  const now = Date.now()
+  return (card !== null && alpha(now) > 0.02) || (milestone !== null && fade(now, milestoneAt, MILESTONE_CARD_MS) > 0.02)
+}
+
 export function MilestoneCardUi(props: { px: (n: number) => number; fs: (n: number) => number; mobile: boolean }) {
   const now = Date.now()
   pumpMilestones(now)

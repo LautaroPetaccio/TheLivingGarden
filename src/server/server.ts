@@ -82,6 +82,7 @@ import {
   BLOOM_TRIGGER_COOLDOWN_MS, EXPIRY_TELL_MS,
   plantSpeciesById,
   rarityTierById,
+  galleryBoost,
   AVENUE_POSITIONS,
   AVENUE_MIN_TIER,
   AVENUE_NEVER_TIDY_TIER,
@@ -695,7 +696,8 @@ function triggerBloom(forcedVariant = ''): void {
   bloomSeedContributors = Math.max(1, cycleContributors.size)
   bloomDuration  = bloomDurationMs(bloomSeedContributors)
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name}, ${cycleContributors.size} contributor(s) → ${bloomDuration / 60_000} min)`)
-  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration })
+  snapshotGallery()
+  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration, galleryFlowers: bloomGallery.flowers, galleryBoost: bloomGallery.boost })
   scheduleSeedWaves()
   scheduleGoldenSeed()
   setTimeout(() => executeTask(resetGarden), bloomDuration)
@@ -779,6 +781,20 @@ function sendGolden(to?: string[]): void {
   room.send('goldenSeed', payload, to ? { to } : undefined)
 }
 
+/** The Rare Plant Gallery's part in the current Bloom — snapshotted when it triggers, so every seed
+ *  of that Bloom rolls with the same boost and the summary can credit what was on show then. */
+let bloomGallery = { flowers: 0, boost: 0, star: '' }
+function snapshotGallery(): void {
+  const shown = [...avenue.values()].filter(r => r.owner && r.keepsake)
+  const best = shown.reduce<AvenueRecord | null>((b, r) => (!b || (r.keepsake!.rarityTier > b.keepsake!.rarityTier) ? r : b), null)
+  bloomGallery = {
+    flowers: shown.length,
+    boost:   galleryBoost(shown.map(r => r.keepsake!.rarityTier)),
+    star:    best ? `${best.ownerName}'s ${rarityTierById(best.keepsake!.rarityTier).name} ${plantSpeciesById(best.keepsake!.flower)?.name ?? best.keepsake!.flower}` : '',
+  }
+  console.log(`[Server] Gallery boost for this Bloom: ${bloomGallery.flowers} flower(s) on show → +${Math.round(bloomGallery.boost * 100)}% rare chance${bloomGallery.star ? ` (star: ${bloomGallery.star})` : ''}`)
+}
+
 function cancelSeedWaves(): void {
   for (const t of seedWaveTimers) clearTimeout(t)
   seedWaveTimers.length = 0
@@ -787,7 +803,8 @@ function cancelSeedWaves(): void {
 /** Roll and broadcast one wave of seeds — rarity scales with contributors.
  *  `guaranteeRare`: this wave's first seed is Rare or better (4+ contributors). */
 function spawnBloomSeeds(count: number, guaranteeRare = false): void {
-  const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult
+  // The variant's boost × the Rare Plant Gallery's (snapshotted when the Bloom triggered).
+  const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult * (1 + bloomGallery.boost)
   const now          = Date.now()
   const batch: SeedRecord[] = []
   for (let i = 0; i < count; i++) {
@@ -969,7 +986,12 @@ const loadFlowers = (a: string) => loadPlayerRecord<FlowerKeepsake[]>(a, 'flower
 // ── Onboarding (v2): the two firsts the in-world tutorial waits on. Persisted per
 // wallet so the lesson never replays for a gardener who has done it — and a gardener
 // who watered last visit but never got as far as planting still gets taught planting.
-interface OnboardingRecord { watered: boolean; planted: boolean; harvested: boolean; gifted: boolean; pouchOpened: boolean; avenueUsed: boolean }
+interface OnboardingRecord {
+  watered: boolean; planted: boolean; harvested: boolean; gifted: boolean; avenueUsed: boolean
+  // (pouchOpened removed 2026-09-27 with the tutorial's pouch step; old records still carry it, ignored.)
+  /** Guided tutorial (2026-09-27): the step to resume at, and whether it was finished or ended. */
+  tourStep: number; tourDone: boolean
+}
 async function loadOnboarding(address: string): Promise<OnboardingRecord> {
   // Backfill for gardeners who predate this record (the key landed 2026-09-20): without it
   // every existing player is handed the beginner tutorial at launch. Used ONLY as the
@@ -981,12 +1003,11 @@ async function loadOnboarding(address: string): Promise<OnboardingRecord> {
     planted:     boxesOwnedBy(address) > 0 || flowers.length > 0,
     harvested:   flowers.length > 0,
     gifted:      false,
-    // Same condition as `planted`: anyone who has already grown something has been
-    // around long enough not to be taught where their own pouch is.
-    pouchOpened: boxesOwnedBy(address) > 0 || flowers.length > 0,
     // Unlike `gifted`, this one CAN be backfilled accurately: the Avenue tracks its own
     // owners, so a gardener who already has a flower on show is never nagged about it.
     avenueUsed:  [...avenue.values()].some(r => r.owner === address),
+    tourStep: 0,
+    tourDone: false,
   }))
   // Migrate on load: a record written before a field existed reads back undefined,
   // and an undefined in a Schemas.Boolean field throws inside the event bus. The
@@ -995,13 +1016,15 @@ async function loadOnboarding(address: string): Promise<OnboardingRecord> {
   o.planted   = !!o.planted
   o.harvested = !!o.harvested
   o.gifted    = !!o.gifted
-  o.pouchOpened = !!o.pouchOpened
   o.avenueUsed  = !!o.avenueUsed
+  // Added 2026-09-27: older records read back undefined, which a Schemas field would choke on.
+  o.tourStep = typeof o.tourStep === 'number' && Number.isFinite(o.tourStep) ? o.tourStep : 0
+  o.tourDone = !!o.tourDone
   return o
 }
 async function sendOnboarding(address: string): Promise<void> {
   const o = await loadOnboarding(address)
-  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted, pouchOpened: o.pouchOpened, avenueUsed: o.avenueUsed }, { to: [address] })
+  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted, avenueUsed: o.avenueUsed, tourStep: o.tourStep, tourDone: o.tourDone }, { to: [address] })
 }
 // ── Tutorial planter reservations (Phase 2). In memory only: a server restart just
 // means the tutorial re-asks. The CLIENT chooses which planter (the server has no
@@ -1021,7 +1044,7 @@ function reservationHolder(boxId: string): string | null {
 function clearReservation(address: string): void { planterReservations.delete(address) }
 
 /** Record one of the firsts and tell the client — a no-op once it is already set. */
-async function markOnboarding(address: string, step: keyof OnboardingRecord): Promise<void> {
+async function markOnboarding(address: string, step: Exclude<keyof OnboardingRecord, 'tourStep' | 'tourDone'>): Promise<void> {
   const o = await loadOnboarding(address)
   if (o[step]) return
   o[step] = true
@@ -1525,6 +1548,9 @@ function sendBloomSummary(): void {
       youWaters: cycleWatersBy.get(key) ?? 0,
       youSeeds:  mine?.seeds ?? 0,
       youRares:  mine?.rares ?? 0,
+      galleryFlowers: bloomGallery.flowers,
+      galleryBoost:   bloomGallery.boost,
+      galleryStar:    bloomGallery.star,
     }, { to: [address] })
   }
   console.log(`[Server] Bloom finale: ${gardeners} gardener(s), ${waters} waters, ${seeds} seeds (${rares} rare+)`)
@@ -1694,7 +1720,7 @@ function playerJoinSystem(): void {
       await loadPouch(address)
       sendPouch(address)
       // Re-send bloom state to players who join while it is already active
-      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
+      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration, galleryFlowers: bloomGallery.flowers, galleryBoost: bloomGallery.boost }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     if (golden && !golden.gatheredBy.has(address)) sendGolden([address])
       for (const b of boxes.values()) sendBox(b, [address])
@@ -2348,7 +2374,7 @@ export async function server(): Promise<void> {
     sendThreshold([address])
     await loadPouch(address)
     sendPouch(address)
-    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
+    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration, galleryFlowers: bloomGallery.flowers, galleryBoost: bloomGallery.boost }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     if (golden && !golden.gatheredBy.has(address)) sendGolden([address])
     for (const b of boxes.values()) sendBox(b, [address])
@@ -2361,16 +2387,26 @@ export async function server(): Promise<void> {
     console.log(`[Server] Full sync sent to ${address} (${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 
-  // ── Message: markPouchOpened ─────────────────────────────────
-  onRoomMessage<Record<string, never>>('markPouchOpened', async (_data, address) => {
-    await markOnboarding(address, 'pouchOpened')
+  // ── Message: tourProgress (guided tutorial, 2026-09-27) ──────
+  // The client reports each step it enters and when the tour is finished or ended, so a rejoin
+  // resumes where the player was, and a finished/ended tour never auto-starts again.
+  onRoomMessage<{ step: number; done: boolean }>('tourProgress', async (data, address) => {
+    const step = Math.floor(Number(data.step))
+    if (!Number.isFinite(step) || step < 0 || step > 50) return
+    const o = await loadOnboarding(address)
+    if (o.tourStep === step && o.tourDone === !!data.done) return
+    o.tourStep = step
+    o.tourDone = !!data.done
+    void savePlayerJson(address, 'onboarding')
   })
 
   // ── Message: adminResetOnboarding (test panel) ───────────────
   onRoomMessage<Record<string, never>>('adminResetOnboarding', async (_data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const o = await loadOnboarding(address)
-    o.watered = o.planted = o.harvested = o.gifted = o.pouchOpened = false
+    o.watered = o.planted = o.harvested = o.gifted = false
+    o.tourStep = 0
+    o.tourDone = false
     await savePlayerJson(address, 'onboarding')
     await sendOnboarding(address)
     sendNotice(address, 'Onboarding reset — the tutorial will replay from the first water')

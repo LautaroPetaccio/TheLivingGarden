@@ -92,16 +92,6 @@ let avenueSlotsFree = 0
 export function getAvenueSlotsFree(): number { return avenueSlotsFree }
 export function setAvenueSlotsFree(n: number): void { avenueSlotsFree = n }
 
-// Onboarding stage 3 (pouch) crosses the same seam as gifting: the tutorial SETS the
-// hint, the HUD reads it, and the HUD calls back the first time the pouch is opened.
-// It lives here rather than the HUD importing onboarding directly, because that would
-// close a ui -> onboarding -> notifications -> ui import cycle.
-let pouchHint = false
-let pouchOpenedCb: (() => void) | null = null
-export function getPouchHint(): boolean { return pouchHint }
-export function setPouchHint(on: boolean): void { pouchHint = on }
-export function registerPouchOpened(fn: () => void): void { pouchOpenedCb = fn }
-export function notePouchOpened(): void { pouchOpenedCb?.() }
 
 // Gifting is owned by giftSystem; it registers itself here so the menu can use it.
 let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void; hold(flowerIndex: number): void; holdSeed(rarityTier: number): void } | null = null

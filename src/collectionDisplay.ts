@@ -25,7 +25,7 @@ import {
   RARITY_TIERS, PLANT_SPECIES, PlantSpecies, rarityTierById, plantSpeciesById, bespokePool, stampTotal, withArticle,
 } from './shared/config'
 import { PROP_LAYOUT } from './shared/layout'
-import { getDiscovered, getFlowers, holdFlower, stampsFound, notePouchOpened } from './playerInventory'
+import { getDiscovered, getFlowers, holdFlower, stampsFound, gardenersHere } from './playerInventory'
 import { groupFlowers, Group, openSeedMenuFlowers } from './seedMenu'
 import { showToast } from './notifications'
 import { playSfx } from './sounds'
@@ -63,6 +63,23 @@ let fGroups: Group[] = []
 let fPage = 0
 let fSig = ''
 let fTitle: Entity, fSubtitle: Entity
+let giftBoard: { root: Entity; text: Entity; tap: Entity } | null = null
+let giftKey = ''
+
+/** The gift board: hidden with no flowers; "Gift a flower" while another gardener is here. */
+function refreshGiftBoard(): void {
+  if (!giftBoard) return
+  const flowers = getFlowers().length
+  const others = gardenersHere().length
+  const key = `${flowers}|${others}`
+  if (key === giftKey) return
+  giftKey = key
+  if (flowers === 0) { setScale(giftBoard.root, ZERO); return }
+  setScale(giftBoard.root, { x: 1, y: 1, z: 1 })
+  TextShape.getMutable(giftBoard.text).text = others > 0 ? `Gift a flower\n${others} here` : `Your flowers\n${flowers} kept`
+  TextShape.getMutable(giftBoard.text).textColor = others > 0 ? GOLD : CREAM
+  setHover(giftBoard.tap, others > 0 ? 'Gift a flower' : 'Your flowers')
+}
 
 function setupFlowerShelf(): void {
   const o = PROP_LAYOUT['FlowerShelf']
@@ -75,7 +92,17 @@ function setupFlowerShelf(): void {
   buildShelfFrame(root, w)
   fTitle = label(root, { x: 0, y: 3.1, z: 0.22 }, 'MY FLOWERS', FONT_SIGN, GOLD, w * 0.6, 0.5)
   fSubtitle = label(root, { x: 0, y: 2.8, z: 0.22 }, '', 0.75, CREAM, w * 0.8, 0.25)
-  tapArea(root, { x: 0, y: 3.0, z: 0.2 }, { x: w * 0.5, y: 0.7, z: 0.1 }, 'Open all your flowers', () => { notePouchOpened(); openSeedMenuFlowers() })
+  tapArea(root, { x: 0, y: 3.0, z: 0.2 }, { x: w * 0.5, y: 0.7, z: 0.1 }, 'Open all your flowers', () => openSeedMenuFlowers())
+  // Gift board: stands at the shelf's right end; prompts gifting when another gardener is here.
+  // (Moved here from the seed rack 2026-09-27 — it is about flowers, so it lives with them.)
+  const gRoot = engine.addEntity()
+  Transform.create(gRoot, { parent: root, position: { x: w / 2 + 1.25, y: 1.6, z: 0.3 }, scale: ZERO })
+  box(gRoot, { x: 0, y: 0, z: 0 }, { x: 2.0, y: 1.0, z: 0.07 }, PLATE)
+  box(gRoot, { x: 0, y: -1.1, z: 0 }, { x: 0.14, y: 2.2, z: 0.14 }, WOOD_D)   // post to the ground
+  const gText = label(gRoot, { x: 0, y: 0, z: -0.05 }, '', 0.5, GOLD, 1.9, 0.9)
+  const gTap = tapArea(gRoot, { x: 0, y: 0, z: -0.04 }, { x: 2.0, y: 1.0, z: 0.1 }, 'Your flowers', () => openSeedMenuFlowers())
+  giftBoard = { root: gRoot, text: gText, tap: gTap }
+
   // page arrows at the sign's ends
   ;([[-1, '<', -1], [1, '>', 1]] as const).forEach(([sd, glyph, dir]) => {
     label(root, { x: sd * w * 0.38, y: 3.0, z: 0.22 }, glyph, 1.2, GOLD, 0.5, 0.5)
@@ -207,7 +234,7 @@ function setupAlmanacWall(): void {
   box(root, { x: 0, y: panelTop - 0.6, z: 0.0 }, { x: panelW, y: 1.2, z: 0.05 }, PLATE, 0.3)                          // title bar
   label(root, { x: -panelW / 2 + 1.9, y: panelTop - 0.6, z: -0.06 }, 'ALMANAC', 1.7, GOLD, 3.4, 0.7)
   aTotal = label(root, { x: panelW / 2 - 2.3, y: panelTop - 0.6, z: -0.06 }, '', 1.1, CREAM, 4.3, 0.5)
-  tapArea(root, { x: panelW / 2 - 2.3, y: panelTop - 0.6, z: -0.05 }, { x: 4.3, y: 1.0, z: 0.1 }, 'Open the full Almanac', () => { notePouchOpened(); openSeedMenuFlowers() })
+  tapArea(root, { x: panelW / 2 - 2.3, y: panelTop - 0.6, z: -0.05 }, { x: 4.3, y: 1.0, z: 0.1 }, 'Open the full Almanac', () => openSeedMenuFlowers())
 
   // rarity tabs: 2 rows x 4
   tabs = []
@@ -314,6 +341,7 @@ export function setupCollectionDisplays(): void {
     if (accum < REFRESH_MS) return
     accum = 0
     refreshFlowerShelf()
+    refreshGiftBoard()
     refreshAlmanac()
   })
 }

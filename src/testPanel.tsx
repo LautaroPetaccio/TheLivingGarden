@@ -19,8 +19,6 @@ import {
   forceWaterToThreshold,
   forceStartPlayerTrail,
   forceStopPlayerTrail,
-  forceStartBloomFlower,
-  forceStopBloomFlower,
   getWateringStatus,
   dropDiagnostics,
 } from './wateringSystem'
@@ -82,7 +80,6 @@ let overrideLimit = false                  // mirrors overrideDailyLimit
 let unlimitedPlanters = false              // server-side, in memory — off again after a server restart
 let clickboxMode  = getUseClickbox()       // mirrors useClickbox
 let trailActive   = false                  // sparkle trail toggle
-let flowerActive  = false                  // plant-in-hand toggle
 
 // ── Helpers ──────────────────────────────────────────────────────
 
@@ -572,17 +569,6 @@ export function TestPanelUi() {
             onChange={v => {
               trailActive = v
               if (v) forceStartPlayerTrail(); else forceStopPlayerTrail()
-            }}
-          />
-        </UiEntity>
-
-        <UiEntity uiTransform={{ width: '100%', height: 40, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 6 } }}>
-          <Label value="Plant in Hand" fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
-          <ToggleButton
-            value={flowerActive}
-            onChange={v => {
-              flowerActive = v
-              if (v) forceStartBloomFlower(); else forceStopBloomFlower()
             }}
           />
         </UiEntity>

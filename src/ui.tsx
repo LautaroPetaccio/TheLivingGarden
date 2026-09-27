@@ -20,11 +20,11 @@ import { readCanvasInfo, getSafeArea, getScreenInsets, pct } from './safeArea'
 import { isMobile } from '@dcl/sdk/platform'
 import { Color4 } from '@dcl/sdk/math'
 import { engine, timers } from '@dcl/sdk/ecs'
-import { getPouch, getPouchHint, notePouchOpened } from './playerInventory'
+import { getPouch } from './playerInventory'
 import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
 import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
 import { BloomFinaleUi, isBloomFinaleShowing } from './bloomFinale'
-import { DiscoveryCardUi, MilestoneCardUi } from './discoveryCard'
+import { DiscoveryCardUi, MilestoneCardUi, isDiscoveryShowing } from './discoveryCard'
 import { HoldMeterUi } from './skillCheck'
 import { InfoPanelUi, toggleInfo, isInfoOpen } from './infoPanel'
 import { AvenueCardUi, isAvenueCardOpen } from './avenueCard'
@@ -108,7 +108,7 @@ export function setTutorialActive(on: boolean): void { tutorialActive = on }
 /** The card gives way to the bloom line and the "This bloom" summary (they share its spot), and to
  *  any card or menu the player opened — the Avenue card sat on top of it (KJ 2026-09-27). */
 const coachUp = (): boolean => coach !== null && !momentActive() && !isBloomFinaleShowing()
-  && !isAvenueCardOpen() && !isSeedMenuOpen() && !isInfoOpen()
+  && !isAvenueCardOpen() && !isSeedMenuOpen() && !isInfoOpen() && !isDiscoveryShowing()
 
 export function showDailyLimit(text: string): void {
   dailyLimitText    = text
@@ -354,10 +354,6 @@ function uiComponent() {
   const need       = Math.max(0, BLOOM_THRESHOLD - watered)
   const pctLabel   = `${Math.round(bannerHealth * 100)}%`
   const ringLabel  = isBloom ? (bloomRemainingLabel || pctLabel) : pctLabel
-  // Tutorial stage 3 pulses the chip until it is opened once. ALPHA only - a size tween
-  // on the mobile (Godot) client is the thing we never do.
-  const pouchHint  = getPouchHint() && !isSeedMenuOpen()
-  const hintAlpha  = 0.45 + 0.45 * (Math.sin(Date.now() / 420) * 0.5 + 0.5)
 
   const title = isBloom ? (bannerBloomLabel || 'The Garden is in Full Bloom!')
               : isCount ? `Hold 80% for ${bannerCountdown} to wake the bloom`
@@ -415,8 +411,8 @@ function uiComponent() {
           height: px(CHIP_H), flexDirection: 'row', alignItems: 'center',
           padding: { left: px(20), right: px(22) }, borderRadius: px(CHIP_H / 2),
         }}
-        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : pouchHint ? { ...GOLD, a: hintAlpha } : DARK }}
-        onMouseDown={() => { notePouchOpened(); toggleSeedMenu() }}
+        uiBackground={{ color: isSeedMenuOpen() ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
+        onMouseDown={() => toggleSeedMenu()}
       >
         <UiEntity uiTransform={{ width: px(CHIP_GLYPH), height: px(CHIP_GLYPH), margin: { right: px(12) } }} uiBackground={{ textureMode: 'stretch', texture: { src: `${UI_DIR}glyph_seed.png` }, color: { ...TINT_SEED, a: seedCount > 0 ? 1 : 0.5 } }} />
         <Label value={`${seedCount}`} fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: seedCount > 0 ? 1 : 0.55 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />

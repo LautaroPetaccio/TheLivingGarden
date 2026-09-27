@@ -61,7 +61,6 @@ import { triggerSceneEmote }  from '~system/RestrictedActions'
 import { room }                             from './shared/messages'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, BLOOM_CENTER, DAILY_WATER_LIMIT, PLANT_NAMES, FAST_PLANT_NAMES, FAST_PLANT_EXPIRY_MS, BLOOM_RESET_DELAY_MS, DROP_RANGE, DROP_RANGE_OUT, BLOOM_TRIGGER_COOLDOWN_MS, EXPIRY_TELL_MS, WATER_DROP_MODEL_SRC } from './shared/config'
 import { setupPlayerTrailSystem, startPlayerTrail, stopPlayerTrail } from './playerTrailSystem'
-import { startBloomFlower, stopBloomFlower } from './bloomFlowerSystem'
 import { setupSeedSystem } from './seedSystem'
 import { setupBoxSystem } from './boxSystem'
 import { setupPlanterLayoutTool } from './planterLayoutTool'
@@ -1680,9 +1679,8 @@ export function setupWateringSystem(): void {
     setBloomSparklePalette(bloomVariantById('classic').palette)   // back to the warm default for the next cycle
     setAmbientPalette(bloomVariantById('classic').palette)
     stopMoonlight()          // dawn breaks as the garden resets (no-op after a classic bloom)
-    // Contributor hand-rose RETIRED (KJ 2026-09-27): after a Bloom it owned the hand, so you
-    // could not hold a seed or a flower, and it no longer meant anything. The test-panel button
-    // (forceStartBloomFlower) still shows it for comparison. — must run BEFORE clear()
+    // (The contributor hand-rose that used to be handed out here was removed 2026-09-27: after a
+    // Bloom it owned the hand, so you could not hold a seed or a flower.)
     bloomContributors.clear()
     resetAllPlants()         // stops bloom, resets visuals + audio via endBloom()
     updateSceneAssets()      // endBloom() cleared isBloomActive() — switch center text immediately
@@ -1963,11 +1961,3 @@ export function forceWaterToThreshold(): void {
 export function forceStartPlayerTrail(): void { startPlayerTrail() }
 export function forceStopPlayerTrail():  void { stopPlayerTrail()  }
 
-export function forceStartBloomFlower(): void {
-  const lp = getPlayer()
-  const ids: string[] = []
-  if (lp?.name)   ids.push(lp.name)
-  if (lp?.userId) ids.push(lp.userId)
-  startBloomFlower(ids.length > 0 ? ids : ['__test__'])
-}
-export function forceStopBloomFlower(): void { stopBloomFlower() }

@@ -43,7 +43,6 @@ import { CollectionAssembler } from './shared/collection'
 import { getFlowers, setFlowers, setBoxCap, setAvenueSlotsFree, registerGiftApi, Keepsake, setHeld, heldFlowerIndex, setDiscovered } from './playerInventory'
 import { getSelectedGiftIndex, openSeedMenu } from './seedMenu'
 import { rarityTierById, plantSpeciesById, withArticle, seedModelSrc, SEED_HAND_SCALE } from './shared/config'
-import { isBloomFlowerActive, setBloomFlowerVisible } from './bloomFlowerSystem'
 import { isWateringEmoteActive } from './wateringSystem'
 import { playSfx } from './sounds'
 
@@ -56,11 +55,9 @@ const TAG_OFFSET_Y  = 0.9                           // AAPT_POSITION anchors at 
 const GIFT_DISTANCE = 6     // m — mobile is third-person only
 const SCAN_MS       = 1_000
 const TOAST_MS      = 5_000
-// Held flower in the RIGHT hand with the bloom contributor's hand-flower offset/rotation
-// (bloomFlowerSystem) so it faces forward the same way — the left hand's bone is mirrored
-// and the same rotation pointed the flower backwards (KJ 2026-09-18). My own keepsake hides
-// while that bloom flower is out (it's local-only, so other players still see the keepsake).
-// Size is a fraction of the species' planter-box size.
+// Held flower in the RIGHT hand, facing forward — the left hand's bone is mirrored and the same
+// rotation pointed the flower backwards (KJ 2026-09-18). Size is a fraction of the species'
+// planter-box size.
 const HAND_K        = 0.4
 const HAND_OFFSET   = { x: 0, y: 0.06, z: 0 }
 const HAND_ROTATION = Quaternion.fromEulerDegrees(90, 0, 0)
@@ -178,25 +175,24 @@ function buildHand(address: string, flower: string, rarityTier: number, seedTier
   hands.set(address, parent)
 }
 
-/** Build or remove MY hand item to match who owns the hand right now. Priority: the watering
- *  can (its emote is playing) > the Bloom rose > my keepsake / seed. */
+/** Build or remove MY hand item to match who owns the hand right now: the watering can (its
+ *  emote is playing) wins over my keepsake / seed. (The Bloom rose that also used to compete for
+ *  the hand was removed 2026-09-27.) */
 let lastHandLog = ''
 function applyMyHand(): void {
   const me = localAddress()
   if (!me) return
-  const can = isWateringEmoteActive(), rose = isBloomFlowerActive()
-  const taken = can || rose
+  const taken = isWateringEmoteActive()
   const has = hands.has(me)
   // Change-only log, so a "seed in hand with the can" report can be read straight from the console
-  const state = `${can ? 'CAN' : '-'} ${rose ? 'ROSE' : '-'} item=${has ? 'shown' : 'none'} want=${myHandArgs ? (myHandArgs.flower || `seed${myHandArgs.seedTier}`) : 'none'}`
+  const state = `${taken ? 'CAN' : '-'} item=${has ? 'shown' : 'none'} want=${myHandArgs ? (myHandArgs.flower || `seed${myHandArgs.seedTier}`) : 'none'}`
   if (state !== lastHandLog) { lastHandLog = state; console.log(`[Hand] ${state}`) }
   if (taken) { if (has) removeHand(me); return }
   if (!has && myHandArgs && (myHandArgs.flower ? plantSpeciesById(myHandArgs.flower) !== null : myHandArgs.seedTier >= 0)) buildHand(me, myHandArgs.flower, myHandArgs.rarityTier, myHandArgs.seedTier, true)
 }
 
-/** The Bloom rose gives way to the can; my item gives way to both. */
+/** My item gives way to the watering can. */
 export function syncMyHand(): void {
-  setBloomFlowerVisible(!isWateringEmoteActive())
   applyMyHand()
 }
 
@@ -204,8 +200,8 @@ export function syncMyHand(): void {
 function handArbiterSystem(): void { syncMyHand() }
 
 /** TEMP diagnostic (KJ 2026-09-27: "the seed and the flower on my own avatar"). `attached` counts
- *  every right-hand attachment on MY avatar (mine, the Bloom rose, and any built for my address
- *  on the other-player path) — anything above 1 is the bug, and the rest says which path. */
+ *  every right-hand attachment on MY avatar (mine, and any built for my address on the
+ *  other-player path) — anything above 1 is the bug, and the rest says which path. */
 export function handDiagnostics(): string {
   const me = localAddress()
   let attached = 0
@@ -214,7 +210,7 @@ export function handDiagnostics(): string {
     if (!a.avatarId || a.avatarId.toLowerCase() === me) attached++
   }
   const want = myHandArgs ? (myHandArgs.flower || `seed${myHandArgs.seedTier}`) : 'none'
-  return `hand: me ${me ? me.slice(0, 6) : 'NONE'} | attached ${attached} | mine ${hands.has(me) ? 1 : 0} | can ${isWateringEmoteActive() ? 1 : 0} rose ${isBloomFlowerActive() ? 1 : 0} | want ${want} | entries ${hands.size}`
+  return `hand: me ${me ? me.slice(0, 6) : 'NONE'} | attached ${attached} | mine ${hands.has(me) ? 1 : 0} | can ${isWateringEmoteActive() ? 1 : 0} | want ${want} | entries ${hands.size}`
 }
 
 function createTag(address: string): Entity {

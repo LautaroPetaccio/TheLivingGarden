@@ -113,6 +113,18 @@ export function seedSpawnCount(contributors: number): number {
 export function seedRareChance(contributors: number, rareSeedMult = 1): number {
   return Math.min(1, SEED_RARE_AT_SOLO * byContributors(RARE_MULT_BY_CONTRIBUTORS, contributors) * rareSeedMult)
 }
+/** Rare Plant Gallery → Bloom (KJ 2026-09-27: "still two divorced games"). Every flower on show in
+ *  the Gallery raises the rare-seed chance of EVERY Bloom, for everyone — the rarer the flower, the
+ *  bigger its share. Summed over the Gallery, capped, and applied as ×(1 + boost) on top of the
+ *  gardener and variant multipliers. The server snapshots it when a Bloom triggers. */
+export const GALLERY_BOOST_BY_TIER: ReadonlyArray<number> = [0, 0, 0.02, 0.03, 0.04, 0.05, 0.08, 0.1]   // TUNING — index = rarity tier
+export const GALLERY_BOOST_CAP = 0.5   // TUNING — a packed Gallery at most +50%
+export function galleryBoostOf(tier: number): number {
+  return GALLERY_BOOST_BY_TIER[Math.max(0, Math.min(GALLERY_BOOST_BY_TIER.length - 1, Math.floor(tier)))] ?? 0
+}
+export function galleryBoost(tiers: ReadonlyArray<number>): number {
+  return Math.min(GALLERY_BOOST_CAP, tiers.reduce((sum, t) => sum + galleryBoostOf(t), 0))
+}
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */
 export const BLOOM_SUSTAIN_MS   = 60_000   // the FULL-garden hold (4+ gardeners)
@@ -376,7 +388,6 @@ export const ARROW_GROUND_LIFT = 0.05
  *  Tween: the explorer writes every actively-tweened Transform back into the scene every
  *  frame, which is what tanked scene tick fps in the 09-18 perf pass. */
 export const ARROW_BOB_AMPLITUDE = 0.08
-export const ARROW_BOB_PERIOD_MS = 1600
 /** How often the onboarding re-picks which plant to point at (seconds). */
 export const ONBOARDING_REPICK_S = 0.25
 /** Don't point at anything further away than this — better to show nothing than to
@@ -529,7 +540,7 @@ export const TUTORIAL_TEXT = {
   harvest: { title: 'Harvest your flower', body: 'Your flower has opened! Tap it to keep it.' },
   shelf:   { title: 'Your flowers', body: 'Every flower you harvest stands on this shelf. Hold one, or gift it to another gardener.' },
   toFame:  { title: 'The Rare Plant Gallery', body: 'Follow the arrows through the arches to the Rare Plant Gallery.' },
-  fame:    { title: 'The Rare Plant Gallery', body: 'Only the rarest plants can go on display here. Tap a stand to display yours, or to learn about the one on show.' },
+  fame:    { title: 'The Rare Plant Gallery', body: 'Only the rarest plants go on show here - and every one makes every Bloom\'s seeds rarer, for everyone. Tap a stand to display yours.' },
   loop:    { title: 'Seed shower', body: 'Head back and water the roses again - every Bloom brings a new seed shower.' },
   done:    { title: 'You know the garden', body: 'Tap Tutorial any time to walk it again' },
 } as const

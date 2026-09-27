@@ -354,6 +354,7 @@ function enterStep(i: number): void {
   retryIn    = 0
   target     = null
   snap = { waters: myWaterCount(), pouch: pouchTotal(), planters: myPlanterCount(), tends: myTendsTotal(), flowers: getFlowers().length }
+  room.send('tourProgress', { step: i, done: false })   // a rejoin resumes here
   console.log(`[Tutorial] step ${i + 1}/${STEPS.length} → ${step()}`)
 }
 
@@ -405,12 +406,14 @@ function currentCardTitle(): string { return TUTORIAL_TEXT[step()].title }
 
 function advance(): void {
   if (stepIdx + 1 < STEPS.length) { enterStep(stepIdx + 1); return }
+  room.send('tourProgress', { step: stepIdx, done: true })   // finished: never auto-starts again
   stop()
   showMoment(TUTORIAL_TEXT.done.title, TUTORIAL_TEXT.done.body, TUTORIAL_DONE_MS)
 }
 
 function endTutorial(): void {
   endedThisSession = true
+  room.send('tourProgress', { step: stepIdx, done: true })   // ended: never auto-starts again
   stop()
   showMoment('Tutorial ended', 'Tap Tutorial to walk it again', 3_500)
 }
@@ -594,7 +597,12 @@ export function setupOnboarding(): void {
     if (autoStartDecided) return
     autoStartDecided = true
     if (endedThisSession || active) return
-    if (!data.watered)        start(STEPS.indexOf('water'))
+    // The server remembers the tour (2026-09-27): finished or ended = never auto-start again;
+    // part-way = resume at that step. The old first-timer flags still start a brand-new player.
+    if (data.tourDone) return
+    const saved = Math.floor(data.tourStep ?? 0)
+    if (saved > 0 && saved < STEPS.length) start(saved)
+    else if (!data.watered)   start(STEPS.indexOf('water'))
     else if (!data.planted)   start(STEPS.indexOf('bloom'))
     else if (!data.harvested) start(STEPS.indexOf('tend'))
   })

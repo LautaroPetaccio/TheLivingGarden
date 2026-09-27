@@ -9,6 +9,7 @@ import { setupPouchRack } from './pouchRack'
 import { setupCollectionDisplays } from './collectionDisplay'
 import { setupHallOfFame } from './hallOfFame'
 import { setupExamTable } from './examTable'
+import { setupGalleryThreads } from './galleryThreads'
 
 // Importing shared schemas + messages here ensures registerMessages()
 // and defineComponent() run on BOTH server and client before any
@@ -36,6 +37,7 @@ export async function main() {
   setupCollectionDisplays()   // flower shelf + Almanac wall
   setupHallOfFame()   // 55 rare-plant gallery stands from scene.glb
   setupExamTable()    // potting-shed examination table (examTable.ts)
+  setupGalleryThreads()   // Gallery flowers fly to the Bloom when it triggers — after room.clear() like the rest
 
   // Discord buttons are BACK (KJ 2026-09-20) — they carry their own link from the
   // composite, and the info panel's last page links to the same server.

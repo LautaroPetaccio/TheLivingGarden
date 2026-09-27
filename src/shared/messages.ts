@@ -112,10 +112,9 @@ export const room = registerMessages({
    *  replays for someone who has done it — and a gardener who watered last visit but
    *  never got as far as planting still gets the planting half next time.
    *  Sent on full sync and again after each first. */
-  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, pouchOpened: Schemas.Boolean, avenueUsed: Schemas.Boolean }),
-  /** Client → server: I opened the seed pouch for the first time. Ends the tutorial stage
-   *  that pulses the chip (Fin 2026-09-21 never noticed the pouch existed). */
-  markPouchOpened:  Schemas.Map({}),
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, avenueUsed: Schemas.Boolean, tourStep: Schemas.Number, tourDone: Schemas.Boolean }),
+  /** Client → server: where the guided tutorial is (step index), and whether it was finished or ended. */
+  tourProgress:     Schemas.Map({ step: Schemas.Number, done: Schemas.Boolean }),
   /** Server → one player: every species they have ever REVEALED, as a JSON string[] of
    *  species ids. The Almanac's source of truth, deliberately separate from `flowers`:
    *  a flower left on show in its planter (GDD 3.1) is discovered but not kept. */
@@ -168,7 +167,7 @@ export const room = registerMessages({
   /** elapsedMs: how far into the bloom we already are — 0 on the live broadcast, >0 when
    *  re-sent to a late joiner, so their countdown matches everyone else's. durationMs: this
    *  bloom's length (bloomDurationMs — 2 min solo … 6 min at 6+ contributors). */
-  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number, durationMs: Schemas.Number }),
+  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number, durationMs: Schemas.Number, galleryFlowers: Schemas.Number, galleryBoost: Schemas.Number }),
   /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
    *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
@@ -179,6 +178,8 @@ export const room = registerMessages({
   bloomSummary:     Schemas.Map({
     gardeners: Schemas.Number, waters: Schemas.Number, seeds: Schemas.Number, rares: Schemas.Number,
     youWaters: Schemas.Number, youSeeds: Schemas.Number, youRares: Schemas.Number,
+    /** The Rare Plant Gallery's part in this Bloom: flowers on show, the boost, and the rarest one. */
+    galleryFlowers: Schemas.Number, galleryBoost: Schemas.Number, galleryStar: Schemas.String,
   }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),

@@ -16,7 +16,7 @@ import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
 import { engine, Entity, Transform, VirtualCamera, MainCamera } from '@dcl/sdk/ecs'
 import {
   AVENUE_CAMERA_ZOOM, AVENUE_CAMERA_PUSH_FRACTION, AVENUE_CAMERA_MIN_DIST, AVENUE_CAMERA_MS,
-  PLANTER_TIDY_MIN_AWAY_MS, rarityTierById, plantSpeciesById,
+  PLANTER_TIDY_MIN_AWAY_MS, rarityTierById, plantSpeciesById, galleryBoostOf,
 } from './shared/config'
 
 export interface AvenueCardData {
@@ -116,6 +116,8 @@ export function AvenueCardUi(props: { px: (n: number) => number; fs: (n: number)
   if (c.since) rows.push({ k: 'In the Gallery', v: `since ${ago(c.since)}` })
   if (c.helpers.length > 0) rows.push({ k: c.helpers.length === 1 ? 'Watered by' : `Watered by ${c.helpers.length}`, v: c.helpers.join(', ') })
   if (c.looks > 0) rows.push({ k: 'Admired by', v: `${c.looks} gardener${c.looks === 1 ? '' : 's'}` })
+  // The Gallery feeds the Bloom (2026-09-27): every flower on show makes every Bloom's seeds rarer.
+  if (galleryBoostOf(c.rarityTier) > 0) rows.push({ k: 'Boosts every Bloom', v: `Rare seeds +${Math.round(galleryBoostOf(c.rarityTier) * 100)}% for everyone` })
   // The crowding rule (design/communal-planters.md rule 4) is otherwise invisible until it
   // happens to you — KJ 2026-09-22 asked for it explained on the owner's own card. It's
   // conditional (only fires if a newcomer actually needs the slot), so this states the rule
