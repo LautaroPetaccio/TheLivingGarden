@@ -240,6 +240,10 @@ const BLOCKED_CLICK_COOLDOWN_MS = 750   // ms — min gap between repeated block
 // The ts guard prevents undoing a concurrent live update from another player.
 interface PendingWater { ts: number; prevWateredAt: number; wasTopUp: boolean }
 const pendingWaters = new Map<string, PendingWater>()
+/** Waters of mine the server has confirmed this session — the tutorial's water step watches
+ *  it rise, so the step completes on a replay too (the server's onboarding flag is one-way). */
+let myWaters = 0
+export function myWaterCount(): number { return myWaters }
 let initialLoadDone         = false
 let roomReady               = false
 
@@ -495,6 +499,19 @@ function applyDropVisibility(plantEntity: Entity): void {
   }
 }
 const dropInRange = new Set<Entity>()   // plants whose drop is close enough to render
+
+/** TEMP diagnostic (KJ 2026-09-27: "no water drops over the plants" until the bloom threshold) —
+ *  the test panel shows this live. dry = droopy plants; want = drop requested; range = within
+ *  DROP_RANGE; shown = the code believes it is on screen; glb = drop models loaded. */
+export function dropDiagnostics(): string {
+  let dry = 0, glb = 0
+  for (const [entity, pd] of engine.getEntitiesWith(PlantData)) {
+    if (!pd.isWatered) dry++
+    const d = waterDropMap.get(entity)
+    if (d !== undefined && GltfContainerLoadingState.getOrNull(d)?.currentState === LS_FINISHED) glb++
+  }
+  return `drops: dry ${dry} | want ${dropWanted.size} | range ${dropInRange.size} | shown ${dropShown.size} | glb ${glb}/${waterDropMap.size}${dropsSuppressed ? ' | SUPPRESSED' : ''}`
+}
 
 /** Perf test: force every drop off, regardless of range or gameplay state. */
 let dropsSuppressed = false
@@ -832,7 +849,7 @@ function enablePlantClick(entity: Entity) {
   const info = plantRegistry.get(entity)
   if (!info) return
   pointerEventsSystem.onPointerDown(
-    { entity: info.clickTarget, opts: { button: InputAction.IA_POINTER, hoverText: 'Water', maxDistance: POINTER_MAX_DIST } },
+    { entity: info.clickTarget, opts: { button: InputAction.IA_POINTER, hoverText: HOLD_WATERING_ENABLED ? 'Hold to water' : 'Water', maxDistance: POINTER_MAX_DIST } },
     () => {
       // Player-based reach gate — maxDistance above is camera-based and must stay
       // generous for mobile; this is the real "how far can I water from" limit.
@@ -1046,23 +1063,24 @@ function scheduleExpiry(entity: Entity, sessionTimestamp: number, delayMs: numbe
   }, delayMs)
 }
 
-/** Press on a plant. A tap waters at once; holding pours (see skillCheck.tsx): a just-right
- *  release adds watered time, too much and the plant is not watered at all. The can comes out
- *  on the press so the hold has a pose behind it. */
+/** Press on a plant to pour (skillCheck.tsx): a quick tap or too little does nothing (the meter
+ *  says "hold to pour"), a pour waters, a perfect one adds watered time, too much and the plant is
+ *  not watered. The can comes out on the press so the hold has a pose behind it. */
 function pourOnto(entity: Entity, plantId: string): void {
   if (!HOLD_WATERING_ENABLED) { waterPlant(entity, plantId); return }
   if (emoteActive || isHolding()) return
   if (PlantData.get(entity).isWatered && !expiryTell.has(entity)) { waterPlant(entity, plantId); return }   // its own "already watered" toast
   triggerWateringEmote(entity)
+  const at = Transform.getOrNull(entity)?.position ?? { x: 0, y: 0, z: 0 }
   beginHold((outcome) => {
+    if (outcome === 'tap') { stopWateringEmote(); return }   // no tap bypass (KJ 2026-09-27)
     if (outcome === 'over') {
       stopWateringEmote()
-      playWiltSound(entity)
-      showToast('Too much water! Let go sooner', TOAST_WATERED_MS, false)
+      playWiltSound(entity)   // (Notification pass 2026-09-27: the meter itself says "Too much water!" — no toast)
       return
     }
     waterPlant(entity, plantId, outcome === 'sweet', true)
-  })
+  }, { x: at.x, y: at.y, z: at.z })
 }
 
 function waterPlant(entity: Entity, plantId: string, sweet = false, fromHold = false) {
@@ -1097,7 +1115,7 @@ function waterPlant(entity: Entity, plantId: string, sweet = false, fromHold = f
   if (sweet) {   // just-right pour: the plant answers with a flourish
     const at = Transform.getOrNull(entity)?.position
     if (at) timers.setTimeout(() => { playMagicFXSound(); triggerSparkle(at) }, WATER_FX_MS)
-    showToast('Just right! Stays watered longer', TOAST_WATERED_MS, false)
+    // (Notification pass 2026-09-27: the meter shows "Just right!" — no toast)
   }
 
   // t=WATER_FX_MS — sound + ripple + light burst
@@ -1148,9 +1166,7 @@ function waterPlant(entity: Entity, plantId: string, sweet = false, fromHold = f
   room.send('waterPlant', { plantId, sweet })
   pendingWaters.set(plantId, { ts: now, prevWateredAt, wasTopUp: wasAlreadyWatered })
 
-  updateProgressText()
-  const _pct = Math.round((computeWateredCount() / TOTAL_PLANTS) * 100)
-  showToast(`Plant Watered! ${_pct}%`, TOAST_WATERED_MS, true)
+  updateProgressText()   // (Notification pass 2026-09-27: no "Plant Watered! 64%" toast — the plant perks up and the ring moves)
 
   scheduleExpiry(entity, now, plantExpiryMs(plantId))
 }
@@ -1664,7 +1680,9 @@ export function setupWateringSystem(): void {
     setBloomSparklePalette(bloomVariantById('classic').palette)   // back to the warm default for the next cycle
     setAmbientPalette(bloomVariantById('classic').palette)
     stopMoonlight()          // dawn breaks as the garden resets (no-op after a classic bloom)
-    startBloomFlower([...bloomContributors])  // attach hand flower to contributors — must run BEFORE clear()
+    // Contributor hand-rose RETIRED (KJ 2026-09-27): after a Bloom it owned the hand, so you
+    // could not hold a seed or a flower, and it no longer meant anything. The test-panel button
+    // (forceStartBloomFlower) still shows it for comparison. — must run BEFORE clear()
     bloomContributors.clear()
     resetAllPlants()         // stops bloom, resets visuals + audio via endBloom()
     updateSceneAssets()      // endBloom() cleared isBloomActive() — switch center text immediately
@@ -1706,6 +1724,7 @@ export function setupWateringSystem(): void {
     //   D  !pending &&  wasWatered = remote player topped up an already-watered plant
     const pending = pendingWaters.get(data.plantId)
     pendingWaters.delete(data.plantId)
+    if (pending && data.isWatered) myWaters++   // tutorial: my own water, server-confirmed
 
     // Update "Watered by" label + accumulate bloom contributors
     const wateredByLabel = wateredByLabelMap.get(entity)

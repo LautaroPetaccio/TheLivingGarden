@@ -84,12 +84,12 @@ export const INFO_SECTIONS: ReadonlyArray<InfoSection> = [
     ],
   },
   {
-    title: 'The Avenue',
+    title: 'The Rare Plant Gallery',
     lines: [
-      `${rarityTierById(AVENUE_MIN_TIER).name} flowers and up can stand on show along the entrance wall, for every visitor to see.`,
-      AVENUE_SLOT_CAP > 0 ? `You can have up to ${AVENUE_SLOT_CAP} on show at once.` : 'No limit on how many you show — a spare spot on the wall is all it takes.',
-      'Tap an empty spot on the wall to put one of your flowers there, or an occupied one to see who grew it, who watered it, and how long it has stood.',
-      `If the Avenue is full and you're away ${Math.round(PLANTER_TIDY_MIN_AWAY_MS / 3_600_000)}h+, the longest-away flower moves home to make room for someone new — never lost.`,
+      `${rarityTierById(AVENUE_MIN_TIER).name} flowers and up can stand on show in the Rare Plant Gallery, for every visitor to see.`,
+      AVENUE_SLOT_CAP > 0 ? `You can have up to ${AVENUE_SLOT_CAP} on show at once.` : 'No limit on how many you show — a spare stand is all it takes.',
+      'Tap an empty stand to put one of your flowers there, or an occupied one to see who grew it, who watered it, and how long it has stood.',
+      `If the Gallery is full and you're away ${Math.round(PLANTER_TIDY_MIN_AWAY_MS / 3_600_000)}h+, the longest-away flower moves home to make room for someone new — never lost.`,
     ],
   },
 ]

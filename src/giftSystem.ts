@@ -128,9 +128,21 @@ function setHand(address: string, flower: string, rarityTier: number, seedTier: 
   buildHand(address, flower, rarityTier, seedTier, false)
 }
 
+/** `removeEntityWithChildren` walks the Transform tree starting AT the root, so it removes NOTHING
+ *  when the root has no Transform — and an AvatarAttach anchor doesn't have one. Every replaced hand item stayed
+ *  on the hand (KJ 2026-09-27: the seed from load-in and a shelf flower at once), and a departed
+ *  player's tag stayed in the scene.
+ *  Remove the Transform children (and their subtrees), then the anchor itself. */
+function removeAnchor(root: Entity): void {
+  const kids: Entity[] = []
+  for (const [e, t] of engine.getEntitiesWith(Transform)) if (t.parent === root) kids.push(e)
+  for (const k of kids) engine.removeEntityWithChildren(k)
+  engine.removeEntity(root)
+}
+
 function removeHand(address: string): void {
   const old = hands.get(address)
-  if (old !== undefined) { engine.removeEntityWithChildren(old); hands.delete(address) }
+  if (old !== undefined) { removeAnchor(old); hands.delete(address) }
 }
 
 function buildHand(address: string, flower: string, rarityTier: number, seedTier: number, mine: boolean): void {
@@ -191,6 +203,20 @@ export function syncMyHand(): void {
 /** Every frame, not just on the scan tick: an item must vanish the frame the hand is taken. */
 function handArbiterSystem(): void { syncMyHand() }
 
+/** TEMP diagnostic (KJ 2026-09-27: "the seed and the flower on my own avatar"). `attached` counts
+ *  every right-hand attachment on MY avatar (mine, the Bloom rose, and any built for my address
+ *  on the other-player path) — anything above 1 is the bug, and the rest says which path. */
+export function handDiagnostics(): string {
+  const me = localAddress()
+  let attached = 0
+  for (const [, a] of engine.getEntitiesWith(AvatarAttach)) {
+    if (a.anchorPointId !== AvatarAnchorPointType.AAPT_RIGHT_HAND) continue
+    if (!a.avatarId || a.avatarId.toLowerCase() === me) attached++
+  }
+  const want = myHandArgs ? (myHandArgs.flower || `seed${myHandArgs.seedTier}`) : 'none'
+  return `hand: me ${me ? me.slice(0, 6) : 'NONE'} | attached ${attached} | mine ${hands.has(me) ? 1 : 0} | can ${isWateringEmoteActive() ? 1 : 0} rose ${isBloomFlowerActive() ? 1 : 0} | want ${want} | entries ${hands.size}`
+}
+
 function createTag(address: string): Entity {
   const parent = engine.addEntity()
   AvatarAttach.create(parent, { avatarId: address, anchorPointId: AvatarAnchorPointType.AAPT_POSITION })
@@ -221,7 +247,7 @@ function tagScanSystem(dt: number): void {
   }
   for (const [address, parent] of tags) {
     if (present.has(address)) continue
-    engine.removeEntityWithChildren(parent)
+    removeAnchor(parent)
     tags.delete(address)
   }
 }

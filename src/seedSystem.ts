@@ -63,7 +63,6 @@ import {
 } from './shared/config'
 import { showToast, showMoment } from './notifications'
 import { triggerSparkle } from './sparkleSystem'
-import { getPouch } from './playerInventory'
 import { setupGoldenSeed } from './goldenSeed'
 import { playSfx } from './sounds'
 
@@ -188,6 +187,17 @@ interface Seed {
 }
 
 const seeds = new Map<string, Seed>()   // seedId → live seed
+
+/** Tutorial: where the nearest live seed lands (its resting spot, so the trail points at the
+ *  seed rather than the Bloom it fell from — KJ 2026-09-27). Null when none are out. */
+export function nearestSeedPos(from: { x: number; z: number }): { x: number; z: number } | null {
+  let best: { x: number; z: number } | null = null, bestSq = Infinity
+  for (const s of seeds.values()) {
+    const sq = (s.baseX - from.x) ** 2 + (s.baseZ - from.z) ** 2
+    if (sq < bestSq) { bestSq = sq; best = { x: s.baseX, z: s.baseZ } }
+  }
+  return best
+}
 
 // ---------------------------------------------------------------
 // Spawning / despawning
@@ -484,9 +494,12 @@ export function setupSeedSystem(): void {
       // Every catch says what it was and where it went (KJ 2026-09-22 playtest 2: seeds
       // should read as coming from the bloom and piling up). pouchUpdate lands before
       // seedGathered on the wire, so the store already counts this one.
-      const tierName = rarityTierById(data.rarityTier).name
-      const total = getPouch().reduce((a, n) => a + n, 0)
-      showToast(`Caught ${withArticle(tierName)} seed - ${total} in your pouch`, TOAST_GATHER_MS, false, rarityTierById(data.rarityTier).seedColor)
+      // Notification pass 2026-09-27: a Common catch is the chime and the chip ticking up; only Rare and better get
+      // a line, because that one is worth stopping for.
+      if (data.rarityTier >= 2) {
+        const tier = rarityTierById(data.rarityTier)
+        showToast(`Caught ${withArticle(tier.name)} seed!`, TOAST_GATHER_MS, false, tier.seedColor)
+      }
     }
   })
 

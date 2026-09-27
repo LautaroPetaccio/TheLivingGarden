@@ -23,11 +23,11 @@ import { engine, timers } from '@dcl/sdk/ecs'
 import { getPouch, getPouchHint, notePouchOpened } from './playerInventory'
 import { startFpsMeter, getFps, getTestPotCount } from './potStressTest'
 import { SeedMenuUi, toggleSeedMenu, isSeedMenuOpen } from './seedMenu'
-import { BloomFinaleUi } from './bloomFinale'
+import { BloomFinaleUi, isBloomFinaleShowing } from './bloomFinale'
 import { DiscoveryCardUi, MilestoneCardUi } from './discoveryCard'
 import { HoldMeterUi } from './skillCheck'
 import { InfoPanelUi, toggleInfo, isInfoOpen } from './infoPanel'
-import { AvenueCardUi } from './avenueCard'
+import { AvenueCardUi, isAvenueCardOpen } from './avenueCard'
 import { TOTAL_PLANTS, BLOOM_THRESHOLD, WATERED_EXPIRY_MS, BLOOM_RESET_DELAY_MS, decayFactor, SHOW_DEV_OVERLAY } from './shared/config'
 
 // ---------------------------------------------------------------
@@ -92,6 +92,23 @@ const momentActive = () => momentLife > 0 && Date.now() - momentStart < momentLi
 export function showMoment(title: string, sub: string, ms: number): void {
   momentTitle = title; momentSub = sub; momentStart = Date.now(); momentLife = ms
 }
+
+// Tutorial card — centre screen, like the bloom line (KJ 2026-09-27: nobody noticed the top
+// pill). onboarding.ts owns the flow and the button handlers; this only draws what it is given.
+/** `celebrate` = the short success beat after a step is done: green title, no buttons. */
+export interface CoachCard { step: number; of: number; title: string; body: string; primary?: string; skip?: boolean; celebrate?: boolean }
+export interface CoachActions { close: () => void; skip: () => void; end: () => void; primary: () => void; tutorial: () => void }
+let coach: CoachCard | null = null
+let coachActions: CoachActions | null = null
+export function setCoach(card: CoachCard | null): void { coach = card }
+export function registerCoachActions(actions: CoachActions): void { coachActions = actions }
+/** While the tutorial runs the "This bloom" summary stays hidden (KJ 2026-09-27: distracting). */
+let tutorialActive = false
+export function setTutorialActive(on: boolean): void { tutorialActive = on }
+/** The card gives way to the bloom line and the "This bloom" summary (they share its spot), and to
+ *  any card or menu the player opened — the Avenue card sat on top of it (KJ 2026-09-27). */
+const coachUp = (): boolean => coach !== null && !momentActive() && !isBloomFinaleShowing()
+  && !isAvenueCardOpen() && !isSeedMenuOpen() && !isInfoOpen()
 
 export function showDailyLimit(text: string): void {
   dailyLimitText    = text
@@ -345,7 +362,7 @@ function uiComponent() {
   const title = isBloom ? (bannerBloomLabel || 'The Garden is in Full Bloom!')
               : isCount ? `Hold 80% for ${bannerCountdown} to wake the bloom`
               : 'Garden health'
-  const sub   = isBloom ? 'The flower is opening - seeds pour out when it does'
+  const sub   = isBloom ? 'The Bloom is open - seeds drift down over the next few minutes'
               : isCount ? `${pctLabel} - ${gardeners} gardener${gardeners === 1 ? '' : 's'} here, plants dry in ${dryMinutes()} min`
               : need > 0 ? `${pctLabel} - ${need} more plant${need === 1 ? '' : 's'} to wake the bloom`
               : `${pctLabel} - hold it to wake the bloom`
@@ -413,6 +430,14 @@ function uiComponent() {
       >
         <Label value="?" fontSize={fs(CHIP_FONT)} color={{ ...CREAM, a: 0.9 }} textAlign="middle-center" uiTransform={{ width: '100%', height: '100%' }} />
       </UiEntity>
+      {/* Tutorial — replays the guided walk, or brings back a card closed with X */}
+      <UiEntity
+        uiTransform={{ height: px(CHIP_H), margin: { left: px(GAP) }, padding: { left: px(20), right: px(20) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(CHIP_H / 2) }}
+        uiBackground={{ color: coach ? { r: 0.18, g: 0.49, b: 0.34, a: 0.95 } : DARK }}
+        onMouseDown={() => coachActions?.tutorial()}
+      >
+        <Label value="Tutorial" fontSize={fs(PILL_FONT)} color={{ ...CREAM, a: 0.9 }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
+      </UiEntity>
       </UiEntity>
 
       {/* ═════ BANNER — top centre, opens on change, alpha fade only ═════ */}
@@ -440,7 +465,8 @@ function uiComponent() {
       </UiEntity>
 
       {/* ═════ TOAST — under the banner, where the eyes already are ═════ */}
-      <UiEntity uiTransform={{ display: toastVisible ? 'flex' : 'none', positionType: 'absolute', position: { top: toastY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
+      {/* While the tutorial card holds that spot, toasts drop to just above the seed chip */}
+      <UiEntity uiTransform={{ display: toastVisible ? 'flex' : 'none', positionType: 'absolute', position: coachUp() ? { bottom: bottomPx + px(CHIP_H) + px(GAP), left: 0 } : { top: toastY, left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
         <UiEntity uiTransform={{ height: px(PILL_H), flexDirection: 'row', alignItems: 'center', padding: { left: px(PILL_PAD_X - 6), right: px(PILL_PAD_X) }, borderRadius: px(PILL_H / 2) }} uiBackground={{ color: DARK }}>
           <UiEntity uiTransform={{ width: px(26), height: px(26), margin: { right: px(10) } }} uiBackground={{ textureMode: 'stretch', texture: { src: glyph.src }, color: { ...glyph.tint, a: 1 } }} />
           <Label value={toastText} fontSize={fs(PILL_FONT)} color={{ ...(toastColor ?? CREAM), a: 1 }} textAlign="middle-center" uiTransform={{ height: '100%' }} />
@@ -477,7 +503,57 @@ function uiComponent() {
           </UiEntity>
         )
       })()}
-      <BloomFinaleUi px={px} fs={fs} />
+
+      {/* ═════ TUTORIAL CARD — centre screen; gives way to the bloom line while that is up ═════ */}
+      {coachUp() && coach && (() => {
+        const c = coach
+        // The body needs an EXPLICIT height: a heightless wrapped Label collapses to zero here, and
+        // its lines spill over the title and the buttons (KJ 2026-09-27 phone screenshot). Estimate
+        // the wrapped line count from the text length (~0.55 em per character) — a spare line is
+        // harmless, a missing one overlaps.
+        const cardW    = px(mobile ? 600 : 560)
+        const bodyFont = fs(mobile ? 18 : 20)
+        const bodyW    = cardW - px(28) * 2
+        const bodyLines = Math.max(1, Math.ceil((c.body.length * bodyFont * 0.55) / bodyW))
+        const bodyH    = Math.round(bodyLines * bodyFont * 1.3)
+        const btn = (label: string, onClick: () => void, strong = false) => (
+          <UiEntity key={label} uiTransform={{ height: px(44), padding: { left: px(18), right: px(18) }, margin: { left: px(6), right: px(6) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }}
+            uiBackground={{ color: strong ? { r: 0.18, g: 0.49, b: 0.34, a: 1 } : { r: 1, g: 1, b: 1, a: 0.1 } }}
+            onMouseDown={onClick}>
+            <Label value={label} fontSize={fs(16)} color={{ ...CREAM, a: strong ? 1 : 0.85 }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
+          </UiEntity>
+        )
+        return (
+          // Just under the banner's tallest state (KJ 2026-09-27: at 22% it covered the explorer's
+          // interaction prompt, which sits at the screen centre); the banner never overlaps it.
+          <UiEntity uiTransform={{ positionType: 'absolute', position: { top: topPx + px(122) + px(GAP), left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
+            <UiEntity uiTransform={{ width: cardW, flexDirection: 'column', alignItems: 'center', padding: { left: px(28), right: px(28), top: px(14), bottom: px(18) }, borderRadius: px(26) }} uiBackground={{ color: { r: 0.07, g: 0.063, b: 0.055, a: 0.9 } }}>
+              <UiEntity uiTransform={{ width: '100%', height: px(30), flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', flexShrink: 0 }}>
+                {/* Progress dots: done gold, current cream, to come faint */}
+                <UiEntity uiTransform={{ height: '100%', flexDirection: 'row', alignItems: 'center' }}>
+                  <Label value="Tutorial" fontSize={fs(14)} color={{ ...DIM, a: 0.8 }} textAlign="middle-left" textWrap="nowrap" uiTransform={{ height: '100%', margin: { right: px(10) } }} />
+                  {Array.from({ length: c.of }, (_, i) => {
+                    const done = i < c.step - 1 || (c.celebrate && i === c.step - 1)
+                    const now  = i === c.step - 1 && !done
+                    return <UiEntity key={`pip${i}`} uiTransform={{ width: px(10), height: px(10), margin: { right: px(5) }, borderRadius: px(5) }} uiBackground={{ color: done ? { ...GOLD, a: 1 } : now ? { ...CREAM, a: 0.9 } : { r: 1, g: 1, b: 1, a: 0.18 } }} />
+                  })}
+                </UiEntity>
+                <UiEntity uiTransform={{ width: px(34), height: px(30), alignItems: 'center', justifyContent: 'center', borderRadius: px(15) }} uiBackground={{ color: { r: 1, g: 1, b: 1, a: 0.08 } }} onMouseDown={() => coachActions?.close()}>
+                  <Label value="x" fontSize={fs(16)} color={{ ...DIM, a: 1 }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ width: '100%', height: '100%' }} />
+                </UiEntity>
+              </UiEntity>
+              <Label value={c.title} fontSize={fs(mobile ? 28 : 32)} color={c.celebrate ? { ...BAR_GREEN, a: 1 } : { ...GOLD, a: 1 }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: fs(mobile ? 40 : 44), flexShrink: 0 }} />
+              <Label value={c.body} fontSize={bodyFont} color={{ ...CREAM, a: 1 }} textAlign="middle-center" textWrap="wrap" uiTransform={{ width: '100%', height: bodyH, margin: { top: px(4), bottom: px(12) }, flexShrink: 0 }} />
+              <UiEntity uiTransform={{ display: c.celebrate ? 'none' : 'flex', height: px(44), flexDirection: 'row', justifyContent: 'center', flexShrink: 0 }}>
+                {c.primary ? btn(c.primary, () => coachActions?.primary(), true) : null}
+                {c.skip === false ? null : btn('Skip step', () => coachActions?.skip())}
+                {btn('End tutorial', () => coachActions?.end())}
+              </UiEntity>
+            </UiEntity>
+          </UiEntity>
+        )
+      })()}
+      {tutorialActive ? null : <BloomFinaleUi px={px} fs={fs} />}
       <AvenueCardUi px={px} fs={fs} mobile={mobile} maxH={Math.round(currentVirtualH * (1 - ins.top - ins.bottom)) - topPx - bottomPx} />
       <DiscoveryCardUi px={px} fs={fs} mobile={mobile} />
       <HoldMeterUi px={px} fs={fs} mobile={mobile} />

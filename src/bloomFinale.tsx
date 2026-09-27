@@ -56,6 +56,9 @@ function alpha(now: number): number {
   return Math.min(1, age / FADE_MS, left / FADE_MS)
 }
 
+/** True while the finale card is on screen — the tutorial card gives way to it (ui.tsx). */
+export function isBloomFinaleShowing(): boolean { return summary !== null && alpha(Date.now()) > 0.02 }
+
 export function BloomFinaleUi(props: { px: (n: number) => number; fs: (n: number) => number }) {
   if (!summary) return null
   const a = alpha(Date.now())

@@ -75,6 +75,7 @@ function groupDefs(): Array<{ id: string; names: string[] }> {
   defs.push({ id: 'DiscordButton', names: ['Discord Button'] }, { id: 'DiscordButton_2', names: ['Discord Button_2'] })
   defs.push({ id: 'PouchRack', names: ['PouchRack'] })   // the world seed rack (pouchRack.ts)
   defs.push({ id: 'FlowerShelf', names: ['FlowerShelf'] }, { id: 'AlmanacWall', names: ['AlmanacWall'] })   // collectionDisplay.ts
+  defs.push({ id: 'ExamTable', names: ['ExamTable'] })   // examTable.ts
   return defs
 }
 

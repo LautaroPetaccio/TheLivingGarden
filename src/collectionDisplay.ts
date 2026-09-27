@@ -115,9 +115,7 @@ function holdSlot(i: number): void {
   const g = fGroups[fPage * F_PAGE + i]
   if (!g) { showToast('Grow a flower in a planter and it appears here', TOAST_MS, false); return }
   holdFlower(g.lastIndex)
-  playSfx('seedCatch')
-  const sp = plantSpeciesById(g.flower)
-  showToast(`Holding your ${sp?.name ?? g.flower}`, TOAST_MS, false, rarityTierById(g.rarityTier).seedColor)
+  playSfx('seedCatch')   // (Notification pass 2026-09-27: no "Holding your …" toast — it is in your hand)
 }
 
 function refreshFlowerShelf(): void {

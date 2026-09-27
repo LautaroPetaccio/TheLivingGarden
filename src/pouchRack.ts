@@ -122,8 +122,7 @@ function holdTier(tier: number): void {
   if (count <= 0) { showToast(`No ${name} seeds yet - the Bloom drops them`, TOAST_MS, false); return }
   setPreferredTier(tier)
   holdSeed(tier)
-  playSfx('seedCatch')
-  showToast(`Holding ${withArticle(name)} seed`, TOAST_MS, false, rarityTierById(tier).seedColor)
+  playSfx('seedCatch')   // (Notification pass 2026-09-27: no "Holding a Rare seed" toast — it is in your hand)
   lastKey = ''   // repaint now
 }
 

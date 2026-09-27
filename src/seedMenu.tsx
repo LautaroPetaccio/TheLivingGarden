@@ -354,7 +354,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       {/* ── FLOWERS TAB */}
       <UiEntity uiTransform={{ display: tab === 'flowers' ? 'flex' : 'none', width: '100%', flexDirection: 'column' }}>
         <Label value={`${getFlowers().length} kept - ${speciesFound}/${PLANT_SPECIES.length} species discovered`} fontSize={fs(14)} color={DIM} textAlign="middle-left" textWrap="nowrap" uiTransform={{ width: '100%', height: fs(26), margin: { top: px(8), bottom: px(4) } }} />
-        <Label value={avenueSlot === null ? '' : eligible.length > 0 ? `${eligible.length} of your flowers can go on the Avenue` : `None of your flowers qualify yet — ${rarityTierById(AVENUE_MIN_TIER).name} and up only`} fontSize={fs(14)} color={CREAM} textAlign="middle-left" textWrap="wrap" uiTransform={{ display: avenueSlot !== null ? 'flex' : 'none', width: '100%', height: fs(26), margin: { bottom: px(4) } }} />
+        <Label value={avenueSlot === null ? '' : eligible.length > 0 ? `${eligible.length} of your flowers can go in the Gallery` : `None of your flowers qualify yet — ${rarityTierById(AVENUE_MIN_TIER).name} and up only`} fontSize={fs(14)} color={CREAM} textAlign="middle-left" textWrap="wrap" uiTransform={{ display: avenueSlot !== null ? 'flex' : 'none', width: '100%', height: fs(26), margin: { bottom: px(4) } }} />
 
         {/* rarity filters — each on its own colour, so the row doubles as the legend */}
         <UiEntity uiTransform={{ display: ownedTiers.length > 1 ? 'flex' : 'none', width: '100%', flexDirection: 'row', flexWrap: 'wrap', margin: { top: px(6) } }}>
@@ -395,17 +395,17 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
         <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: sel && sel.rarityTier >= AVENUE_MIN_TIER ? MOSS : RAISED }}
           onMouseDown={() => {
             if (!sel) return
-            if (sel.rarityTier < AVENUE_MIN_TIER) { showToast(`The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`, 4_000, false); return }
+            if (sel.rarityTier < AVENUE_MIN_TIER) { showToast(`The Rare Plant Gallery is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`, 4_000, false); return }
             // Opened FROM a slot: straight in, that slot was the choice. Opened from the
             // pouch: arm it and let them tap the spot they want (KJ 2026-09-22).
             if (avenueSlot !== null) { displayOnAvenue(avenueSlot, sel.lastIndex) }
             else {
               armAvenuePlacement(sel.lastIndex)
-              showToast('Now tap the spot on the Avenue wall where you want it', 6_000, false)
+              showToast('Now tap the Gallery stand where you want it', 6_000, false)
             }
             selectedKey = ''; avenueSlot = null; open = false
           }}>
-          <Label value={avenueSlot ? 'Display here' : 'Avenue…'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
+          <Label value={avenueSlot ? 'Display here' : 'Gallery…'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
       </UiEntity>

@@ -275,7 +275,7 @@ function onTap(v: SlotView): void {
       room.send('displayFlower', { slotId: v.slotId, flowerIndex: idx })
       return
     }
-    if (held && idx !== null) showToast(`Your ${speciesName(held.flower)} is a ${rarityTierById(held.rarityTier).name} — the Avenue takes ${rarityTierById(AVENUE_MIN_TIER).name} and up`, TOAST_MS, false)
+    if (held && idx !== null) showToast(`Your ${speciesName(held.flower)} is a ${rarityTierById(held.rarityTier).name} — the Gallery takes ${rarityTierById(AVENUE_MIN_TIER).name} and up`, TOAST_MS, false)
     openSeedMenuForAvenue(v.slotId)
     return
   }
@@ -302,7 +302,7 @@ function createSlot(p: SlotPos & { id: string }): SlotView {
   MeshCollider.setBox(hit, ColliderLayer.CL_POINTER)   // the wall itself already blocks walking
   const v: SlotView = { slotId: p.id, pos: p, hit, plant: null, plantKey: '', labelText: '', owner: '', ownerName: '', flower: '', rarityTier: 0, since: 0, grownBy: '', openedAt: 0, helpers: [], giftedBy: '', looks: 0 }
   pointerEventsSystem.onPointerDown(
-    { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Avenue planter', maxDistance: TAP_DISTANCE } },
+    { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Gallery stand', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
   )
   return v

@@ -1,28 +1,30 @@
 // =============================================================
-// Bloom Garden v2 — Onboarding (CLIENT ONLY)
+// Bloom Garden v2 — Guided tutorial (CLIENT ONLY)
 //
-// Two stages, in the order the game actually allows:
-//   1. WATER  — taught at spawn. The only verb available immediately.
-//   2. PLANT  — sleeps until the player is actually holding a seed (seeds only
-//               fall from blooms), then points at a planter held for them and
-//               wears KJ's toon shell over it.
+// KJ 2026-09-27: one linear walk round the garden instead of a set of one-line hints —
+// nobody noticed the pill at the top. Each step is a centre-screen card (ui.tsx setCoach)
+// plus the chevron trail and a light beacon pointing at where to go:
+//   water → wake the Bloom → catch seeds → north arch → potting shed (seed rack) → your
+//   plot → tend → harvest → flower shelf → Walk of Fame → round the loop to the Bloom.
+// Every card has X (hide the card, keep the trail), Skip step and End tutorial; the
+// Tutorial button by the pouch brings a closed card back or replays the walk from step 1.
 //
-// Both stages draw the same thing: a row of chevrons running from the target
-// back toward the player, with a pulse travelling along it. The direction is
-// carried by MOTION, not by more geometry — 4 × 20 tris for the whole trail.
-// The bob is driven from this system's own tick, never a looping Tween (the
-// explorer writes every actively-tweened Transform back into the scene every
-// frame — that is what tanked scene tick fps in the 09-18 perf pass).
+// Steps finish on a CHANGE since the step began (a counter rising — my waters, my seeds,
+// my planters, my tends, my flowers), never on the server's one-way onboarding flags, so
+// a replay works for a veteran too. Walking steps finish on arrival; their trail follows
+// a route of arches (see routeTarget).
 //
-// Which stage is live is the SERVER's call, via onboardingState { watered,
-// planted } — persisted per wallet, sent on join and after each first.
+// The trail is a row of chevrons from the target back to the player with a pulse running
+// along it. The bob is driven from this system's own tick, never a looping Tween (the
+// explorer writes every actively-tweened Transform back into the scene every frame —
+// that is what tanked scene tick fps in the 09-18 perf pass).
 //
-// The gold shell highlight is DIFFERENT from the rest: it runs ALWAYS, independent of
-// `stage`, on every planter the player owns (boxSystem's myPlanters) — a returning
-// player who finished the tutorial ages ago still can't spot their own planter among 50+
-// look-alikes otherwise (KJ 2026-09-22). Onboarding-only extras (the reserved planter
-// while learning to plant, the empty Avenue slot while learning the Avenue) are layered
-// onto that same always-on list rather than fighting it for the shell pool.
+// The gold shell highlight is DIFFERENT from the rest: it runs ALWAYS, on every planter
+// the player owns (boxSystem's myPlanters) — a returning player can't spot their own
+// planter among ninety-six look-alikes otherwise (KJ 2026-09-22).
+//
+// Phase 1 (2026-09-27): progress lives in this session. The server's onboardingState
+// flags only decide whether a first-time player is dropped into the walk on join.
 //
 // ⚠️ Registered from index.ts AFTER setupWateringSystem(), which calls
 // room.clear() — a handler registered before that clear is silently wiped.
@@ -31,49 +33,67 @@
 import { engine, Transform, GltfContainer, VisibilityComponent, ColliderLayer, Entity, MeshRenderer, Material, MaterialTransparencyMode } from '@dcl/sdk/ecs'
 import { Quaternion, Vector3, Color4 } from '@dcl/sdk/math'
 import { room } from './shared/messages'
-import { PlantData } from './wateringSystem'
+import { PlantData, myWaterCount, getWateringStatus } from './wateringSystem'
 import { isBloomActive } from './bloomSystem'
-import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters, myPlanters, myGrowingStatus, myPlanterCount } from './boxSystem'
-import { getSeedCount } from './seedSystem'
+import { nearestFreePlanter, freePlanterPos, myOpenedPlanter, myOpenedPlanters, myPlanters, myGrowingStatus, myPlanterCount, myTendsTotal, myBedCentre } from './boxSystem'
+import { getSeedCount, nearestSeedPos } from './seedSystem'
 import { nearestFreeAvenueSlot } from './avenueSystem'
-import { getFlowers, gardenersHere, setPouchHint, registerPouchOpened, getAvenueSlotsFree, getArmedAvenueFlower, getPouch, getBoxCap } from './playerInventory'
-import { showPersistent, hidePersistent, showToast } from './notifications'
+import { getFlowers, getArmedAvenueFlower, getPouch, getBoxCap } from './playerInventory'
+import { hidePersistent, showMoment } from './notifications'
+import { setCoach, registerCoachActions, setTutorialActive } from './ui'
+import { playSfx } from './sounds'
+import { triggerSparkle } from './sparkleSystem'
+import { PROP_LAYOUT } from './shared/layout'
 import {
   ARROW_MODEL_SRC, ARROW_SCALE, ARROW_FORWARD_YAW, ARROW_STANDOFF, ARROW_GROUND_LIFT,
-  ARROW_BOB_AMPLITUDE, ARROW_BOB_PERIOD_MS,
-  ARROW_CHEVRON_MAX, ARROW_CHEVRON_SPACING, ARROW_WAVE_SPEED, ARROW_WAVE_LENGTH,
+  ARROW_BOB_AMPLITUDE, ARROW_CHEVRON_MAX, ARROW_CHEVRON_SPACING, ARROW_WAVE_SPEED, ARROW_WAVE_LENGTH,
   BEACON_HEIGHT, BEACON_RADIUS, BEACON_COLOR, BEACON_ALPHA, BEACON_INTENSITY,
   TOON_HIGHLIGHT_SRC, TOON_HIGHLIGHT_SCALE,
   ONBOARDING_REPICK_S, ONBOARDING_MAX_RANGE,
-  ONBOARDING_WATER_HINT, ONBOARDING_PLANT_HINT, ONBOARDING_HARVEST_HINT, ONBOARDING_GIFT_HINT,
-  ONBOARDING_POUCH_HINT, ONBOARDING_AVENUE_HINT, ONBOARDING_BLOOM_HINT, ONBOARDING_SEEDS_FALLING_HINT,
-  ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS,
-  ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS,
-  ONBOARDING_HARVEST_TOAST, ONBOARDING_HARVEST_TOAST_MS,
-  PLANTER_RESERVE_RETRY_S, AVENUE_MIN_TIER, AVENUE_ARROW_STANDOFF,
+  PLANTER_RESERVE_RETRY_S, AVENUE_ARROW_STANDOFF, BLOOM_CENTER, BLOOM_THRESHOLD, BLOOM_OPEN_MS,
+  ARCH_NORTH, ARCH_SHED, ARCH_SOUTH, ARCH_FAME, ARCH_FAME_SOUTH, ARCH_SOUTH_SOUTH,
+  TUTORIAL_ARRIVE_M, TUTORIAL_WAYPOINT_M, TUTORIAL_DONE_MS, TUTORIAL_TEXT, TutorialPoint,
 } from './shared/config'
 
-type Stage = 'none' | 'water' | 'bloom' | 'plant' | 'pouch' | 'harvest' | 'gift' | 'avenue'
+// ── Steps ─────────────────────────────────────────────────────
 
-// All four assume DONE until the server says otherwise, so a dropped message never
-// nags a veteran with a tutorial they finished long ago.
-let watered     = true
-let planted     = true
-let harvested   = true
-let gifted      = true
-let pouchOpened = true
-let avenueUsed  = true
-let hasSeeds = false
-let stage: Stage = 'none'
-let seedToastShown = false
+type StepId = 'water' | 'bloom' | 'seeds' | 'arch' | 'shed' | 'plot' | 'tend' | 'harvest' | 'shelf' | 'toFame' | 'fame' | 'loop'
+const STEPS: ReadonlyArray<StepId> = ['water', 'bloom', 'seeds', 'arch', 'shed', 'plot', 'tend', 'harvest', 'shelf', 'toFame', 'fame', 'loop']
+
+const RACK:  TutorialPoint = { x: PROP_LAYOUT['PouchRack'].x,   z: PROP_LAYOUT['PouchRack'].z }
+const SHELF: TutorialPoint = { x: PROP_LAYOUT['FlowerShelf'].x, z: PROP_LAYOUT['FlowerShelf'].z }
+const BLOOM: TutorialPoint = { x: BLOOM_CENTER.x, z: BLOOM_CENTER.z }
+/** The Bloom is a big thing to arrive at — the loop ends anywhere near it. */
+const BLOOM_ARRIVE_M = 8
+const BLOOM_TRAIL_BACK_M = 12
+let bloomTrailOn = true
+
+/** Walking steps: arches in the order walked, the step's destination last. */
+const ROUTES: Partial<Record<StepId, ReadonlyArray<TutorialPoint>>> = {
+  arch:   [ARCH_NORTH],
+  shed:   [ARCH_SHED, RACK],
+  shelf:  [ARCH_SHED, SHELF],
+  toFame: [ARCH_SHED, ARCH_NORTH, ARCH_SOUTH, ARCH_FAME],
+  loop:   [ARCH_FAME_SOUTH, ARCH_SOUTH_SOUTH, BLOOM],
+}
+
+// ── State ─────────────────────────────────────────────────────
+
+let active     = false
+let stepIdx    = 0
+let cardHidden = false
+let routeFloor = -1                 // index of the waypoint being walked to; -1 = pick the entry on the next tick
+let snap = { waters: 0, pouch: 0, planters: 0, tends: 0, flowers: 0 }
+
+// First-time players are dropped into the walk on join, once per session, off the server's flags.
+let autoStartDecided = false
+let endedThisSession = false
 
 let chevrons: Entity[] = []
 // Shells and beacons are POOLS, not singletons: a gardener at the planter cap can have
-// more than one flower standing open and wants every one of them marked, not just the
-// nearest (Fin 2026-09-21). The plant stage still only ever marks the one held for them.
+// more than one flower standing open and wants every one of them marked (Fin 2026-09-21).
 let shells:  Entity[] = []
 let beacons: Entity[] = []
-let beaconTargets: Vector3[] = []
 
 let target: Vector3 | null = null   // what the trail points at
 let heldBoxId = ''                  // planter the server is holding for us ('' = none)
@@ -81,6 +101,12 @@ let repickIn = 0
 let retryIn  = 0
 let elapsed  = 0
 let shellAccum = 0                  // the always-on highlight's own repick clock
+let wasBlooming = false
+let bloomSeenAt = 0                 // local ms the Bloom started (0 = not seen start, e.g. joined mid-bloom)
+
+const step = (): StepId => STEPS[stepIdx]
+const pouchTotal = (): number => getPouch().reduce((a, n) => a + n, 0)
+const flat = (a: { x: number; z: number }, b: { x: number; z: number }): number => Math.hypot(a.x - b.x, a.z - b.z)
 
 // ── Entities ──────────────────────────────────────────────────
 
@@ -137,7 +163,7 @@ function ensureBeacons(n: number): Entity[] {
   return beacons
 }
 
-/** Stand a column of light on each target. Created on first use; only ever moved. */
+/** Stand a column of light on each target. */
 function beaconsOn(targets: ReadonlyArray<Vector3>): void {
   const pool = ensureBeacons(targets.length)
   for (let i = 0; i < pool.length; i++) {
@@ -159,9 +185,8 @@ function showChevrons(visible: boolean): void {
   for (const e of chevrons) VisibilityComponent.getMutable(e).visible = visible
 }
 
-/** Wear the gold shell on these planters — the one you should plant in, or EVERY one of
- *  yours holding an opened flower. KJ 2026-09-20: the arrows point, but the highlight is
- *  what actually makes a planter findable among ninety-six of them. */
+/** Wear the gold shell on these planters. KJ 2026-09-20: the arrows point, but the
+ *  highlight is what actually makes a planter findable among ninety-six of them. */
 function shellsOnPlanters(ps: ReadonlyArray<{ x: number; z: number; rot: number }>): void {
   const pool = ensureShells(ps.length)
   for (let i = 0; i < pool.length; i++) {
@@ -174,22 +199,12 @@ function shellsOnPlanters(ps: ReadonlyArray<{ x: number; z: number; rot: number 
   }
 }
 
-function clearVisuals(): void {
-  // Shells are NOT cleared here — they're always-on now, independent of stage (see the
-  // module header). Clearing them on every stage transition would fight the always-on
-  // updater and flicker.
-  showChevrons(false)
-  showBeacons(false)
-  beaconTargets = []
-  hidePersistent()
-}
-
 // ── Targets ───────────────────────────────────────────────────
 
 /** Nearest plant that still needs water, as a COPY — the live Transform position
  *  keeps changing underneath us. */
-function nearestDroopyPlant(from: Vector3): Vector3 | null {
-  let best: Vector3 | null = null
+function nearestDroopyPlant(from: Vector3): Entity | null {
+  let best: Entity | null = null
   let bestSq = ONBOARDING_MAX_RANGE * ONBOARDING_MAX_RANGE
   for (const [entity, plant] of engine.getEntitiesWith(PlantData)) {
     if (plant.isWatered) continue
@@ -198,13 +213,35 @@ function nearestDroopyPlant(from: Vector3): Vector3 | null {
     const dx = p.x - from.x
     const dz = p.z - from.z
     const sq = dx * dx + dz * dz
-    if (sq < bestSq) { bestSq = sq; best = Vector3.create(p.x, p.y, p.z) }
+    if (sq < bestSq) { bestSq = sq; best = entity }
   }
   return best
 }
 
+/** The water step's trail stays on ONE plant. Re-picking the nearest dry plant every tick made
+ *  the arrows jump to the next plant the moment you watered (optimistically, before the server
+ *  confirmed and finished the step), and then jump again to the Bloom — "arrows reappeared
+ *  twice" (KJ 2026-09-27). Once the chosen plant is watered the trail simply goes away while the
+ *  step resolves; only if the step still has not finished after WATER_HOLD_MS (somebody else
+ *  watered it) does it pick another plant. */
+const WATER_HOLD_MS = 2_500
+let waterTarget: Entity | null = null
+let waterHeldSince = 0
+
+function waterStepTarget(p: Vector3, hold: boolean): Vector3 | null {
+  if (waterTarget !== null && PlantData.getOrNull(waterTarget)?.isWatered) {
+    if (!waterHeldSince) waterHeldSince = Date.now()
+    if (hold && Date.now() - waterHeldSince < WATER_HOLD_MS) return null
+    waterTarget = null
+  }
+  if (waterTarget === null) { waterTarget = nearestDroopyPlant(p); waterHeldSince = 0 }
+  const t = waterTarget !== null ? Transform.getOrNull(waterTarget)?.position : null
+  return t ? Vector3.create(t.x, t.y, t.z) : null
+}
+
 /** Keep a planter held for us, and return where it stands. Asks again when we have
- *  none, or when the one we held was taken/deleted in the meantime. */
+ *  none, or when the one we held was taken in the meantime. nearestFreePlanter steers to
+ *  the player's own bed first, then the lowest-numbered free bed. */
 function heldPlanter(from: Vector3, dt: number): Vector3 | null {
   retryIn -= dt
   if (heldBoxId) {
@@ -220,45 +257,42 @@ function heldPlanter(from: Vector3, dt: number): Vector3 | null {
   return null
 }
 
-// ── Avenue slot marker ───────────────────────────────────────
-//
-// A single arrow (KJ 2026-09-22: "wrong model" on the shell — "smartly reuse our arrow
-// model" instead), standing a short distance out from the empty slot and pointing back
-// at it — the same standoff-and-point-back geometry avenueSystem.ts's plaques use, just
-// with the tutorial arrow model instead of a sign.
-
-let avenueArrow: Entity | null = null
-
-function ensureAvenueArrow(): Entity {
-  if (avenueArrow === null) {
-    avenueArrow = engine.addEntity()
-    Transform.create(avenueArrow, { scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
-    GltfContainer.create(avenueArrow, {
-      src: ARROW_MODEL_SRC,
-      visibleMeshesCollisionMask: ColliderLayer.CL_NONE,
-      invisibleMeshesCollisionMask: ColliderLayer.CL_NONE,
-    })
-    VisibilityComponent.create(avenueArrow, { visible: false })
-  }
-  return avenueArrow
+/** Can the plot step actually plant? Needs a seed AND room under the planter cap — pointing
+ *  a capped player at a free planter is what produced KJ's conflicting toasts (2026-09-27). */
+function canPlant(): boolean {
+  return pouchTotal() > 0 && myPlanterCount() < getBoxCap()
 }
 
-function showAvenueArrow(slot: { x: number; y: number; z: number; rot: number } | null): void {
-  const e = ensureAvenueArrow()
-  VisibilityComponent.getMutable(e).visible = !!slot
-  if (!slot) return
-  const r = (slot.rot * Math.PI) / 180
-  const t = Transform.getMutable(e)
-  t.position = Vector3.create(slot.x + AVENUE_ARROW_STANDOFF * Math.sin(r), slot.y, slot.z + AVENUE_ARROW_STANDOFF * Math.cos(r))
-  t.rotation = Quaternion.fromEulerDegrees(0, (slot.rot + 180) % 360 + ARROW_FORWARD_YAW, 0)
+/** My seedling that is still growing, nearest first. */
+function myGrowingPlanter(from: Vector3): { x: number; z: number } | null {
+  const opened = new Set(myOpenedPlanters(from).map(b => b.boxId))
+  return myPlanters(from).find(b => !opened.has(b.boxId)) ?? null
+}
+
+/** Where a walking step's trail points. The route IS the path — arches in walking order — and
+ *  the straight lines between them are the only lines known to clear the walls, so a waypoint
+ *  is never skipped on distance alone. (KJ 2026-09-27: the old "cheapest way onto the route"
+ *  pick sent step 12 straight at the Bloom through the Walk of Fame wall, because going direct
+ *  cost less than going round by the arches.)
+ *  The walk joins at the nearest ARCH when the step starts (never the destination itself), then
+ *  moves on when you reach a waypoint, or once you are nearer the next one than it is. */
+function routeTarget(route: ReadonlyArray<TutorialPoint>, p: Vector3): TutorialPoint {
+  if (routeFloor < 0) {
+    routeFloor = 0
+    for (let i = 1; i < route.length - 1; i++) if (flat(p, route[i]) < flat(p, route[routeFloor])) routeFloor = i
+  }
+  while (routeFloor < route.length - 1) {
+    const cur = route[routeFloor], next = route[routeFloor + 1]
+    if (flat(p, cur) < TUTORIAL_WAYPOINT_M || flat(p, next) < flat(cur, next)) { routeFloor++; playSfx('tutorialWaypoint') }
+    else break
+  }
+  return route[routeFloor]
 }
 
 // ── The trail ─────────────────────────────────────────────────
 
 /** Lay the chevrons from `to` all the way back to the player's feet, every one aimed at
- *  `to`, with a pulse running along the row so the eye is pulled toward the target. The
- *  row spans the WHOLE distance: up to ARROW_CHEVRON_MAX chevrons at the nominal
- *  spacing, and beyond that the gaps stretch rather than the trail stopping short. */
+ *  `to`, with a pulse running along the row so the eye is pulled toward the target. */
 function drawTrail(player: Vector3, to: Vector3): void {
   const row = ensureChevrons()
   let dx = player.x - to.x
@@ -268,8 +302,6 @@ function drawTrail(player: Vector3, to: Vector3): void {
   const yaw = Math.atan2(-dx, -dz) * 180 / Math.PI + ARROW_FORWARD_YAW
   const rotation = Quaternion.fromEulerDegrees(0, yaw, 0)
 
-  // From the standoff out to the player's feet, never past them: standing on the target
-  // leaves a single chevron at the standoff.
   const span    = Math.max(0, len - ARROW_STANDOFF)
   const count   = Math.max(1, Math.min(ARROW_CHEVRON_MAX, Math.round(span / ARROW_CHEVRON_SPACING) + 1))
   const spacing = count > 1 ? span / (count - 1) : 0
@@ -279,8 +311,6 @@ function drawTrail(player: Vector3, to: Vector3): void {
     VisibilityComponent.getMutable(row[i]).visible = visible
     if (!visible) continue
     const out = ARROW_STANDOFF + spacing * i
-    // Fixed metres/second toward `to`, so the ripple reads the same on a 4 m trail and a
-    // 40 m one. Subtracting `out` makes it travel down the row toward the target.
     const phase = (elapsed * ARROW_WAVE_SPEED - out) / ARROW_WAVE_LENGTH
     const bob   = (Math.sin(phase * Math.PI * 2) + 1) * 0.5 * ARROW_BOB_AMPLITUDE
     const t = Transform.getMutable(row[i])
@@ -289,212 +319,289 @@ function drawTrail(player: Vector3, to: Vector3): void {
   }
 }
 
-// ── Stage selection ───────────────────────────────────────────
+// ── Avenue slot marker ───────────────────────────────────────
+// An arrow standing a short distance out from the nearest free Avenue slot while a flower
+// is armed from the menu (KJ 2026-09-22: reuse the arrow model, not the shell).
 
-function currentStage(): Stage {
-  if (!watered) return 'water'
-  // First water done, no seed yet: the seed comes from the bloom their watering earns (KJ
-  // 2026-09-22 playtest 2). Hint only — the ring already shows how far the garden is.
-  if (!planted && !hasSeeds) return 'bloom'
-  if (!planted && hasSeeds) return 'plant'
-  // Straight after the first planting: Fin 2026-09-21 never noticed the pouch existed, so
-  // the seeds and the whole flower collection behind it were invisible. No trail - the
-  // target is a HUD chip, not a place; the UI pulses it while this stage is live.
-  if (planted && !pouchOpened) return 'pouch'
-  // Only once their own flower is actually standing open in a planter.
-  if (!harvested && myOpenedPlanter({ x: 0, z: 0 }) !== null) return 'harvest'
-  // Gifting needs someone to give TO — never nag a player gardening alone.
-  if (harvested && !gifted && getFlowers().length > 0 && gardenersHere().length > 0) return 'gift'
-  // Lowest priority — a bonus once the core loop is already known. Only fires when it's
-  // actually actionable: a slot free AND something in My Flowers good enough for it.
-  if (!avenueUsed && getAvenueSlotsFree() > 0 && getFlowers().some(f => f.rarityTier >= AVENUE_MIN_TIER)) return 'avenue'
-  return 'none'
-}
+let avenueArrow: Entity | null = null
 
-function applyStage(): void {
-  const next = currentStage()
-  if (next === stage) return
-  stage = next
-  setPouchHint(stage === 'pouch')   // the HUD pulses the chip off this
-  repickIn = 0
-  retryIn  = 0
-  target   = null
-  clearVisuals()
-  if (stage === 'plant' && !seedToastShown) {
-    seedToastShown = true
-    showToast(ONBOARDING_SEED_TOAST, ONBOARDING_SEED_TOAST_MS)
+function showAvenueArrow(slot: { x: number; y: number; z: number; rot: number } | null): void {
+  if (avenueArrow === null) {
+    if (!slot) return
+    avenueArrow = engine.addEntity()
+    Transform.create(avenueArrow, { scale: Vector3.create(ARROW_SCALE, ARROW_SCALE, ARROW_SCALE) })
+    GltfContainer.create(avenueArrow, { src: ARROW_MODEL_SRC, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+    VisibilityComponent.create(avenueArrow, { visible: false })
   }
-  console.log(`[Onboarding] stage → ${stage}`)
+  VisibilityComponent.getMutable(avenueArrow).visible = !!slot
+  if (!slot) return
+  const r = (slot.rot * Math.PI) / 180
+  const t = Transform.getMutable(avenueArrow)
+  t.position = Vector3.create(slot.x + AVENUE_ARROW_STANDOFF * Math.sin(r), slot.y, slot.z + AVENUE_ARROW_STANDOFF * Math.cos(r))
+  t.rotation = Quaternion.fromEulerDegrees(0, (slot.rot + 180) % 360 + ARROW_FORWARD_YAW, 0)
 }
 
-// ── System ────────────────────────────────────────────────────
+// ── Flow ──────────────────────────────────────────────────────
 
-// ── Idle guide ────────────────────────────────────────────────
-// Playtest 2026-09-24: "it isn't clear what to do in the meantime". The stages above end
-// once you have done each thing once; after that the pill went blank. This keeps ONE line
-// on screen saying the next useful thing, in priority order. Re-asserted about once a
-// second because the watering system hides the shared pill on bloom start/reset.
-const IDLE_GUIDE_EVERY_S = 1
-let idleAccum = 0
+function enterStep(i: number): void {
+  stepIdx    = i
+  cardHidden = false
+  routeFloor = -1
+  waterTarget = null
+  waterHeldSince = 0
+  bloomTrailOn = true
+  repickIn   = 0
+  retryIn    = 0
+  target     = null
+  snap = { waters: myWaterCount(), pouch: pouchTotal(), planters: myPlanterCount(), tends: myTendsTotal(), flowers: getFlowers().length }
+  console.log(`[Tutorial] step ${i + 1}/${STEPS.length} → ${step()}`)
+}
 
-function idleGuide(dt: number, player: { x: number; z: number } | undefined): void {
-  idleAccum -= dt
-  if (idleAccum > 0) return
-  idleAccum = IDLE_GUIDE_EVERY_S
-  if (!player) return
-  const seeds = getPouch().reduce((a, n) => a + n, 0)
-  const growing = myGrowingStatus()
-  if (getSeedCount() > 0) {
-    showPersistent('The Bloom is dropping seeds - walk into them to catch them')
-  } else if (seeds > 0 && myPlanterCount() < getBoxCap() && nearestFreePlanter(player)) {
-    showPersistent(`You have ${seeds} seed${seeds === 1 ? '' : 's'} - tap a free planter to plant one`)
-  } else if (growing.count > 0) {
-    const s = Math.ceil(growing.nextMs / 1000)
-    const when = s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
-    showPersistent(`Your seed opens in ${when} - water plants, or help a neighbour's seedling`)
-  } else if (myOpenedPlanters(player).length > 0) {
-    hidePersistent()   // a flower is ready: the balloon and the gold planter already say so
-  } else {
-    showPersistent('Water plants to wake the Bloom - it rains seeds when it blooms')
+function start(i = 0): void {
+  active = true
+  setTutorialActive(true)
+  celebrate = null
+  hidePersistent()
+  enterStep(i)
+}
+
+function stop(): void {
+  active = false
+  setTutorialActive(false)
+  celebrate = null
+  target = null
+  heldBoxId = ''
+  setCoach(null)
+  showChevrons(false)
+  showBeacons(false)
+}
+
+// ── Payoff (KJ 2026-09-27: "we want each step to feel really satisfying") ──
+// A finished step gets a rising chime, a sparkle burst at your feet, and a short green beat on
+// the card (its dot turns gold) before the next step's card takes over. Skipping gets none of it.
+const CELEBRATE_MS = 2_800   // KJ 2026-09-27: 1.4 s was too short to enjoy
+const ACTION_STEPS: ReadonlySet<StepId> = new Set<StepId>(['water', 'bloom', 'seeds', 'plot', 'tend', 'harvest'])
+const PRAISE = ['Nice!', 'Lovely!', 'Well done!', 'Beautiful!', 'Perfect!']
+let celebrate: { until: number; step: number; title: string; body: string } | null = null
+
+function reward(): void {
+  const p = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (p) triggerSparkle({ x: p.x, y: p.y, z: p.z })
+}
+
+/** The step was DONE (not skipped): pay it off, then move on. */
+function completeStep(): void {
+  const last = stepIdx + 1 >= STEPS.length
+  playSfx(last ? 'tutorialDone' : 'tutorialStep')
+  // Action steps already have their own payoff (the watering splash, the seed catch, the
+  // planting drop, the flower opening) — a second sparkle on top read as "two things at once"
+  // (KJ 2026-09-27). The burst is for the walking steps, where arriving is otherwise silent.
+  if (!ACTION_STEPS.has(step())) reward()
+  if (!last) celebrate = { until: Date.now() + CELEBRATE_MS, step: stepIdx + 1, title: PRAISE[stepIdx % PRAISE.length], body: `${currentCardTitle()} - done` }
+  advance()
+}
+
+function currentCardTitle(): string { return TUTORIAL_TEXT[step()].title }
+
+function advance(): void {
+  if (stepIdx + 1 < STEPS.length) { enterStep(stepIdx + 1); return }
+  stop()
+  showMoment(TUTORIAL_TEXT.done.title, TUTORIAL_TEXT.done.body, TUTORIAL_DONE_MS)
+}
+
+function endTutorial(): void {
+  endedThisSession = true
+  stop()
+  showMoment('Tutorial ended', 'Tap Tutorial to walk it again', 3_500)
+}
+
+/** Is the current step finished? Every check is a change since the step began, or an
+ *  arrival — see the module header. */
+function stepDone(p: Vector3): boolean {
+  const s = step()
+  const route = ROUTES[s]
+  if (route) return flat(p, route[route.length - 1]) < (s === 'loop' ? BLOOM_ARRIVE_M : TUTORIAL_ARRIVE_M)
+  switch (s) {
+    case 'water':   return myWaterCount() > snap.waters
+    // A real Bloom and a real catch, even on a replay: seeds already in the pouch used to finish
+    // both at once and send a veteran straight to the nursery (KJ 2026-09-27). Skip step is the out.
+    case 'bloom':   return isBloomActive() || getSeedCount() > 0
+    case 'seeds':   return pouchTotal() > snap.pouch
+    case 'plot': {
+      if (canPlant()) return myPlanterCount() > snap.planters
+      const bed = plotLookTarget(p)
+      return !bed || flat(p, bed) < TUTORIAL_ARRIVE_M
+    }
+    // Tended once, or it is already open, or nothing of mine is growing to tend.
+    case 'tend':    return myTendsTotal() > snap.tends || myOpenedPlanter(p) !== null || myGrowingStatus().count === 0
+    case 'harvest': return getFlowers().length > snap.flowers || (myGrowingStatus().count === 0 && myOpenedPlanter(p) === null)
+    case 'fame':    return false   // finished by its "Got it" button
+    default:        return false
   }
 }
 
-function onboardingSystem(dt: number): void {
+/** A player who can't plant right now is shown their bed instead: theirs if they own
+ *  one, else one of their planters, else the planter they would be steered to. */
+function plotLookTarget(p: Vector3): { x: number; z: number } | null {
+  return myBedCentre() ?? myPlanters(p)[0] ?? nearestFreePlanter(p)
+}
+
+function countdown(ms: number): string {
+  const s = Math.ceil(ms / 1000)
+  return s >= 3600 ? `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m` : `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
+}
+
+/** The card for the current step. Growing steps fold the live countdown into the body. */
+function currentCard(p: Vector3): { title: string; body: string; primary?: string } {
+  const s = step()
+  if (s === 'plot' && !canPlant()) return TUTORIAL_TEXT.plotLook
+  // KJ 2026-09-27: "wake the bloom" read as confusing — say how many plants, not a percentage.
+  if (s === 'bloom') {
+    const need = Math.max(0, BLOOM_THRESHOLD - getWateringStatus().wateredCount)
+    return need > 0
+      ? { title: TUTORIAL_TEXT.bloom.title, body: `Water ${need} more plant${need === 1 ? '' : 's'} to start the Bloom. Watered plants dry out, so keep going!` }
+      : { title: 'Hold it!', body: 'That is enough - keep the plants watered and the Bloom opens in a moment.' }
+  }
+  // The seeds leave BLOOM_OPEN_MS after the trigger, once the flower is open — say so, or the
+  // wait reads as nothing happening.
+  if (s === 'seeds' && getSeedCount() === 0 && isBloomActive()) {
+    const left = bloomSeenAt ? Math.ceil((BLOOM_OPEN_MS - (Date.now() - bloomSeenAt)) / 1000) : 0
+    return { title: 'Wait for it...', body: left > 0 ? `The Bloom is opening - the first seed falls in ${left}s. Stay close!` : 'The Bloom is opening - the first seed falls any second. Stay close!' }
+  }
+  if (s === 'fame') return { ...TUTORIAL_TEXT.fame, primary: 'Got it' }
+  if (s === 'harvest' && myOpenedPlanter(p) === null) {
+    const g = myGrowingStatus()
+    return { title: TUTORIAL_TEXT.harvest.title, body: `Your seed opens in ${countdown(g.nextMs)} - tend it at each stage, or water the garden while you wait.` }
+  }
+  if (s === 'tend') {
+    const g = myGrowingStatus()
+    return g.count > 0 ? { title: TUTORIAL_TEXT.tend.title, body: `${TUTORIAL_TEXT.tend.body} Opens in ${countdown(g.nextMs)}.` } : TUTORIAL_TEXT.tend
+  }
+  return TUTORIAL_TEXT[s]
+}
+
+/** Where the trail points for the current step, or null for none. */
+function pickTarget(p: Vector3, dt: number): Vector3 | null {
+  const s = step()
+  const route = ROUTES[s]
+  if (route) { const t = routeTarget(route, p); return Vector3.create(t.x, 0, t.z) }
+  switch (s) {
+    // Steps 1 and 2 are BOTH "water plants", so both point at a plant. Step 2 used to point at the
+    // Bloom while its card said "water 12 more plants" — KJ 2026-09-27: "it wasn't clear if you're
+    // directing me to the plants to water or to the main bloom". Step 1 holds on its one plant
+    // (the step ends with that water); step 2 moves straight on to the next dry plant each time.
+    case 'water': return waterStepTarget(p, true)
+    case 'bloom': return waterStepTarget(p, false)
+    case 'seeds': {
+      // Once a seed is out, point at IT (KJ 2026-09-27: "arrows should connect to the seed, not
+      // the Bloom"); while waiting for the first one, at the Bloom it will fall from.
+      const seed = nearestSeedPos(p)
+      if (seed) return Vector3.create(seed.x, 0, seed.z)
+      // Hysteresis: hide inside BLOOM_ARRIVE_M, come back only past BLOOM_TRAIL_BACK_M, so the
+      // trail does not blink on and off while you walk round the edge of the Bloom.
+      const d = flat(p, BLOOM)
+      bloomTrailOn = bloomTrailOn ? d > BLOOM_ARRIVE_M : d > BLOOM_TRAIL_BACK_M
+      return bloomTrailOn ? Vector3.create(BLOOM.x, 0, BLOOM.z) : null
+    }
+    case 'plot': {
+      if (canPlant()) return heldPlanter(p, dt)
+      const b = plotLookTarget(p)
+      return b ? Vector3.create(b.x, 0, b.z) : null
+    }
+    case 'tend': { const g = myGrowingPlanter(p); return g ? Vector3.create(g.x, 0, g.z) : null }
+    case 'harvest': {
+      const o = myOpenedPlanter(p) ?? myGrowingPlanter(p)
+      return o ? Vector3.create(o.x, 0, o.z) : null
+    }
+    default: return null   // fame: you are already there
+  }
+}
+
+// ── Systems ───────────────────────────────────────────────────
+
+// (Notification pass 2026-09-27: the after-tutorial "idle guide" pill is gone. It sat at the
+// top of the screen at all times and was the main source of "excessive notifications" — the
+// Tutorial button is the way back to guidance now.)
+
+function tutorialSystem(dt: number): void {
   elapsed += dt
   const player = Transform.getOrNull(engine.PlayerEntity)?.position
 
-  // ── Always-on shell highlight — runs regardless of `stage`, including 'none' (a
-  // veteran with nothing left to learn), which is the whole point (see module header). ──
+  // When the Bloom went off, as seen here — the "wait for it" countdown runs from this.
+  const blooming = isBloomActive()
+  if (blooming && !wasBlooming) bloomSeenAt = Date.now()
+  if (!blooming) bloomSeenAt = 0
+  wasBlooming = blooming
+
+  // ── Always-on shell highlight — tutorial or not (see module header). ──
   shellAccum -= dt
   if (player && shellAccum <= 0) {
     shellAccum = ONBOARDING_REPICK_S
     const wanted: Array<{ x: number; z: number; rot: number }> = myPlanters(player)
-    if (stage === 'plant' && heldBoxId) {
+    if (active && step() === 'plot' && heldBoxId) {
       const p = freePlanterPos(heldBoxId)
       if (p) wanted.push({ x: p.x, z: p.z, rot: p.rot })
     }
     shellsOnPlanters(wanted)
-    // The Avenue slot gets its OWN marker, not the shell pool: shellsOnPlanters always
-    // plants its pool at ground level (y=0), which is already wrong for a wall cube at
-    // one of three different heights — and KJ 2026-09-22 also flagged the shell model
-    // itself as the wrong fit for a wall slot. An arrow (see ensureAvenueArrow) fixes both.
-    // Also while a flower is armed from the menu — the marker is then "a free spot", not
-    // a tutorial step, so it shows for veterans mid-placement too.
-    showAvenueArrow(stage === 'avenue' || getArmedAvenueFlower() !== null ? nearestFreeAvenueSlot(player) : null)
+    showAvenueArrow(getArmedAvenueFlower() !== null ? nearestFreeAvenueSlot(player) : null)
   }
 
-  if (stage === 'none') { idleGuide(dt, player); return }
-
-  // (Watering during a bloom is allowed since 2026-09-22, so the water stage no longer
-  // pauses for one — plants droop and carry drops under the spectacle too.)
-
+  if (!active) return
   if (!player) return
 
-  if (stage === 'gift' || stage === 'pouch' || stage === 'bloom') {
-    // No trail: gift's target is another player, who moves; pouch's is a HUD chip; bloom's
-    // is the whole garden. The line (plus, for pouch, the chip's own pulse) is the lesson.
-    showChevrons(false)
-    showBeacons(false)
-    showPersistent(stage === 'pouch' ? ONBOARDING_POUCH_HINT
-                 : stage === 'gift'  ? ONBOARDING_GIFT_HINT
-                 : isBloomActive()   ? ONBOARDING_SEEDS_FALLING_HINT : ONBOARDING_BLOOM_HINT)
-    return
-  }
-
-  if (stage === 'avenue') {
-    // No trail: the Avenue sits right where the garden starts, so a new player doesn't
-    // need walking to it — the shell (always-on block, above) is the whole lesson.
-    showChevrons(false)
-    showBeacons(false)
-    showPersistent(ONBOARDING_AVENUE_HINT)
-    return
-  }
-
   repickIn -= dt
-  if (stage === 'water') {
-    if (repickIn <= 0) {
-      repickIn = ONBOARDING_REPICK_S
-      target = nearestDroopyPlant(player)
-      beaconTargets = target ? [target] : []
-    }
-  } else if (stage === 'harvest') {
-    if (repickIn <= 0) {
-      repickIn = ONBOARDING_REPICK_S
-      // EVERY flower of theirs that is standing open gets a beacon; the trail walks them
-      // to the nearest, because they can only go to one at a time. (The shell is handled
-      // by the always-on block above — myPlanters already covers every opened one.)
-      const mine = myOpenedPlanters(player)
-      beaconTargets = mine.map(b => Vector3.create(b.x, 0, b.z))
-      target = mine.length > 0 ? Vector3.create(mine[0].x, 0, mine[0].z) : null
-    }
-  } else {
-    target = heldPlanter(player, dt)
-    beaconTargets = target ? [target] : []
+  if (repickIn <= 0) {
+    repickIn = ONBOARDING_REPICK_S
+    if (stepDone(player)) { completeStep(); if (!active) return }
+    // A bloom that ends with nothing caught sends the player back to wake the next one.
+    if (step() === 'seeds' && !isBloomActive() && getSeedCount() === 0 && pouchTotal() <= snap.pouch) enterStep(STEPS.indexOf('bloom'))
+    target = pickTarget(player, ONBOARDING_REPICK_S)
+    // No Skip on the last step (KJ 2026-09-27) — there is nothing to skip to; End tutorial stays.
+    if (celebrate && Date.now() >= celebrate.until) celebrate = null
+    if (!cardHidden) setCoach(celebrate
+      ? { step: celebrate.step, of: STEPS.length, title: celebrate.title, body: celebrate.body, celebrate: true }
+      : { step: stepIdx + 1, of: STEPS.length, skip: stepIdx < STEPS.length - 1, ...currentCard(player) })
   }
 
-  if (!target) { showChevrons(false); showBeacons(false); hidePersistent(); return }
-  drawTrail(player, target)
-  beaconsOn(beaconTargets)
-
-  // Re-assert every tick: the persistent pill is shared, and a bloom start or a garden
-  // reset calls hidePersistent() from the watering system.
-  showPersistent(stage === 'water' ? ONBOARDING_WATER_HINT : stage === 'harvest' ? ONBOARDING_HARVEST_HINT : ONBOARDING_PLANT_HINT)
+  // Close enough that the trail would only point at your feet: stand the beacon alone.
+  if (!target || flat(player, target) < 1.5) showChevrons(false)
+  else drawTrail(player, target)
+  if (target) beaconsOn([target])
+  else showBeacons(false)
 }
 
-/** Registered with playerInventory, so the HUD can report the first open without
- *  importing this module. Cheap to call again: the server ignores a step that is already
- *  true, and the local flag stops the stage without waiting for the round trip. */
-function markPouchOpened(): void {
-  if (pouchOpened) return
-  pouchOpened = true
-  room.send('markPouchOpened', {})
-  applyStage()
-}
-
-/** Test panel: wipe my record on the server so the whole tutorial replays. */
+/** Test panel: wipe my record on the server AND start the walk here and now. The join-time
+ *  auto-start decides once per session, so a reset alone never restarted it (KJ 2026-09-27:
+ *  worked on a fresh mobile account, not on desktop after a reset). */
 export function adminResetOnboarding(): void {
   room.send('adminResetOnboarding', {})
-}
-
-let watchAccum = 0
-function stageWatchSystem(dt: number): void {
-  watchAccum += dt
-  if (watchAccum < 1) return
-  watchAccum = 0
-  applyStage()
+  endedThisSession = false
+  start(0)
 }
 
 export function setupOnboarding(): void {
-  room.onMessage('onboardingState', (data) => {
-    // Stage 3 is a one-off beat, not a stage: the moment their first seed goes in, point
-    // them back at the verb that starts the whole loop again. Fires only on the
-    // false→true transition, so it never replays on a later join.
-    const justPlanted   = !planted && !!data.planted
-    const justHarvested = !harvested && !!data.harvested   // same one-off beat for the first harvest
-    watered     = !!data.watered
-    planted     = !!data.planted
-    harvested   = !!data.harvested
-    gifted      = !!data.gifted
-    pouchOpened = !!data.pouchOpened
-    avenueUsed  = !!data.avenueUsed
-    if (justPlanted) showToast(ONBOARDING_LOOP_TOAST, ONBOARDING_LOOP_TOAST_MS)
-    if (justHarvested) showToast(ONBOARDING_HARVEST_TOAST, ONBOARDING_HARVEST_TOAST_MS)
-    applyStage()
+  registerCoachActions({
+    close:    () => { playSfx('tutorialTap'); cardHidden = true; setCoach(null) },
+    skip:     () => { playSfx('tutorialTap'); celebrate = null; advance() },
+    end:      () => { playSfx('tutorialTap'); endTutorial() },
+    primary:  () => completeStep(),   // "Got it" counts as doing the step
+    // Brings a closed card back; with no walk running, starts one from step 1.
+    tutorial: () => { playSfx('tutorialTap'); if (active) { cardHidden = false; repickIn = 0 } else start(0) },
   })
-  room.onMessage('pouchUpdate', (data) => {
-    let total = 0
-    try { for (const n of JSON.parse(data.countsJson) as number[]) total += n } catch { return }
-    hasSeeds = total > 0
-    applyStage()
+  room.onMessage('onboardingState', (data) => {
+    // Only the first message decides — the server re-sends after every first, and a player
+    // who ended the walk must not be dropped back into it.
+    if (autoStartDecided) return
+    autoStartDecided = true
+    if (endedThisSession || active) return
+    if (!data.watered)        start(STEPS.indexOf('water'))
+    else if (!data.planted)   start(STEPS.indexOf('bloom'))
+    else if (!data.harvested) start(STEPS.indexOf('tend'))
   })
   room.onMessage('boxReserved', (data) => {
     heldBoxId = data.boxId
-    if (heldBoxId) console.log(`[Onboarding] planter ${heldBoxId} held for this gardener`)
+    if (heldBoxId) console.log(`[Tutorial] planter ${heldBoxId} held for this gardener`)
   })
-  // A box opening or a gardener arriving can start a stage, and neither sends
-  // onboardingState — so re-evaluate on a slow tick rather than only on messages.
-  registerPouchOpened(markPouchOpened)
-  engine.addSystem(stageWatchSystem)
-  engine.addSystem(onboardingSystem)
-  console.log(`[Onboarding] ready · onboardingState listeners=${room.listenerCount('onboardingState')}`)
+  engine.addSystem(tutorialSystem)
+  console.log(`[Tutorial] ready · onboardingState listeners=${room.listenerCount('onboardingState')}`)
 }

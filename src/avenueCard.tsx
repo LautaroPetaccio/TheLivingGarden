@@ -113,7 +113,7 @@ export function AvenueCardUi(props: { px: (n: number) => number; fs: (n: number)
   if (c.grownBy && c.grownBy !== c.ownerName) rows.push({ k: 'Grown by', v: c.grownBy })
   if (c.giftedBy) rows.push({ k: 'A gift from', v: c.giftedBy })
   if (c.openedAt) rows.push({ k: 'Opened', v: ago(c.openedAt) })
-  if (c.since) rows.push({ k: 'On the Avenue', v: `since ${ago(c.since)}` })
+  if (c.since) rows.push({ k: 'In the Gallery', v: `since ${ago(c.since)}` })
   if (c.helpers.length > 0) rows.push({ k: c.helpers.length === 1 ? 'Watered by' : `Watered by ${c.helpers.length}`, v: c.helpers.join(', ') })
   if (c.looks > 0) rows.push({ k: 'Admired by', v: `${c.looks} gardener${c.looks === 1 ? '' : 's'}` })
   // The crowding rule (design/communal-planters.md rule 4) is otherwise invisible until it
@@ -147,16 +147,22 @@ export function AvenueCardUi(props: { px: (n: number) => number; fs: (n: number)
           <Label value={tier.name} fontSize={fs(15)} color={c.rarityTier > 0 ? INK : CREAM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
 
-        {rows.map((r) => (
-          // No fixed height on the value: a long line (helper lists, the "Kept safe" rule)
-          // wrapped to more lines than fs(20) tall and bled into "Take it back" below it
-          // (KJ 2026-09-22 screenshot). Yoga sizes a heightless Label to its own wrapped
-          // text, so the row just grows instead of clipping.
-          <UiEntity key={r.k} uiTransform={{ width: '100%', flexDirection: 'row', alignItems: 'flex-start', margin: { bottom: px(6) } }}>
-            <Label value={r.k} fontSize={fs(13)} color={DIM} textAlign="top-left" textWrap="nowrap" uiTransform={{ width: '38%', height: fs(20) }} />
-            <Label value={r.v} fontSize={fs(13)} color={CREAM} textAlign="top-left" textWrap="wrap" uiTransform={{ width: '62%' }} />
-          </UiEntity>
-        ))}
+        {rows.map((r) => {
+          // The value needs an EXPLICIT height. Left heightless (2026-09-22 fix) it sized to its text
+          // on desktop, but the phone client collapses a heightless wrapped Label to zero and the
+          // "Kept safe" rule spilled over "Take it back" (KJ 2026-09-27 screenshot) — the same trap
+          // the tutorial card hit. Estimate the wrapped line count (~0.55 em per character).
+          const valueW = (px(props.mobile ? 560 : 400) - px(22) * 2) * 0.62
+          const font   = fs(13)
+          const lines  = Math.max(1, Math.ceil((r.v.length * font * 0.55) / valueW))
+          const h      = Math.max(fs(20), Math.round(lines * font * 1.3))
+          return (
+            <UiEntity key={r.k} uiTransform={{ width: '100%', height: h, flexDirection: 'row', alignItems: 'flex-start', margin: { bottom: px(6) }, flexShrink: 0 }}>
+              <Label value={r.k} fontSize={font} color={DIM} textAlign="top-left" textWrap="nowrap" uiTransform={{ width: '38%', height: fs(20) }} />
+              <Label value={r.v} fontSize={font} color={CREAM} textAlign="top-left" textWrap="wrap" uiTransform={{ width: '62%', height: h }} />
+            </UiEntity>
+          )
+        })}
 
         {/* Owner's action: take it back. Everyone else just closes. */}
         <UiEntity uiTransform={{ display: c.mine ? 'flex' : 'none', width: '100%', height: px(44), margin: { top: px(10) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: MOSS }}

@@ -46,16 +46,27 @@ const SEEDS_BY_CONTRIBUTORS     = [4, 5, 6, 7, 8, 10]            // TUNING — 1
 const RARE_MULT_BY_CONTRIBUTORS = [1, 1.4, 1.8, 2.2, 2.6, 3]     // TUNING — × SEED_RARE_AT_SOLO
 export const SEED_RARE_AT_SOLO  = 0.10      // TUNING — "mostly normal, occasionally rare"
 export const GUARANTEED_RARE_AT_CONTRIBUTORS = 4   // TUNING — one seed of tier ≥ Rare from here
-/** Press-and-hold watering (KJ 2026-09-24, replacing the timing bar). A tap waters as always.
- *  Holding fills a meter over HOLD_FILL_MS: release inside [HOLD_SWEET_LO, HOLD_SWEET_HI] and the
- *  plant stays watered HOLD_SWEET_BONUS longer; release past HOLD_OVER_AT (or let it fill) and it
- *  is too much water — the plant is NOT watered. The server applies the bonus; it only sees the flag. */
-/** Off since 2026-09-24 (KJ: "crap, and can be overridden with a tap"). pourOnto then waters on the tap, as before. */
-export const HOLD_WATERING_ENABLED = false
-export const HOLD_FILL_MS = 2_000          // TUNING
-export const HOLD_SWEET_LO = 0.5           // TUNING
-export const HOLD_SWEET_HI = 0.78          // TUNING
-export const HOLD_OVER_AT = 0.88           // TUNING
+/** Press-and-hold watering (skillCheck.tsx). The server applies HOLD_SWEET_BONUS; it only sees the flag. */
+/** Off 2026-09-24 (KJ: "crap, and can be overridden with a tap"); back ON 2026-09-27 as a real skill
+ *  check (KJ: "facing the right way with the camera and pressing for a random amount of time shown
+ *  on the screen"). There is NO tap bypass any more — a pour is the only way to water:
+ *    • the meter fills only while the camera faces the plant (within HOLD_AIM_CONE_DEG), and drains
+ *      at HOLD_DRAIN × the fill speed while you look away;
+ *    • the green window is RANDOM per pour — start in [HOLD_SWEET_MIN_AT, HOLD_SWEET_MAX_AT], width
+ *      in [HOLD_SWEET_W_MIN, HOLD_SWEET_W_MAX] — so a timing can't be memorised;
+ *    • let go below HOLD_MIN_POUR: too little, nothing happens; anywhere else before the red: watered;
+ *      in the green: a perfect pour (+HOLD_SWEET_BONUS watered time, streak +1); in the red
+ *      (HOLD_OVER_GAP past the green) or holding to full: too much, NOT watered. */
+export const HOLD_WATERING_ENABLED = true
+export const HOLD_FILL_MS       = 2_000   // TUNING — empty to full while facing the plant
+export const HOLD_MIN_POUR      = 0.18    // TUNING
+export const HOLD_SWEET_MIN_AT  = 0.35    // TUNING
+export const HOLD_SWEET_MAX_AT  = 0.7     // TUNING
+export const HOLD_SWEET_W_MIN   = 0.12    // TUNING
+export const HOLD_SWEET_W_MAX   = 0.2     // TUNING
+export const HOLD_OVER_GAP      = 0.08    // TUNING
+export const HOLD_AIM_CONE_DEG  = 35      // TUNING — generous: on a phone you tap the plant off-centre
+export const HOLD_DRAIN         = 0.6     // TUNING
 export const HOLD_SWEET_BONUS = 0.4        // TUNING — fraction of the plant's normal watered time added
 export const HOLD_SHOW_AFTER_MS = 250      // shorter than this is a plain tap: no meter
 /** A Bloom keeps the plants watered during it through the reset (2026-09-22). Playtest
@@ -486,39 +497,42 @@ export const BEACON_COLOR     = { r: 1, g: 0.85, b: 0.35 }
 export const BEACON_ALPHA     = 0.3
 export const BEACON_INTENSITY = 1.6
 
-/** Stage 1 line, shown under the banner until the server confirms the first water.
- *  Names the floating water-drop marker rather than the plant's pose: the markers are
- *  the affordance the GDD already commits to (§2, §6), they are on every plant that
- *  needs water, and they read the same on all 38 species and on a phone. */
-export const ONBOARDING_WATER_HINT = 'Tap a plant with a water drop'
-/** Stage 2 line, shown from the first seed until the first planting. Names the glowing
- *  planter as the NEAREST one rather than the only one: the player picks where their
- *  flower stands (KJ 2026-09-21, GDD 3.1 - planting is a world tap on a planter of your
- *  choosing), and the reservation is only there so the tutorial has something to point at. */
-export const ONBOARDING_PLANT_HINT = 'Tap any free planter to plant your seed - the glowing one is nearest'
-/** Between the first water and the first seed (KJ 2026-09-22 playtest 2: "the seed should come
- *  from the big bloom" — a starter grant was built and REVERSED the same evening). The hint
- *  names the goal and where seeds come from; the ring shows the progress. */
-export const ONBOARDING_BLOOM_HINT         = 'Keep watering - when the garden is healthy enough it blooms, and seeds fall for you to plant'
-/** Same stage while a bloom is running — the seeds are out right now. */
-export const ONBOARDING_SEEDS_FALLING_HINT = 'The garden is blooming - seeds are falling, walk through one to catch it'
-/** Stage 3 line, shown after the first planting until the seed pouch is opened once. */
-export const ONBOARDING_POUCH_HINT = 'Open your seed pouch below - your seeds and every flower you collect live in there'
-/** Stage 3 — fired once, the moment the first seed is planted: closes the loop by
- *  pointing the player back at the verb that starts the whole thing again. */
-export const ONBOARDING_LOOP_TOAST    = 'Planted! Now water the garden to start a bloom and collect more seeds'
-export const ONBOARDING_LOOP_TOAST_MS = 10_000
-/** First harvest: the three things a kept flower is FOR, in one line (KJ 2026-09-22). */
-export const ONBOARDING_HARVEST_TOAST    = 'Harvested! Open your pouch to hold it, gift it to a gardener, or put a Rare on the Avenue'
-export const ONBOARDING_HARVEST_TOAST_MS = 10_000
-/** Stage 4 — their own flower has opened and is standing in its planter. */
-export const ONBOARDING_HARVEST_HINT  = 'Your flower opened — tap it to keep it, or leave it on show'
-/** Stage 5 — shown only while another gardener is actually here. */
-export const ONBOARDING_GIFT_HINT     = 'Tap a gardener to give them one of your flowers'
-export const ONBOARDING_AVENUE_HINT   = 'You have a flower worthy of the Avenue - tap the glowing spot to put it on show'
-/** One-off toast when the first seed lands in the pouch. */
-export const ONBOARDING_SEED_TOAST = 'You caught a seed — plant it and it opens on a real-world timer'
-export const ONBOARDING_SEED_TOAST_MS = 7_000
+// ── Guided tutorial (KJ 2026-09-27) ──────────────────────────────────────────
+// One linear walk round the garden, each step a centre-screen card (the top pill went
+// unnoticed) with the chevron trail + beacon pointing at where to go. Every step can be
+// closed (X), skipped, or the whole tour ended; the bottom Tutorial button replays it.
+// Positions are world metres read off KJ's scene.glb (world = 8 - x, y, z + 24).
+export interface TutorialPoint { x: number; z: number }
+/** Arches KJ named in scene.glb (2026-09-27 export), centre of each opening. */
+export const ARCH_NORTH      = { x: 0.06,   z: 49.89 }   // garden → nursery
+export const ARCH_SHED       = { x: -17.24, z: 50.44 }   // nursery → potting shed
+export const ARCH_SOUTH      = { x: 31.89,  z: 49.21 }   // garden → Walk of Fame side
+export const ARCH_SOUTH_SOUTH = { x: 31.89, z: -1.21 }
+export const ARCH_FAME       = { x: 44.09,  z: 45.28 }   // into the Walk of Fame
+export const ARCH_FAME_SOUTH = { x: 44.09,  z: 2.56 }    // out of it, the far end
+/** A location step is done within this many metres (XZ) of its last waypoint. TUNING */
+export const TUTORIAL_ARRIVE_M   = 4
+/** Intermediate route waypoints count as passed within this. TUNING */
+export const TUTORIAL_WAYPOINT_M = 3
+export const TUTORIAL_DONE_MS    = 6_000   // the closing "you're set" moment
+
+/** The step cards, in order. `kind` says what finishes the step (onboarding.ts). */
+export const TUTORIAL_TEXT = {
+  water:   { title: 'Water the garden', body: 'Face a plant with a water drop, press and hold to pour, and let go in the green.' },
+  bloom:   { title: 'Wake the Bloom', body: 'Keep the garden above 80% and the giant flower in the centre bursts open.' },
+  seeds:   { title: 'Catch the seeds', body: 'A seed has landed - follow the arrows and walk into it to catch it.' },
+  arch:    { title: 'To the nursery', body: 'Follow the arrows through the arch - that is where seeds are grown.' },
+  shed:    { title: 'The potting shed', body: 'Your seeds live on this rack - the rarer ones glow.' },
+  plot:    { title: 'Your plot', body: 'Tap a free planter in your bed to plant a seed. It opens on a real-world timer.' },
+  plotLook:{ title: 'Your plot', body: 'This is your bed - your planters grow here. Plant a seed whenever you catch one.' },
+  tend:    { title: 'Tend your seedling', body: 'Tap your seedling to water it - each tend makes it grow faster.' },
+  harvest: { title: 'Harvest your flower', body: 'Your flower has opened! Tap it to keep it.' },
+  shelf:   { title: 'Your flowers', body: 'Every flower you harvest stands on this shelf. Hold one, or gift it to another gardener.' },
+  toFame:  { title: 'The Rare Plant Gallery', body: 'Follow the arrows through the arches to the Rare Plant Gallery.' },
+  fame:    { title: 'The Rare Plant Gallery', body: 'Only the rarest plants can go on display here. Tap a stand to display yours, or to learn about the one on show.' },
+  loop:    { title: 'Seed shower', body: 'Head back and water the roses again - every Bloom brings a new seed shower.' },
+  done:    { title: 'You know the garden', body: 'Tap Tutorial any time to walk it again' },
+} as const
 /** How long a tutorial planter is held for its player, and how often the client
  *  re-asks while it has no reservation (someone else may have taken the last one). */
 export const PLANTER_RESERVE_TTL_MS   = 4 * 60_000

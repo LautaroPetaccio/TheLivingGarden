@@ -22,7 +22,9 @@ import {
   forceStartBloomFlower,
   forceStopBloomFlower,
   getWateringStatus,
+  dropDiagnostics,
 } from './wateringSystem'
+import { handDiagnostics } from './giftSystem'
 import { isBloomActive } from './bloomSystem'
 import { getCanvasCalibration } from './ui'
 import { spawnTestPots, removeTestPots, getTestPotCount, getFps } from './potStressTest'
@@ -177,6 +179,14 @@ export function TestPanelUi() {
       {/* Canvas calibration — the phone has no console; read the numbers here */}
       {panelOpen && (
         <Label value={getCanvasCalibration()} fontSize={9} color={MUTED} uiTransform={{ width: '100%', height: 16, margin: { left: 14 } }} />
+      )}
+      {/* TEMP (2026-09-27): water-drop pipeline, while "no drops over the plants" is diagnosed */}
+      {panelOpen && (
+        <Label value={dropDiagnostics()} fontSize={11} color={WHITE} uiTransform={{ width: '100%', height: 18, margin: { left: 14 } }} />
+      )}
+      {/* TEMP (2026-09-27): what is in MY right hand, while "seed and flower at once" is diagnosed */}
+      {panelOpen && (
+        <Label value={handDiagnostics()} fontSize={11} color={WHITE} uiTransform={{ width: '100%', height: 18, margin: { left: 14 } }} />
       )}
 
       {/* ── Content ───────────────────────────────────────────── */}

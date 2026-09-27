@@ -254,6 +254,15 @@ export function myGrowingStatus(): { count: number; nextMs: number } {
   return { count, nextMs }
 }
 export function myPlanterCount(): number { return myBoxCount() }
+/** Tutorial: every tend I have given my own seedlings (server-confirmed, summed) — the step
+ *  watches it rise rather than trusting a one-off flag, so a replay works too. */
+export function myTendsTotal(): number { let n = 0; for (const v of views.values()) if (isMine(v)) n += v.tends; return n }
+/** Tutorial: the centre of the bed I own, or null if I have none yet. */
+export function myBedCentre(): { x: number; z: number } | null {
+  const me = localId()
+  const b = beds.find(b => bedOwner(b, bedInfo)?.owner === me)
+  return b ? { x: b.cx, z: b.cz } : null
+}
 function myBoxCount(): number { let n = 0; for (const v of views.values()) if (isMine(v)) n++; return n }
 
 // ---------------------------------------------------------------
@@ -290,7 +299,7 @@ function balloonTextFor(v: BoxView, now: number): string {
 /** Hover prompt for the one tap the box currently offers. */
 function hoverFor(v: BoxView): string {
   if (!v.owner) return 'Plant seed'
-  if (isMine(v)) return v.opened ? 'Harvest (or leave it on show)' : tendReady(v, Date.now()) ? 'Tend your seed' : 'Growing…'
+  if (isMine(v)) return v.opened ? 'Harvest' : tendReady(v, Date.now()) ? 'Tend your seed' : 'Growing…'
   if (v.opened) return `${v.ownerName}'s flower`
   return v.waters >= BOX_WATER_MAX ? 'Fully watered' : 'Water'
 }
@@ -764,7 +773,8 @@ export function demoRevealedFlowers(): void {
 // ---------------------------------------------------------------
 interface BedSign { bed: Bed; root: Entity; text: Entity; face: Entity; ring: Entity; text_: string; faceOwner: string; near: boolean }   // + a frame plane, never touched after creation
 const bedSigns: BedSign[] = []
-const BED_SIGN_Y     = 2.2
+// 3.2, was 2.2 (KJ 2026-09-27): the 1.3 m plaque spanned 1.55–2.85 m and sat on the balloons (up to ~1.9 m).
+const BED_SIGN_Y     = 3.2
 const BED_SIGN_RANGE = 20
 const BED_TEXT_FREE  = { r: 0.83, g: 0.82, b: 0.78, a: 1 }
 const BED_TEXT_MINE  = { r: 0.98, g: 0.78, b: 0.3, a: 1 }
@@ -1092,9 +1102,7 @@ export function setupBoxSystem(): void {
     // wasOpened=false for every planter already standing open, so an ungated branch
     // replays the whole beat on every rejoin. It was only a toast before; as a card it
     // would be a faceful of "you discovered" for flowers opened days ago.
-    if (live && !wasMine && isMine(v) && !v.opened) {
-      showToast('Seed planted — come back when it opens', TOAST_MS, false)
-    }
+    // (Notification pass 2026-09-27: no "Seed planted" toast — the seed drops in and the balloon's countdown starts)
   })
 
   setupGiftSystem()   // same post-room.clear() window as this system

@@ -1468,8 +1468,8 @@ async function returnAvenueFlower(r: AvenueRecord, why: 'recall' | 'tidy'): Prom
   flowers.push({ ...k, avenue: (k.avenue ?? 0) + 1 })
   void savePlayerJson(owner, 'flowers')
   const name = plantSpeciesById(k.flower)?.name ?? k.flower
-  if (why === 'recall') { void sendCollection(owner); sendNotice(owner, `Your ${name} is back in My flowers`); return }
-  const note = `The Avenue got busy while you were away — your ${name} was kept safe in My flowers (it keeps its Avenue mark)`
+  if (why === 'recall') { void sendCollection(owner); return }   // (Notification pass 2026-09-27: you took it back yourself — no echo)
+  const note = `The Gallery got busy while you were away — your ${name} was kept safe in My flowers (it keeps its Gallery mark)`
   console.log(`[Server] Avenue tidied ${r.slotId} (owner ${owner.slice(0, 8)}…, ${k.flower} tier ${k.rarityTier})`)
   if (isConnected(owner)) { sendNotice(owner, note); void sendCollection(owner) }
   else { (await loadKeptSafe(owner)).push(note); void savePlayerJson(owner, 'keptSafe') }
@@ -1992,8 +1992,7 @@ export async function server(): Promise<void> {
     void saveBoxes()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
-    void markOnboarding(playerAddress, 'harvested')
-    sendNotice(playerAddress, `Harvested your ${plantSpeciesById(keepsake.flower)?.name ?? keepsake.flower} — your planter is free again`)
+    void markOnboarding(playerAddress, 'harvested')   // (Notification pass 2026-09-27: the discovery card already says what you harvested)
   })
 
   // ── Message: waterBox (Phase 4 — the quiet social loop) ─────
@@ -2034,7 +2033,7 @@ export async function server(): Promise<void> {
     console.log(`[Server] ${b.ownerName} tended ${b.boxId} (${b.tends}, -${Math.round(shave / 1000)}s)`)
     sendBox(b)
     void saveBoxes()
-    sendNotice(playerAddress, `You tended your seed - ${shaveText(shave)} sooner`)
+    sendNotice(playerAddress, `Your seed sprouts ${shaveText(shave)} sooner`)
   })
 
   // ── Message: giftFlower (Phase 4 — keepsakes) ───────────────
@@ -2071,20 +2070,20 @@ export async function server(): Promise<void> {
 
   // ── The Avenue: display / recall / inspect ───────────────────
   onRoomMessage<{ slotId: string; flowerIndex: number }>('displayFlower', async (data, playerAddress) => {
-    if (avenue.size === 0) { sendNotice(playerAddress, 'The Avenue is not open yet'); return }
+    if (avenue.size === 0) { sendNotice(playerAddress, 'The Rare Plant Gallery is not open yet'); return }
     const cap = avenueSlotCap()   // every slot when AVENUE_SLOT_CAP is 0 — then only a full wall stops you
-    if (avenueSlotsOwnedBy(playerAddress) >= cap) { sendNotice(playerAddress, cap === 1 ? 'You already have a flower on the Avenue — take it back first' : `You already have ${cap} flowers on the Avenue`); return }
+    if (avenueSlotsOwnedBy(playerAddress) >= cap) { sendNotice(playerAddress, cap === 1 ? 'You already have a flower in the Gallery — take it back first' : `You already have ${cap} flowers in the Gallery`); return }
     const flowers = await loadFlowers(playerAddress)
     const idx = Math.floor(data.flowerIndex)
     const f = flowers[idx]
     if (!f) { sendNotice(playerAddress, 'You no longer have that flower'); return }
-    if (f.rarityTier < AVENUE_MIN_TIER) { sendNotice(playerAddress, `The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`); return }
+    if (f.rarityTier < AVENUE_MIN_TIER) { sendNotice(playerAddress, `The Rare Plant Gallery is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`); return }
     let slot = data.slotId ? avenue.get(data.slotId) : undefined
     if (slot && slot.owner) { sendNotice(playerAddress, `${slot.ownerName}'s flower is on show there`); return }
     if (!slot) slot = [...avenue.values()].find(r => !r.owner)
     if (!slot) {
       const victim = avenueTidyCandidate()
-      if (!victim) { sendNotice(playerAddress, 'The Avenue is full right now — try again later'); return }
+      if (!victim) { sendNotice(playerAddress, 'The Gallery is full right now — try again later'); return }
       await returnAvenueFlower(victim, 'tidy')
       slot = avenue.get(victim.slotId)!
     }
@@ -2099,8 +2098,7 @@ export async function server(): Promise<void> {
     void saveAvenue()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
-    void markOnboarding(playerAddress, 'avenueUsed')
-    sendNotice(playerAddress, `Your ${plantSpeciesById(f.flower)?.name ?? f.flower} is on the Avenue with your name on it`)
+    void markOnboarding(playerAddress, 'avenueUsed')   // (Notification pass 2026-09-27: it is standing there with your name on it — no echo)
   })
 
   onRoomMessage<{ slotId: string }>('recallFlower', async (data, playerAddress) => {
@@ -2124,7 +2122,7 @@ export async function server(): Promise<void> {
   // Rare+ flowers so the Avenue can be playtested without a genuine harvest chain ──
   onRoomMessage<{ count: number }>('adminFillAvenue', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
-    if (avenue.size === 0) { sendNotice(address, 'The Avenue is not open yet'); return }
+    if (avenue.size === 0) { sendNotice(address, 'The Rare Plant Gallery is not open yet'); return }
     const empties = [...avenue.values()].filter(r => !r.owner)
     const n = Math.max(1, Math.min(empties.length, Math.floor(data?.count) || 8))
     const name = leaderboard.get(address)?.displayName ?? address.slice(0, 8) + '…'
@@ -2146,7 +2144,7 @@ export async function server(): Promise<void> {
   onRoomMessage<Record<string, never>>('adminClearAvenue', async (_data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const mine = [...avenue.values()].filter(r => r.owner === address)
-    if (mine.length === 0) { sendNotice(address, 'You have no Avenue slots to clear'); return }
+    if (mine.length === 0) { sendNotice(address, 'You have no Gallery stands to clear'); return }
     for (const r of mine) { avenue.set(r.slotId, emptySlot(r.slotId)); sendAvenue(avenue.get(r.slotId)!) }
     void saveAvenue()
     console.log(`[Server] [Test] cleared ${mine.length} Avenue slot(s) for ${address}`)

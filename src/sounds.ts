@@ -20,6 +20,12 @@ const SFX = {
   gift:       { src: 'assets/scene/Sounds/sfx/gift.mp3',       volume: 0.9 },
   flowerOpen: { src: 'assets/scene/Sounds/sfx/flowerOpen.mp3', volume: 0.9 },
   golden:     { src: 'assets/scene/Sounds/MagicFX.mp3',         volume: 1.0 },
+  // Tutorial (2026-09-27): same synthesised C-major bell family, WAV — no mp3 encoder on the
+  // build machine. Generator: empty for claude/tools/tutorial_sfx.py.
+  tutorialTap:      { src: 'assets/scene/Sounds/sfx/tutorialTap.wav',      volume: 0.7 },
+  tutorialWaypoint: { src: 'assets/scene/Sounds/sfx/tutorialWaypoint.wav', volume: 0.7 },
+  tutorialStep:     { src: 'assets/scene/Sounds/sfx/tutorialStep.wav',     volume: 0.9 },
+  tutorialDone:     { src: 'assets/scene/Sounds/sfx/tutorialDone.wav',     volume: 1.0 },
 } as const   // TUNING — volumes
 export type SfxName = keyof typeof SFX
 
