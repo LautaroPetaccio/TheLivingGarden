@@ -1,11 +1,11 @@
 // =============================================================
 // Bloom Garden v2 — The Avenue (CLIENT ONLY)
 //
-// design/communal-planters.md (2026-09-22): 72 wall planters along the entrance, holding
+// design/communal-planters.md (2026-09-22): 55 Hall of Fame stands (shared/hallOfFame.ts), holding
 // harvested Rare+ flowers. A gallery, not a garden — nothing grows or wilts here, the
 // flower is simply on show with its owner's name until they take it back (or the
-// crowding rule returns it to My flowers). The planters themselves are part of
-// scene.glb; this file only adds the tap box, the flower and a pooled plaque per slot.
+// crowding rule returns it to My flowers). The stands themselves are
+// hallOfFame.ts; this file only adds the tap box, the flower and a pooled plaque per slot.
 //
 // Server communication (server is authoritative; the client only requests):
 //   send    →  displayFlower { slotId, flowerIndex }   slotId '' = first free slot
@@ -19,18 +19,16 @@
 // =============================================================
 
 import {
-  engine, Entity, Transform, GltfContainer, GltfContainerLoadingState, GltfNodeModifiers,
-  ColliderLayer, MeshCollider, TextShape, Material, MaterialTransparencyMode,
+  engine, Entity, Transform, GltfContainer, ColliderLayer, MeshCollider, TextShape, Billboard, BillboardMode, Tween, EasingFunction,
   pointerEventsSystem, InputAction,
 } from '@dcl/sdk/ecs'
 import { Quaternion } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
 import {
-  AVENUE_POSITIONS, AVENUE_CUBE_FRONT_OFFSET, AVENUE_CUBE_HEIGHT, AVENUE_FLOWER_SCALE,
-  AVENUE_WILD_TINT, AVENUE_MIN_TIER, PLANT_SPECIES, PlantSpecies, plantSpeciesById, rarityTierById,
+  AVENUE_POSITIONS, AVENUE_CUBE_FRONT_OFFSET, AVENUE_PLAQUE_OUT, AVENUE_PLAQUE_DROP, AVENUE_FLOWER_SCALE,
+  AVENUE_MIN_TIER, plantSpeciesById, rarityTierById,
 } from './shared/config'
-import { PLANT_MATERIALS } from './plantMaterials'
 import { showToast } from './notifications'
 import { attachPlantVfx, detachPlantVfx } from './plantVfx'
 import { getHeld, heldFlowerIndex, registerAvenueApi, getArmedAvenueFlower, armAvenuePlacement } from './playerInventory'
@@ -49,23 +47,30 @@ const TOAST_MS       = 5_000
 // proud of the cube's front so it beats the wall's collider. It must NOT reach up into the
 // row above: rows are 0.65 m apart and the first cut (0.5 m box ABOVE each soil) overlapped
 // the cube above it, so the whole wall read as one target (KJ 2026-09-22).
-const HIT_ABOVE_SOIL = 0.18
+const HIT_ABOVE_SOIL = 0.6
 // Reaches 0.35 m FURTHER out than the cube's own face so a click aimed just in front of a
 // slot still lands (nothing blocks it — scene.glb's visible meshes carry no collision).
 // Width stays inside the 0.77 m column pitch and height inside the 0.65 m row pitch, so
 // neighbouring slots still can't steal each other's taps.
-const HIT_SIZE       = { x: 0.62, y: AVENUE_CUBE_HEIGHT + HIT_ABOVE_SOIL, z: AVENUE_CUBE_FRONT_OFFSET + 0.35 }
+// Hall of Fame stands: one box over the whole stand — the 1.6 m width, from 0.5 m behind the
+// soil centre to 0.35 m past the front wall, and from ~1 m up the wall to a plant's height.
+const HIT_BACK       = 0.5
+const HIT_SIZE       = { x: 1.4, y: 1.5, z: HIT_BACK + AVENUE_CUBE_FRONT_OFFSET + 0.35 }
 // Plaque on the cube's front face, just proud of it, centred on the face
-const PLAQUE_OUT     = AVENUE_CUBE_FRONT_OFFSET + 0.02
-const PLAQUE_DROP    = AVENUE_CUBE_HEIGHT / 2
-const PLAQUE_SIZE    = { w: 0.6, h: 0.26 }
-const PLAQUE_FONT    = 0.32   // TUNING — two short lines on a 0.6 × 0.26 board
+const PLAQUE_OUT     = AVENUE_PLAQUE_OUT
+const PLAQUE_DROP    = AVENUE_PLAQUE_DROP
+const PLAQUE_TILT    = 45   // the star panel is a 45° slope (measured from the module mesh)
+const PLAQUE_SIZE    = { w: 1.05, h: 0.34 }
+const PLAQUE_FONT    = 0.7   // TUNING — two short lines under the star
+// Empty stand: a floating "?" above the soil
+const QUESTION_LIFT  = 0.7
+const QUESTION_FONT  = 7
+const QUESTION_RANGE_M = 16    // a "?" pops in as you come within this of its stand, and drops out again past +3 m
+const QUESTION_POP_MS  = 350   // same ease as the plants' pop (boxSystem POP_MS / EASEOUTBACK)
 // Pooled like boxSystem's: signs.ts shows the nearest 8 within 9 m anyway
 const PLAQUE_POOL    = 8
 const PLAQUE_RANGE_M = 12
 const PLAQUE_SCAN_MS = 400
-const LS_FINISHED    = 4   // LoadingState (const enum in @dcl/ecs internals, not re-exported —
-                            // same local copy plantVfx.ts and boxSystem.ts each keep)
 
 // ---------------------------------------------------------------
 // State
@@ -96,11 +101,9 @@ interface Plaque { sign: Sign; slotId: string | null }
 const views   = new Map<string, SlotView>()
 const plaques: Plaque[] = []
 const synced  = new Set<string>()   // had the join snapshot — no sounds for that one
-// Wild-bloom GLBs waiting for their model to finish loading before the dim tint can be
-// applied (GltfNodeModifiers paths only resolve against an already-instantiated
-// hierarchy — same load-order gotcha plantVfx.ts documents for the rarity pulse).
-const pendingWildTint = new Map<Entity, PlantSpecies>()
 let   plaqueAccum = 0
+const questionShown = new Set<Entity>()   // "?" marks currently popped in
+let   questionAccum = 0
 
 function localId(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 function isMine(v: SlotView): boolean { return !!v.owner && v.owner.toLowerCase() === localId() }
@@ -153,60 +156,14 @@ function labelFor(v: SlotView): string {
   return `${v.ownerName}\n${tier}${speciesName(v.flower)}`
 }
 
-/** Deterministic filler species for an empty slot — same flower for every viewer, stable
- *  across reloads, no server round trip needed (it's decoration, not state). */
-function wildSpeciesFor(slotId: string): PlantSpecies {
-  let h = 0
-  for (let i = 0; i < slotId.length; i++) h = (h * 31 + slotId.charCodeAt(i)) >>> 0
-  return PLANT_SPECIES[h % PLANT_SPECIES.length]
-}
-
-/** Dim a wild bloom's real material so it never reads as someone's genuine display —
- *  same GltfNodeModifiers mechanism plantVfx.ts uses for the rarity pulse (a `Material`
- *  component on the GltfContainer entity itself does not retint an imported mesh). */
-function applyWildTint(e: Entity, species: PlantSpecies): void {
-  const mats = PLANT_MATERIALS[species.id]
-  if (!mats || mats.length === 0) return
-  GltfNodeModifiers.create(e, {
-    modifiers: mats.map(m => {
-      const tex = m.texture ? Material.Texture.Common({ src: m.texture }) : undefined
-      return {
-        // ONE mesh node → GLOBAL modifier (path ''): the single-root GLB gotcha
-        // plantVfx.ts documents (a named path fails to resolve on a single-mesh model).
-        path: mats.length === 1 ? '' : m.path,
-        material: { material: { $case: 'pbr' as const, pbr: {
-          texture: tex,
-          albedoColor: { r: m.color[0] * AVENUE_WILD_TINT, g: m.color[1] * AVENUE_WILD_TINT, b: m.color[2] * AVENUE_WILD_TINT, a: m.color[3] },
-          transparencyMode: m.blend ? MaterialTransparencyMode.MTM_ALPHA_BLEND : MaterialTransparencyMode.MTM_OPAQUE,
-          metallic: 0, roughness: 1,   // flat and matte — the opposite of a rarity pulse's shine
-        } } },
-      }
-    }),
-  })
-}
-
-/** Retry each pending wild bloom until its GLB has actually loaded (usually one or two
- *  ticks after spawn) — same wait plantVfx.ts's pulse does, just applied once, not budgeted. */
-function wildTintSystem(): void {
-  if (pendingWildTint.size === 0) return
-  for (const [e, species] of pendingWildTint) {
-    if (GltfContainerLoadingState.getOrNull(e)?.currentState !== LS_FINISHED) continue
-    applyWildTint(e, species)
-    pendingWildTint.delete(e)
-  }
-}
-
-/** Empty slot: a system-owned filler flower (design/communal-planters.md "wild bloom") —
- *  no attribution, dimmed, replaced the instant a player plants here. */
+/** Empty slot: a floating gold "?" over the soil — a stand waiting for a flower. Decoration
+ *  only, no attribution, removed the instant a player plants here. */
 function setWildBloom(v: SlotView): void {
-  const species = wildSpeciesFor(v.slotId)
-  const k  = species.scale * AVENUE_FLOWER_SCALE
-  const at = slotPoint(v.pos, species.offsetX * AVENUE_FLOWER_SCALE, species.offsetZ * AVENUE_FLOWER_SCALE)
-  const e  = engine.addEntity()
-  Transform.create(e, { position: { x: at.x, y: v.pos.y + species.baseYOffset * AVENUE_FLOWER_SCALE, z: at.z }, rotation: Quaternion.fromEulerDegrees(0, v.pos.rot, 0), scale: { x: k, y: k, z: k } })
-  GltfContainer.create(e, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  const e = engine.addEntity()
+  Transform.create(e, { position: { x: v.pos.x, y: v.pos.y + QUESTION_LIFT, z: v.pos.z }, scale: { x: 0.001, y: 0.001, z: 0.001 } })   // popped in by questionPopSystem
+  TextShape.create(e, { text: '?', fontSize: QUESTION_FONT, textColor: { r: 0.94, g: 0.78, b: 0.32, a: 0.9 }, outlineWidth: 0.2, outlineColor: { r: 0.09, g: 0.08, b: 0.07 } })
+  Billboard.create(e, { billboardMode: BillboardMode.BM_Y })
   v.plant = e
-  pendingWildTint.set(e, species)
 }
 
 function setPlantVisual(v: SlotView): void {
@@ -214,7 +171,7 @@ function setPlantVisual(v: SlotView): void {
   if (key === v.plantKey) return
   v.plantKey = key
   detachPlantVfx(`av:${v.slotId}`)
-  if (v.plant !== null) { pendingWildTint.delete(v.plant); engine.removeEntity(v.plant); v.plant = null }
+  if (v.plant !== null) { questionShown.delete(v.plant); engine.removeEntity(v.plant); v.plant = null }
   if (!v.owner) { setWildBloom(v); return }
   const species = plantSpeciesById(v.flower)
   if (!species) return
@@ -225,6 +182,29 @@ function setPlantVisual(v: SlotView): void {
   GltfContainer.create(e, { src: species.modelSrc, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
   attachPlantVfx(`av:${v.slotId}`, e, species.id, v.rarityTier, { x: v.pos.x, y: v.pos.y, z: v.pos.z })
   v.plant = e
+}
+
+/** Pop each empty stand's "?" in as the player nears it (like the plants), and let it go again
+ *  once they walk off, so it pops fresh next time. */
+function questionPopSystem(dt: number): void {
+  questionAccum += dt * 1_000
+  if (questionAccum < PLAQUE_SCAN_MS) return
+  questionAccum = 0
+  const me = Transform.getOrNull(engine.PlayerEntity)?.position
+  if (!me) return
+  for (const v of views.values()) {
+    const e = v.plant
+    if (v.owner || e === null || !Transform.has(e)) continue
+    const d = Math.hypot(v.pos.x - me.x, v.pos.z - me.z)
+    if (!questionShown.has(e) && d <= QUESTION_RANGE_M) {
+      questionShown.add(e)
+      Tween.setScale(e, { x: 0.001, y: 0.001, z: 0.001 }, { x: 1, y: 1, z: 1 }, QUESTION_POP_MS, EasingFunction.EF_EASEOUTBACK)
+    } else if (questionShown.has(e) && d > QUESTION_RANGE_M + 3) {
+      questionShown.delete(e)
+      Tween.deleteFrom(e)
+      Transform.getMutable(e).scale = { x: 0.001, y: 0.001, z: 0.001 }
+    }
+  }
 }
 
 function setLabel(v: SlotView, text: string): void {
@@ -242,7 +222,7 @@ function refresh(v: SlotView): void {
 function placePlaque(pl: Plaque, pos: SlotPos): void {
   const at = outward(pos, PLAQUE_OUT)
   moveSign(pl.sign, { x: at.x, y: pos.y - PLAQUE_DROP, z: at.z })
-  Transform.getMutable(pl.sign.root).rotation = Quaternion.fromEulerDegrees(0, (180 + pos.rot) % 360, 0)   // reader stands out in the avenue
+  Transform.getMutable(pl.sign.root).rotation = Quaternion.fromEulerDegrees(PLAQUE_TILT, (180 + pos.rot) % 360, 0)   // reader stands out in the avenue; pitched to lie on the slope
 }
 function freePlaque(pl: Plaque): void { pl.slotId = null; moveSign(pl.sign, { x: 0, y: -50, z: 0 }) }
 
@@ -317,7 +297,7 @@ function openCard(v: SlotView): void {
 
 function createSlot(p: SlotPos & { id: string }): SlotView {
   const hit = engine.addEntity()
-  const c = outward(p, HIT_SIZE.z / 2)   // box runs from the soil centre out past the cube front
+  const c = outward(p, (HIT_SIZE.z - 2 * HIT_BACK) / 2)   // box runs from HIT_BACK behind the soil centre out past the stand's front wall
   Transform.create(hit, { position: { x: c.x, y: p.y + HIT_ABOVE_SOIL - HIT_SIZE.y / 2, z: c.z }, rotation: Quaternion.fromEulerDegrees(0, p.rot, 0), scale: HIT_SIZE })
   MeshCollider.setBox(hit, ColliderLayer.CL_POINTER)   // the wall itself already blocks walking
   const v: SlotView = { slotId: p.id, pos: p, hit, plant: null, plantKey: '', labelText: '', owner: '', ownerName: '', flower: '', rarityTier: 0, since: 0, grownBy: '', openedAt: 0, helpers: [], giftedBy: '', looks: 0 }
@@ -334,7 +314,7 @@ function createSlot(p: SlotPos & { id: string }): SlotView {
 
 export function setupAvenueSystem(): void {
   if (AVENUE_POSITIONS.length === 0) return
-  for (let i = 0; i < PLAQUE_POOL; i++) plaques.push({ sign: createSign({ x: 0, y: -50, z: 0 }, 0, PLAQUE_SIZE, PLAQUE_FONT, true), slotId: null })
+  for (let i = 0; i < PLAQUE_POOL; i++) plaques.push({ sign: createSign({ x: 0, y: -50, z: 0 }, 0, PLAQUE_SIZE, PLAQUE_FONT, false), slotId: null })   // no backing panel: outlined text on the stand's own star panel
   for (const p of AVENUE_POSITIONS) views.set(p.id, createSlot(p))
 
   room.onMessage('avenueState', (data) => {
@@ -360,7 +340,7 @@ export function setupAvenueSystem(): void {
     recall:  (slotId) => room.send('recallFlower', { slotId }),
   })
   engine.addSystem(plaqueHomeSystem)
-  engine.addSystem(wildTintSystem)
+  engine.addSystem(questionPopSystem)
   console.log(`[Avenue] ${views.size} slots ready · avenueState listeners=${room.listenerCount('avenueState')}`)
 }
 

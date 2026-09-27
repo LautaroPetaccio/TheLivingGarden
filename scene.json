@@ -164,8 +164,31 @@
   },
   "spawnPoints": [
     {
-      "name": "SpawnArea1",
+      "name": "GardenLedgeArrival",
       "default": true,
+      "position": {
+        "x": [
+          29,
+          31
+        ],
+        "y": [
+          7,
+          7.4
+        ],
+        "z": [
+          20,
+          28.5
+        ]
+      },
+      "cameraTarget": {
+        "x": 6.75,
+        "y": 2,
+        "z": 24
+      }
+    },
+    {
+      "name": "SpawnArea1",
+      "default": false,
       "position": {
         "x": [
           10.5,

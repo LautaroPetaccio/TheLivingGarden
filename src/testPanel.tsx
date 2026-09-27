@@ -74,6 +74,8 @@ const HEADER_H     = 46
 
 // ── Panel state ──────────────────────────────────────────────────
 let panelOpen     = false
+let panelTab: 'actions' | 'edit' | 'perf' = 'actions'
+const tabShow = (t: string) => (panelTab === t ? 'flex' : 'none') as 'flex' | 'none'
 let overrideLimit = false                  // mirrors overrideDailyLimit
 let unlimitedPlanters = false              // server-side, in memory — off again after a server restart
 let clickboxMode  = getUseClickbox()       // mirrors useClickbox
@@ -209,6 +211,13 @@ export function TestPanelUi() {
           />
         </UiEntity>
 
+        <UiEntity uiTransform={{ display: tabShow('actions'), width: '100%', flexDirection: 'column' }}>
+        {/* Tabs — the panel has no scroll, so it is split so each page fits on screen */}
+        <UiEntity uiTransform={{ width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
+          <SeedBtn label="Actions" color={panelTab === 'actions' ? BTN_ON : BTN_OFF} onClick={() => { panelTab = 'actions' }} />
+          <SeedBtn label="Editors" color={panelTab === 'edit' ? BTN_ON : BTN_OFF} onClick={() => { panelTab = 'edit' }} />
+          <SeedBtn label="Perf" color={panelTab === 'perf' ? BTN_ON : BTN_OFF} onClick={() => { panelTab = 'perf' }} last />
+        </UiEntity>
         {/* ── Settings ─────────────────────────────────────────── */}
 
         {/* Daily Limit Override */}
@@ -335,7 +344,9 @@ export function TestPanelUi() {
             </UiEntity>
           ))}
         </UiEntity>
+        </UiEntity>
 
+        <UiEntity uiTransform={{ display: tabShow('edit'), width: '100%', flexDirection: 'column' }}>
         {/* Planter layout editor — move/rotate the real planters, then bake (GDD §3.1) */}
         <UiEntity uiTransform={{ width: '100%', height: 36, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 4 } }}>
           <Label value={isLayoutToolOn() ? `Planter editor  (${layoutCount()})` : 'Planter editor'} fontSize={12} color={WHITE} uiTransform={{ flexGrow: 1 }} />
@@ -362,7 +373,9 @@ export function TestPanelUi() {
         <UiEntity uiTransform={{ display: isLayoutToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
           <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={layoutExport} last />
         </UiEntity>
+        </UiEntity>
 
+        <UiEntity uiTransform={{ display: tabShow('perf'), width: '100%', flexDirection: 'column' }}>
         {/* PERF — turn one suspect off at a time and read the 5 s average. The asset
             audit ranks by size; this ranks by what the frame rate actually does. */}
         <UiEntity uiTransform={{ width: '100%', height: 30, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', margin: { bottom: 2 } }}>
@@ -378,7 +391,9 @@ export function TestPanelUi() {
             <ToggleButton value={!isPerfOff(t)} onChange={(on: boolean) => { setPerfOff(t, !on); resetFpsAvg() }} />
           </UiEntity>
         ))}
+        </UiEntity>
 
+        <UiEntity uiTransform={{ display: tabShow('edit'), width: '100%', flexDirection: 'column' }}>
         {/* Plant layout editor — the 38 plants players WATER. Moves each plant AND its
             anchor (which owns the water drop, labels and click box), then bakes into
             shared/layout.ts PLANT_LAYOUT. */}
@@ -463,7 +478,9 @@ export function TestPanelUi() {
         <UiEntity uiTransform={{ display: isTributeToolOn() ? 'flex' : 'none', width: '100%', flexDirection: 'row', margin: { bottom: 8 } }}>
           <SeedBtn label="Save / export" color={BTN_BLOOM} onClick={tributeExport} last />
         </UiEntity>
+        </UiEntity>
 
+        <UiEntity uiTransform={{ display: tabShow('actions'), width: '100%', flexDirection: 'column' }}>
         {/* Crowding rule (GDD §3.1) — tidy the longest-away owner's planter now */}
         <UiEntity
           uiTransform={{ width: '100%', height: 34, alignItems: 'center', justifyContent: 'center', margin: { bottom: 8 } }}
@@ -579,6 +596,7 @@ export function TestPanelUi() {
           color={OK_TEXT}
         />
 
+        </UiEntity>
       </UiEntity>
     </UiEntity>
   )

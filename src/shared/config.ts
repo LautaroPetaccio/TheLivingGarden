@@ -3,6 +3,8 @@
 // Imported by both server and client so constants stay in sync.
 // =============================================================
 
+import { hofAvenueSlots, HOF_FRONT_OUT } from './hallOfFame'
+
 /** Daily bloom windows in UTC. Add or remove entries to change the schedule. */
 export const BLOOM_WINDOWS: ReadonlyArray<{ hour: number; minute: number }> = [
   { hour:  5, minute: 30 },   // 05:30 UTC
@@ -1044,7 +1046,10 @@ export const FLOWER_COLLECTION_CAP = 500
 /** …at most this many times per box, one water per visitor. */
 export const BOX_WATER_MAX         = 5   // TUNING — was 3; week-2 testers wanted "more a day"
 
-// ── The Avenue — communal entrance planters (design/communal-planters.md, 2026-09-22) ──
+// ── The Avenue — communal planters (design/communal-planters.md, 2026-09-22) ──
+// MOVED 2026-09-25: the 72 old wall cubes are gone from the layout; the Avenue is now the 55 Hall of Fame
+// stands from KJ's scene.glb (shared/hallOfFame.ts) — av_1..av_55 in row order, soil-top slots. A stored
+// av_56..av_72 flower is sent home by the server's orphan rule. The notes below on the old wall are history.
 // A gallery, not a garden: harvested flowers only, nothing grows or wilts.
 // BAKED 2026-09-22 from scene.glb itself: the 72 wall planters are part of KJ's entrance
 // model (nodes ExhibitFlowers..ExhibitFlowers.005, identity transforms, geometry baked
@@ -1054,96 +1059,16 @@ export const BOX_WATER_MAX         = 5   // TUNING — was 3; week-2 testers wan
 // Two walls: z ≈ 20.5 (rot 0, faces +z into the avenue) and z ≈ 27.5 (rot 180). Three
 // rows (soil y 1.13 / 1.78 / 2.43). Ids run from the gate (x ≈ 47) toward the garden.
 // Re-bake with the same script if the wall moves: cluster horizontal faces at |z| 3.1–3.78.
-export const AVENUE_POSITIONS: ReadonlyArray<{ id: string; x: number; y: number; z: number; rot: number }> = [
-  { id: 'av_1', x: 47.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_2', x: 47.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_3', x: 47.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_4', x: 47.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_5', x: 46.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_6', x: 46.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_7', x: 45.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_8', x: 45.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_9', x: 44.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_10', x: 44.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_11', x: 44.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_12', x: 44.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_13', x: 43.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_14', x: 43.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_15', x: 43.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_16', x: 43.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_17', x: 42.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_18', x: 42.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_19', x: 41.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_20', x: 41.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_21', x: 40.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_22', x: 40.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_23', x: 40.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_24', x: 40.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_25', x: 39.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_26', x: 39.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_27', x: 39.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_28', x: 39.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_29', x: 38.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_30', x: 38.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_31', x: 37.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_32', x: 37.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_33', x: 36.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_34', x: 36.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_35', x: 36.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_36', x: 36.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_37', x: 35.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_38', x: 35.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_39', x: 35.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_40', x: 35.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_41', x: 34.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_42', x: 34.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_43', x: 33.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_44', x: 33.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_45', x: 32.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_46', x: 32.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_47', x: 32.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_48', x: 32.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_49', x: 31.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_50', x: 31.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_51', x: 31.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_52', x: 31.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_53', x: 30.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_54', x: 30.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_55', x: 29.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_56', x: 29.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_57', x: 28.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_58', x: 28.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_59', x: 28.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_60', x: 28.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_61', x: 27.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_62', x: 27.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_63', x: 27.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_64', x: 27.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_65', x: 26.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_66', x: 26.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_67', x: 25.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_68', x: 25.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_69', x: 24.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_70', x: 24.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_71', x: 24.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_72', x: 24.481, y: 1.133, z: 27.504, rot: 180 },
-]
-/** Cube geometry (scene metres) — inner width 0.54, soil face is 0.345 m behind the
- *  cube's front face, cube front is 0.43 m tall. Used for the tap box and the plaque. */
-export const AVENUE_CUBE_FRONT_OFFSET = 0.345
-export const AVENUE_CUBE_HEIGHT       = 0.43
+export const AVENUE_POSITIONS: ReadonlyArray<{ id: string; x: number; y: number; z: number; rot: number }> = hofAvenueSlots()
+/** Stand geometry (scene metres), from the Hall of Fame module: the plain front wall stands
+ *  HOF_FRONT_OUT in front of the soil centre, and its plaque centre is DROP below the soil top. */
+export const AVENUE_CUBE_FRONT_OFFSET = HOF_FRONT_OUT
+export const AVENUE_PLAQUE_OUT        = 0.98   // on the star panel: 0.96 m out from the soil centre + 0.02 proud of the slope
+export const AVENUE_PLAQUE_DROP       = 0.31   // panel centre is 0.33 m below the soil top, +0.02 proud
 /** Species models are normalised to ~0.55 m (PLANT_SPECIES) for a 1.1 m planter; the
  *  Avenue cubes are 0.54 m wide, so shrink a touch. TUNING. */
-export const AVENUE_FLOWER_SCALE = 0.85
-/** Empty-slot filler ("wild bloom", design/communal-planters.md): a real species model
- *  stands in so the wall never reads as unfinished, dimmed so it never reads as someone's
- *  real display — instantly replaced the moment a player plants here (client swaps the
- *  visual the instant avenueState reports an owner; nothing server-side to displace).
- *  Deterministic per slotId (wildSpeciesFor in avenueSystem.ts), so it's the same flower
- *  for every viewer and doesn't shuffle on reload. TUNING — true desaturation needs a
- *  shader; GltfNodeModifiers can only dim the albedo uniformly (see plantVfx.ts's own
- *  note on what that component can and can't retint). */
-export const AVENUE_WILD_TINT = 0.4
+export const AVENUE_FLOWER_SCALE = 1.3   // stands are 1.6 m wide (the old wall cubes were 0.54) — TUNING
+/** Empty-slot filler: a floating gold "?" over the soil (avenueSystem.ts setWildBloom). */
 /** How far out from a slot the onboarding marker arrow floats. Deliberately SHORT: at the
  *  tutorial trail's 1.2 m the arrow hung a metre in front of a 0.54 m cube, so a click
  *  aimed at the arrow projected past the cube edge and hit nothing — which is what "the
