@@ -51,6 +51,7 @@ export const room = registerMessages({
     plantedAt: Schemas.Int64, opensAt: Schemas.Int64, serverNow: Schemas.Int64,
     opened: Schemas.Boolean, flower: Schemas.String,
     waters: Schemas.Number, lastWaterer: Schemas.String,
+    tends: Schemas.Number,   // how many times the OWNER has tended this seedling (one per growth stage)
   }),
 
   // ── v2 Phase 4: harvest / water / gift ───────────────────
@@ -58,13 +59,17 @@ export const room = registerMessages({
   harvestBox:       Schemas.Map({ boxId: Schemas.String }),
   /** Visitor taps someone else's GROWING box: shaves BOX_WATER_SHAVE_MS (capped, once per visitor). */
   waterBox:         Schemas.Map({ boxId: Schemas.String }),
+  /** Owner taps their own GROWING box when it shows a water drop: shaves TEND_SHAVE_FRACTION, once per growth stage. */
+  tendBox:          Schemas.Map({ boxId: Schemas.String }),
   /** Tap a nearby player: give them one flower from your collection (by index). */
   giftFlower:       Schemas.Map({ toAddress: Schemas.String, flowerIndex: Schemas.Number }),
   /** Server → player: their keepsake collection + box cap (after harvest/gift, and on join). */
   /** avenueSlotsFree: how many MORE flowers this gardener could put on the Avenue right
    *  now (slots their flair has earned, minus slots they're already using) — lets the
    *  client onboarding hint know when to point at the Avenue without a extra round trip. */
-  collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number, avenueSlotsFree: Schemas.Number }),
+  // One CHUNK of the collection (shared/collection.ts): `start` = index of its first flower, `total` = flowers in all. Every chunk
+  // repeats the planter cap, so the cap can never depend on the collection's size.
+  collectionUpdate: Schemas.Map({ flowersJson: Schemas.String, boxCap: Schemas.Number, avenueSlotsFree: Schemas.Number, start: Schemas.Number, total: Schemas.Number }),
   /** Hold one keepsake in your hand (by collection index), or -1 to put it away. */
   holdFlower:       Schemas.Map({ flowerIndex: Schemas.Number }),
   /** Equip a seed of this rarity tier into your hand, REPLACING whatever was there —
@@ -107,10 +112,9 @@ export const room = registerMessages({
    *  replays for someone who has done it — and a gardener who watered last visit but
    *  never got as far as planting still gets the planting half next time.
    *  Sent on full sync and again after each first. */
-  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, pouchOpened: Schemas.Boolean, avenueUsed: Schemas.Boolean }),
-  /** Client → server: I opened the seed pouch for the first time. Ends the tutorial stage
-   *  that pulses the chip (Fin 2026-09-21 never noticed the pouch existed). */
-  markPouchOpened:  Schemas.Map({}),
+  onboardingState:  Schemas.Map({ watered: Schemas.Boolean, planted: Schemas.Boolean, harvested: Schemas.Boolean, gifted: Schemas.Boolean, avenueUsed: Schemas.Boolean, tourStep: Schemas.Number, tourDone: Schemas.Boolean }),
+  /** Client → server: where the guided tutorial is (step index), and whether it was finished or ended. */
+  tourProgress:     Schemas.Map({ step: Schemas.Number, done: Schemas.Boolean }),
   /** Server → one player: every species they have ever REVEALED, as a JSON string[] of
    *  species ids. The Almanac's source of truth, deliberately separate from `flowers`:
    *  a flower left on show in its planter (GDD 3.1) is discovered but not kept. */
@@ -118,7 +122,7 @@ export const room = registerMessages({
   /** Server → one player: an Almanac milestone just paid out. Celebration only — the
    *  client DERIVES which rungs are earned from the species count it already has, so
    *  nothing here needs re-sending on join. */
-  milestoneReached: Schemas.Map({ title: Schemas.String, species: Schemas.Number, seedTier: Schemas.Number, planters: Schemas.Number }),
+  milestoneReached: Schemas.Map({ title: Schemas.String, species: Schemas.Number, stamps: Schemas.Number, seedTier: Schemas.Number, planters: Schemas.Number }),   // stamps > 0 = a rarity-stamp rung (species is then 0)
   /** Client → server: hold this empty planter for me while the tutorial points at it.
    *  The CLIENT picks which one — the scene server has no avatar positions, so "nearest
    *  free planter" can only be computed where the player is. */
@@ -129,7 +133,7 @@ export const room = registerMessages({
 
   // ── Client → Server ───────────────────────────────────────
   /** Player requests to water a plant. Server validates and updates PlantSync. */
-  waterPlant:       Schemas.Map({ plantId: Schemas.String }),
+  waterPlant:       Schemas.Map({ plantId: Schemas.String, sweet: Schemas.Boolean }),   // sweet = released in the hold meter's sweet zone
   /** Sent on join so the server can map address → display name for the leaderboard. */
   registerPlayer:   Schemas.Map({ displayName: Schemas.String }),
   /** Sent on room.onReady so the server re-sends full state even after a client reload. */
@@ -163,7 +167,7 @@ export const room = registerMessages({
   /** elapsedMs: how far into the bloom we already are — 0 on the live broadcast, >0 when
    *  re-sent to a late joiner, so their countdown matches everyone else's. durationMs: this
    *  bloom's length (bloomDurationMs — 2 min solo … 6 min at 6+ contributors). */
-  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number, durationMs: Schemas.Number }),
+  bloomTriggered:   Schemas.Map({ scale: Schemas.Number, variant: Schemas.String, elapsedMs: Schemas.Number, durationMs: Schemas.Number, galleryFlowers: Schemas.Number, galleryBoost: Schemas.Number }),
   /** v2 — bloom threshold (flat 80% since the decay-rate rework) + gardeners present.
    *  Sent to a joining player, on full sync, and broadcast when the gardener count changes. */
   thresholdUpdate:  Schemas.Map({ threshold: Schemas.Number, gardeners: Schemas.Number }),
@@ -174,6 +178,8 @@ export const room = registerMessages({
   bloomSummary:     Schemas.Map({
     gardeners: Schemas.Number, waters: Schemas.Number, seeds: Schemas.Number, rares: Schemas.Number,
     youWaters: Schemas.Number, youSeeds: Schemas.Number, youRares: Schemas.Number,
+    /** The Rare Plant Gallery's part in this Bloom: flowers on show, the boost, and the rarest one. */
+    galleryFlowers: Schemas.Number, galleryBoost: Schemas.Number, galleryStar: Schemas.String,
   }),
   /** Broadcast when the server resets all plants after bloom. */
   bloomReset:       Schemas.Map({}),

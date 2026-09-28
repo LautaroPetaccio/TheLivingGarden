@@ -16,6 +16,9 @@ import {
 } from '@dcl/sdk/ecs'
 import { loadScene, loadPlayer, createSceneWriter, createPlayerWriter, KeyWriter, isStorableAddress, onSaveProblem } from './persistence'
 import { lastSeenToStore } from './lastSeen'
+import { chooseHandSeed } from './hand'
+import { makeBeds, checkPlant } from '../shared/beds'
+import { slimKeepsake, chunkCollection, MAX_SAFE_MESSAGE_BYTES } from '../shared/collection'
 import { PlantSync }          from '../shared/schemas'
 import { room }               from '../shared/messages'
 import {
@@ -31,6 +34,12 @@ import {
   bloomSustainMs,
   BLOOM_WINDOWS,
   plantDecayMs,
+  HOLD_SWEET_BONUS,
+  BLOOM_KEEPS_WATERED,
+  BLOOM_OPEN_MS,
+  SEED_BURST_FRACTION,
+  TEND_SHAVE_FRACTION,
+  tendsAvailable,
   bloomScaleFor,
   flairTier,
   WEEKLY_RESET_MS,
@@ -44,6 +53,7 @@ import {
   seedRareChance,
   rollSeedTier,
   rollTierAtLeast,
+  GUARANTEED_MAX_TIER,
   GUARANTEED_RARE_AT_CONTRIBUTORS,
   GOLDEN_SEED_AT_FRACTION,
   rollRainbowTier,
@@ -51,6 +61,11 @@ import {
   RARITY_TIERS,
   ALMANAC_MILESTONES,
   milestoneTarget,
+  STAMP_MILESTONES,
+  BED_FILL_ORIGIN,
+  BEDS_EXPLICIT,
+  stampMilestoneTarget,
+  stampCount,
   SEED_LIFETIME_MS,
   GARDEN_BOUNDS,
   BOX_POSITIONS,
@@ -68,6 +83,7 @@ import {
   BLOOM_TRIGGER_COOLDOWN_MS, EXPIRY_TELL_MS,
   plantSpeciesById,
   rarityTierById,
+  galleryBoost,
   AVENUE_POSITIONS,
   AVENUE_MIN_TIER,
   AVENUE_NEVER_TIDY_TIER,
@@ -129,6 +145,8 @@ const lifetimeTopWriter  = createSceneWriter('lifetimeTop',        V.lifetimeTop
 const resetAtWriter      = createSceneWriter('leaderboardResetAt', V.leaderboardResetAt)
 const tributesWriter     = createSceneWriter('tributes',           V.tributes)
 const boxesWriter        = createSceneWriter('boxes',              V.boxes)
+// Beds (shared/beds.ts): groups of four planters that belong to whoever planted in them. Derived from the baked layout, no storage.
+const beds = makeBeds(BOX_POSITIONS, BED_FILL_ORIGIN, BEDS_EXPLICIT)
 const lastSeenWriter     = createSceneWriter('lastSeen',           V.lastSeen)
 const planterDraftWriter = createSceneWriter('planterDraft',       V.planterDraft)   // admin overwrite target, never merged
 const plantDraftWriter   = createSceneWriter('plantDraft',         V.plantDraft)     // admin overwrite target, never merged
@@ -195,8 +213,8 @@ function expiresInMs(plantId: string, now = Date.now()): number {
 }
 
 /** Mark `plantId` watered at `now` with decay for the gardeners present; returns expiresAt. */
-function armExpiry(plantId: string, entity: Entity, now: number): number {
-  const expiresAt = now + plantDecayMs(plantId, knownPlayers.size)
+function armExpiry(plantId: string, entity: Entity, now: number, bonus = 0): number {
+  const expiresAt = now + Math.round(plantDecayMs(plantId, knownPlayers.size) * (1 + bonus))
   plantExpiresAt.set(plantId, expiresAt)
   scheduleExpiry(plantId, entity, now, expiresAt - now)
   return expiresAt
@@ -599,6 +617,10 @@ let bloomSustainTimer:     ReturnType<typeof setTimeout> | null = null
 let bloomSustainStartedAt: number | null = null   // wall-clock ms when current run began
 let bloomSustainElapsedMs: number        = 0      // ms accumulated before current run
 let bloomCooldownUntil:    number        = 0      // no bloom may START before this (set by resetGarden)
+/** False after a bloom until health has dipped BELOW the threshold once. Plants watered during a
+ *  bloom are kept through the reset, so the garden can still be at/above the threshold — without
+ *  this, one more water starts the next bloom's hold (KJ playtest 2026-09-24). */
+let bloomArmed:             boolean       = true
 
 /** Pause the sustain countdown (health dipped below threshold).
  *  Preserves elapsed time so the timer resumes from where it left off. */
@@ -631,7 +653,9 @@ function checkBloomThreshold(): void {
   if (bloomActive || Date.now() < bloomCooldownUntil) return
   const count     = getWateredCount()
   const threshold = currentBloomThreshold()
+  if (count < threshold) bloomArmed = true
   if (count >= threshold) {
+    if (!bloomArmed) return   // still riding the last bloom's kept plants — let health dip first
     if (bloomSustainTimer === null) {
       const remaining = Math.max(0, bloomSustainMs(knownPlayers.size) - bloomSustainElapsedMs)
       bloomSustainStartedAt = Date.now()
@@ -673,7 +697,8 @@ function triggerBloom(forcedVariant = ''): void {
   bloomSeedContributors = Math.max(1, cycleContributors.size)
   bloomDuration  = bloomDurationMs(bloomSeedContributors)
   console.log(`[Server] Bloom triggered! (${getWateredCount()}/${threshold} plants, scale ${bloomScale.toFixed(2)}, variant ${variant.name}, ${cycleContributors.size} contributor(s) → ${bloomDuration / 60_000} min)`)
-  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration })
+  snapshotGallery()
+  room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: 0, durationMs: bloomDuration, galleryFlowers: bloomGallery.flowers, galleryBoost: bloomGallery.boost })
   scheduleSeedWaves()
   scheduleGoldenSeed()
   setTimeout(() => executeTask(resetGarden), bloomDuration)
@@ -709,16 +734,23 @@ const seedWaveTimers: Array<ReturnType<typeof setTimeout>> = []
 
 function scheduleSeedWaves(): void {
   cancelSeedWaves()
-  const total  = seedSpawnCount(bloomSeedContributors)
-  const window = Math.max(0, bloomDuration - SEED_LAST_WAVE_BEFORE_END_MS)
-  const waves  = Math.max(1, Math.min(total, Math.floor(window / SEED_WAVE_GAP_MS) + 1))
-  const gap    = waves > 1 ? window / (waves - 1) : 0
-  for (let w = 0; w < waves; w++) {
-    const n = Math.floor(total / waves) + (w < total % waves ? 1 : 0)
-    if (w === 0) { spawnBloomSeeds(n, bloomSeedContributors >= GUARANTEED_RARE_AT_CONTRIBUTORS); continue }
-    seedWaveTimers.push(setTimeout(() => executeTask(async () => { if (bloomActive) spawnBloomSeeds(n) }), Math.round(gap * w)))
+  const total   = seedSpawnCount(bloomSeedContributors)
+  const window  = Math.max(0, bloomDuration - SEED_LAST_WAVE_BEFORE_END_MS)
+  const openAt  = Math.min(BLOOM_OPEN_MS, Math.round(window / 2))   // the flower has to be open first
+  const burstN  = Math.min(total, Math.max(1, Math.ceil(total * SEED_BURST_FRACTION)))
+  const restN   = total - burstN
+  const guarantee = bloomSeedContributors >= GUARANTEED_RARE_AT_CONTRIBUTORS
+  seedWaveTimers.push(setTimeout(() => executeTask(async () => { if (bloomActive) spawnBloomSeeds(burstN, guarantee) }), openAt))
+  let waves = 0
+  if (restN > 0) {
+    waves = Math.max(1, Math.min(restN, Math.floor((window - openAt) / SEED_WAVE_GAP_MS)))
+    for (let w = 0; w < waves; w++) {
+      const n  = Math.floor(restN / waves) + (w < restN % waves ? 1 : 0)
+      const at = openAt + Math.round(((window - openAt) * (w + 1)) / waves)
+      seedWaveTimers.push(setTimeout(() => executeTask(async () => { if (bloomActive) spawnBloomSeeds(n) }), at))
+    }
   }
-  console.log(`[Server] Seed trickle: ${total} seeds in ${waves} wave(s) over ${Math.round(window / 1000)}s`)
+  console.log(`[Server] Seed shower: ${burstN} seeds when the flower opens (+${Math.round(openAt / 1000)}s), then ${restN} in ${waves} trickle wave(s) — ${total} total`)
 }
 
 // ── Golden seed chase ─────────────────────────────────────────
@@ -750,6 +782,20 @@ function sendGolden(to?: string[]): void {
   room.send('goldenSeed', payload, to ? { to } : undefined)
 }
 
+/** The Rare Plant Gallery's part in the current Bloom — snapshotted when it triggers, so every seed
+ *  of that Bloom rolls with the same boost and the summary can credit what was on show then. */
+let bloomGallery = { flowers: 0, boost: 0, star: '' }
+function snapshotGallery(): void {
+  const shown = [...avenue.values()].filter(r => r.owner && r.keepsake)
+  const best = shown.reduce<AvenueRecord | null>((b, r) => (!b || (r.keepsake!.rarityTier > b.keepsake!.rarityTier) ? r : b), null)
+  bloomGallery = {
+    flowers: shown.length,
+    boost:   galleryBoost(shown.map(r => r.keepsake!.rarityTier)),
+    star:    best ? `${best.ownerName}'s ${rarityTierById(best.keepsake!.rarityTier).name} ${plantSpeciesById(best.keepsake!.flower)?.name ?? best.keepsake!.flower}` : '',
+  }
+  console.log(`[Server] Gallery boost for this Bloom: ${bloomGallery.flowers} flower(s) on show → +${Math.round(bloomGallery.boost * 100)}% rare chance${bloomGallery.star ? ` (star: ${bloomGallery.star})` : ''}`)
+}
+
 function cancelSeedWaves(): void {
   for (const t of seedWaveTimers) clearTimeout(t)
   seedWaveTimers.length = 0
@@ -758,7 +804,8 @@ function cancelSeedWaves(): void {
 /** Roll and broadcast one wave of seeds — rarity scales with contributors.
  *  `guaranteeRare`: this wave's first seed is Rare or better (4+ contributors). */
 function spawnBloomSeeds(count: number, guaranteeRare = false): void {
-  const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult
+  // The variant's boost × the Rare Plant Gallery's (snapshotted when the Bloom triggered).
+  const rareSeedMult = bloomVariantById(bloomVariant).rareSeedMult * (1 + bloomGallery.boost)
   const now          = Date.now()
   const batch: SeedRecord[] = []
   for (let i = 0; i < count; i++) {
@@ -766,7 +813,7 @@ function spawnBloomSeeds(count: number, guaranteeRare = false): void {
       id:         `seed_${now}_${seedCounter++}`,
       x:          GARDEN_BOUNDS.xMin + Math.random() * (GARDEN_BOUNDS.xMax - GARDEN_BOUNDS.xMin),
       z:          GARDEN_BOUNDS.zMin + Math.random() * (GARDEN_BOUNDS.zMax - GARDEN_BOUNDS.zMin),
-      rarityTier: guaranteeRare && i === 0 ? rollTierAtLeast(2) : rollSeedTier(bloomSeedContributors, rareSeedMult),
+      rarityTier: guaranteeRare && i === 0 ? rollTierAtLeast(2, GUARANTEED_MAX_TIER) : rollSeedTier(bloomSeedContributors, rareSeedMult),
       spawnedAt:  now,
       gatheredBy: new Set(),
     }
@@ -900,13 +947,14 @@ interface BoxRecord {
   waters:      number   // Phase 4: how many visitors have watered this growing seed
   waterers:    string[] // their addresses (one water each) — server-only, not on the wire
   lastWaterer: string   // display name shown on the label
+  tends:       number   // times the OWNER tended this seedling (one per growth stage, see tendsAvailable)
 }
 
 const boxes     = new Map<string, BoxRecord>()                       // boxId → record
 const boxTimers = new Map<string, ReturnType<typeof setTimeout>>()  // boxId → open timer
 
 function emptyBox(boxId: string): BoxRecord {
-  return { boxId, owner: '', ownerName: '', rarityTier: 0, plantedAt: 0, opensAt: 0, opened: false, flower: '', waters: 0, waterers: [], lastWaterer: '' }
+  return { boxId, owner: '', ownerName: '', rarityTier: 0, plantedAt: 0, opensAt: 0, opened: false, flower: '', waters: 0, waterers: [], lastWaterer: '', tends: 0 }
 }
 
 /** "12 s" at the playtest base, "24 minutes" at the production one. */
@@ -916,9 +964,15 @@ function sendBox(b: BoxRecord, to?: string[]): void {
   const payload = {
     boxId: b.boxId, owner: b.owner, ownerName: b.ownerName, rarityTier: b.rarityTier,
     plantedAt: b.plantedAt, opensAt: b.opensAt, serverNow: Date.now(),
-    opened: b.opened, flower: b.flower, waters: b.waters, lastWaterer: b.lastWaterer,
+    opened: b.opened, flower: b.flower, waters: b.waters, lastWaterer: b.lastWaterer, tends: b.tends,
   }
   room.send('boxState', payload, to ? { to } : undefined)
+}
+
+/** What the bed rules need to know about a planter: who planted it and when (a bed's owner is derived from this). */
+function bedInfo(boxId: string): { owner: string; ownerName: string; plantedAt: number } | undefined {
+  const x = boxes.get(boxId)
+  return x && x.owner ? { owner: x.owner, ownerName: x.ownerName, plantedAt: x.plantedAt } : undefined
 }
 
 function boxesOwnedBy(address: string): number {
@@ -942,7 +996,12 @@ const loadFlowers = (a: string) => loadPlayerRecord<FlowerKeepsake[]>(a, 'flower
 // ── Onboarding (v2): the two firsts the in-world tutorial waits on. Persisted per
 // wallet so the lesson never replays for a gardener who has done it — and a gardener
 // who watered last visit but never got as far as planting still gets taught planting.
-interface OnboardingRecord { watered: boolean; planted: boolean; harvested: boolean; gifted: boolean; pouchOpened: boolean; avenueUsed: boolean }
+interface OnboardingRecord {
+  watered: boolean; planted: boolean; harvested: boolean; gifted: boolean; avenueUsed: boolean
+  // (pouchOpened removed 2026-09-27 with the tutorial's pouch step; old records still carry it, ignored.)
+  /** Guided tutorial (2026-09-27): the step to resume at, and whether it was finished or ended. */
+  tourStep: number; tourDone: boolean
+}
 async function loadOnboarding(address: string): Promise<OnboardingRecord> {
   // Backfill for gardeners who predate this record (the key landed 2026-09-20): without it
   // every existing player is handed the beginner tutorial at launch. Used ONLY as the
@@ -954,12 +1013,11 @@ async function loadOnboarding(address: string): Promise<OnboardingRecord> {
     planted:     boxesOwnedBy(address) > 0 || flowers.length > 0,
     harvested:   flowers.length > 0,
     gifted:      false,
-    // Same condition as `planted`: anyone who has already grown something has been
-    // around long enough not to be taught where their own pouch is.
-    pouchOpened: boxesOwnedBy(address) > 0 || flowers.length > 0,
     // Unlike `gifted`, this one CAN be backfilled accurately: the Avenue tracks its own
     // owners, so a gardener who already has a flower on show is never nagged about it.
     avenueUsed:  [...avenue.values()].some(r => r.owner === address),
+    tourStep: 0,
+    tourDone: false,
   }))
   // Migrate on load: a record written before a field existed reads back undefined,
   // and an undefined in a Schemas.Boolean field throws inside the event bus. The
@@ -968,13 +1026,15 @@ async function loadOnboarding(address: string): Promise<OnboardingRecord> {
   o.planted   = !!o.planted
   o.harvested = !!o.harvested
   o.gifted    = !!o.gifted
-  o.pouchOpened = !!o.pouchOpened
   o.avenueUsed  = !!o.avenueUsed
+  // Added 2026-09-27: older records read back undefined, which a Schemas field would choke on.
+  o.tourStep = typeof o.tourStep === 'number' && Number.isFinite(o.tourStep) ? o.tourStep : 0
+  o.tourDone = !!o.tourDone
   return o
 }
 async function sendOnboarding(address: string): Promise<void> {
   const o = await loadOnboarding(address)
-  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted, pouchOpened: o.pouchOpened, avenueUsed: o.avenueUsed }, { to: [address] })
+  room.send('onboardingState', { watered: o.watered, planted: o.planted, harvested: o.harvested, gifted: o.gifted, avenueUsed: o.avenueUsed, tourStep: o.tourStep, tourDone: o.tourDone }, { to: [address] })
 }
 // ── Tutorial planter reservations (Phase 2). In memory only: a server restart just
 // means the tutorial re-asks. The CLIENT chooses which planter (the server has no
@@ -994,7 +1054,7 @@ function reservationHolder(boxId: string): string | null {
 function clearReservation(address: string): void { planterReservations.delete(address) }
 
 /** Record one of the firsts and tell the client — a no-op once it is already set. */
-async function markOnboarding(address: string, step: keyof OnboardingRecord): Promise<void> {
+async function markOnboarding(address: string, step: Exclude<keyof OnboardingRecord, 'tourStep' | 'tourDone'>): Promise<void> {
   const o = await loadOnboarding(address)
   if (o[step]) return
   o[step] = true
@@ -1039,6 +1099,7 @@ async function sendDiscovered(address: string): Promise<void> {
   const list = await loadDiscovered(address)
   room.send('discoveredUpdate', { listJson: JSON.stringify(list) }, { to: [address] })
   await checkMilestones(address, speciesCount(list))
+  await checkStampMilestones(address, stampCount(list))
 }
 
 /** Distinct species in a discovered list. Entries are `${species}|${tier}`; a bare id
@@ -1050,7 +1111,43 @@ function speciesCount(list: string[]): number {
   return ids.size
 }
 
-const loadMilestones = (a: string) => loadPlayerJson<{ claimed: number }>(a, 'milestones', () => ({ claimed: 0 }))
+const loadMilestones = (a: string) => loadPlayerJson<{ claimed: number; stampsClaimed?: number }>(a, 'milestones', () => ({ claimed: 0, stampsClaimed: 0 }))
+
+/** One seed of `seedTier` into the pouch, and `planters` extra planters onto the cap. Shared by the species and stamp ladders. */
+async function payMilestoneReward(address: string, seedTier: number, planters: number): Promise<void> {
+  const pouch = await loadPouch(address)
+  pouch[seedTier] = (pouch[seedTier] ?? 0) + 1
+  void savePouch(address)
+  sendPouch(address)
+  if (planters > 0) {
+    const cap = await loadBoxCap(address)
+    cap.cap = Math.max(cap.cap, BOX_CAP_DEFAULT) + planters
+    void savePlayerJson(address, 'boxCap')
+    await sendCollection(address)   // carries boxCap — the client's own planting gate
+  }
+}
+
+/** The RARITY-STAMP ladder (KJ 2026-09-25). Same shape as checkMilestones, its own counter (`stampsClaimed`) so the two
+ *  ladders never double-pay; an established gardener's first load can cross several rungs at once. */
+async function checkStampMilestones(address: string, stamps: number): Promise<void> {
+  const rec = await loadMilestones(address)
+  let claimed = rec.stampsClaimed ?? 0
+  let changed = false
+  for (let i = claimed; i < STAMP_MILESTONES.length; i++) {
+    const m = STAMP_MILESTONES[i]
+    const target = stampMilestoneTarget(m)
+    if (stamps < target) break
+    claimed = i + 1
+    changed = true
+    await payMilestoneReward(address, m.seedTier, m.planters)
+    room.send('milestoneReached', { title: m.title, species: 0, stamps: target, seedTier: m.seedTier, planters: m.planters }, { to: [address] })
+    console.log(`[Server] ${address} reached stamp milestone "${m.title}" (${target} stamps) → tier-${m.seedTier} seed${m.planters > 0 ? ` + ${m.planters} planter` : ''}`)
+  }
+  if (changed) {
+    rec.stampsClaimed = claimed
+    void savePlayerJson(address, 'milestones')
+  }
+}
 
 /** Pay out every Almanac milestone this species count has crossed. Plural on purpose: the
  *  first load of an established gardener backfills a whole collection at once and can
@@ -1066,19 +1163,9 @@ async function checkMilestones(address: string, species: number): Promise<void> 
     rec.claimed = i + 1
     changed = true
 
-    const pouch = await loadPouch(address)
-    pouch[m.seedTier] = (pouch[m.seedTier] ?? 0) + 1
-    void savePouch(address)
-    sendPouch(address)
+    await payMilestoneReward(address, m.seedTier, m.planters)
 
-    if (m.planters > 0) {
-      const cap = await loadBoxCap(address)
-      cap.cap = Math.max(cap.cap, BOX_CAP_DEFAULT) + m.planters
-      void savePlayerJson(address, 'boxCap')
-      await sendCollection(address)   // carries boxCap — the client's own planting gate
-    }
-
-    room.send('milestoneReached', { title: m.title, species: milestoneTarget(m), seedTier: m.seedTier, planters: m.planters }, { to: [address] })
+    room.send('milestoneReached', { title: m.title, species: milestoneTarget(m), stamps: 0, seedTier: m.seedTier, planters: m.planters }, { to: [address] })
     console.log(`[Server] ${address} reached Almanac milestone "${m.title}" (${milestoneTarget(m)} species) → tier-${m.seedTier} seed${m.planters > 0 ? ` + ${m.planters} planter` : ''}`)
   }
   if (changed) {
@@ -1103,7 +1190,14 @@ async function sendCollection(address: string): Promise<void> {
   const flowers = await loadFlowers(address)
   const cap     = await planterCap(address)
   const free    = Math.max(0, avenueSlotCap() - avenueSlotsOwnedBy(address))
-  room.send('collectionUpdate', { flowersJson: JSON.stringify(flowers), boxCap: cap, avenueSlotsFree: free }, { to: [address] })
+  // In CHUNKS, each with the cap (shared/collection.ts): one 14 KB message was silently dropped for a 136-flower collector and the client
+  // fell back to a planter cap of 1. Provenance stays server-side; the client reads flower / tier / at / from.
+  const slim = flowers.map(slimKeepsake)
+  for (const c of chunkCollection(slim)) {
+    const json = JSON.stringify(c.items)
+    if (json.length > MAX_SAFE_MESSAGE_BYTES) console.error(`[Server] collectionUpdate chunk is ${json.length} bytes for ${address.slice(0, 8)}… — over the safe limit`)
+    room.send('collectionUpdate', { flowersJson: json, boxCap: cap, avenueSlotsFree: free, start: c.start, total: slim.length }, { to: [address] })
+  }
 }
 
 // ── v2: held flower — one keepsake per gardener, shown in their hand to everyone.
@@ -1133,17 +1227,10 @@ const heldSeeds = new Map<string, number>()   // address → rarity tier
  *  equipped seed itself, but GIFT RECEIPT puts a flower straight into `heldFlowers`, so
  *  the order here is what actually closes it. */
 function handSeedTier(address: string): number {
-  const key   = address.toLowerCase()
-  const pouch = pouchOf(address)
-  if (!pouch) return -1
-  if (heldFlowers.has(key)) return -1
-  const equipped = heldSeeds.get(key)
-  if (equipped !== undefined) {
-    if ((pouch[equipped] ?? 0) > 0) return equipped
-    heldSeeds.delete(key)        // planted the last one of that tier — fall through
-  }
-  for (let tier = pouch.length - 1; tier >= 0; tier--) if ((pouch[tier] ?? 0) > 0) return tier
-  return -1
+  const key = address.toLowerCase()
+  const { tier, equipped } = chooseHandSeed(pouchOf(address), heldFlowers.has(key), heldSeeds.get(key))
+  if (equipped === undefined) heldSeeds.delete(key)
+  return tier
 }
 
 /** Last seedTier broadcast per gardener (lowercase key) — a pouch changes on every single
@@ -1158,10 +1245,15 @@ function sendHeld(address: string, to?: string[]): void {
   room.send('heldFlower', { address: key, flower: h?.flower ?? '', rarityTier: h?.rarityTier ?? 0, seedTier }, to ? { to } : undefined)
 }
 
-/** Broadcast the hand only when the seed it should show has actually changed. */
+/** Called on every pouch update. Everyone else only hears about a CHANGE of the shown seed
+ *  (a bloom changes the pouch on every gather), but the gardener themself is told every time:
+ *  their hand is redrawn from the same message stream as their chip, so one dropped or
+ *  reordered message can never leave a seed in the hand that the pouch no longer has
+ *  (Week-2 notes: "a seed visible in-hand while the inventory reported no seed"). */
 function refreshHandSeed(address: string): void {
-  if (shownSeedTier.get(address.toLowerCase()) === handSeedTier(address)) return
-  sendHeld(address)
+  const changed = shownSeedTier.get(address.toLowerCase()) !== handSeedTier(address)
+  if (changed) { sendHeld(address); return }
+  sendHeld(address, [address])
 }
 function sendAllHeld(to: string[]): void { for (const a of heldFlowers.keys()) sendHeld(a, to) }
 function clearHeld(address: string): void { if (heldFlowers.delete(address)) sendHeld(address) }
@@ -1189,7 +1281,7 @@ function openBox(boxId: string): void {
   if (!b || !b.owner || b.opened) return
   boxTimers.delete(boxId)
   b.opened = true
-  b.flower = rollPlantSpecies()
+  b.flower = rollPlantSpecies(b.rarityTier)
   console.log(`[Server] ${b.boxId} opened for ${b.ownerName}: ${b.flower} (tier ${b.rarityTier})`)
   sendBox(b)
   void markDiscovered(b.owner, b.flower, b.rarityTier)   // revealed — counts whether or not they harvest it
@@ -1229,7 +1321,7 @@ async function loadBoxes(): Promise<boolean> {
         continue
       }
       if (live.owner) continue   // claimed this session — memory wins
-      const restored: BoxRecord = { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '' }
+      const restored: BoxRecord = { ...emptyBox(r.boxId), ...r, waters: r.waters ?? 0, waterers: r.waterers ?? [], lastWaterer: r.lastWaterer ?? '', tends: r.tends ?? 0 }
       boxes.set(r.boxId, restored)
       if (restored.owner) sendBox(restored)
     }
@@ -1410,8 +1502,8 @@ async function returnAvenueFlower(r: AvenueRecord, why: 'recall' | 'tidy'): Prom
   flowers.push({ ...k, avenue: (k.avenue ?? 0) + 1 })
   void savePlayerJson(owner, 'flowers')
   const name = plantSpeciesById(k.flower)?.name ?? k.flower
-  if (why === 'recall') { void sendCollection(owner); sendNotice(owner, `Your ${name} is back in My flowers`); return }
-  const note = `The Avenue got busy while you were away — your ${name} was kept safe in My flowers (it keeps its Avenue mark)`
+  if (why === 'recall') { void sendCollection(owner); return }   // (Notification pass 2026-09-27: you took it back yourself — no echo)
+  const note = `The Gallery got busy while you were away — your ${name} was kept safe in My flowers (it keeps its Gallery mark)`
   console.log(`[Server] Avenue tidied ${r.slotId} (owner ${owner.slice(0, 8)}…, ${k.flower} tier ${k.rarityTier})`)
   if (isConnected(owner)) { sendNotice(owner, note); void sendCollection(owner) }
   else { (await loadKeptSafe(owner)).push(note); void savePlayerJson(owner, 'keptSafe') }
@@ -1467,6 +1559,9 @@ function sendBloomSummary(): void {
       youWaters: cycleWatersBy.get(key) ?? 0,
       youSeeds:  mine?.seeds ?? 0,
       youRares:  mine?.rares ?? 0,
+      galleryFlowers: bloomGallery.flowers,
+      galleryBoost:   bloomGallery.boost,
+      galleryStar:    bloomGallery.star,
     }, { to: [address] })
   }
   console.log(`[Server] Bloom finale: ${gardeners} gardener(s), ${waters} waters, ${seeds} seeds (${rares} rare+)`)
@@ -1493,7 +1588,7 @@ async function resetGarden(): Promise<void> {
     const ps     = PlantSync.getMutable(entity)
     // Watered during the bloom and still fresh — it stays (2026-09-22). Only dry plants,
     // or ones whose expiry is due this very tick, go back to droopy.
-    if (ps.isWatered && (plantExpiresAt.get(plantId) ?? 0) > now) { kept++; continue }
+    if (BLOOM_KEEPS_WATERED && ps.isWatered && (plantExpiresAt.get(plantId) ?? 0) > now) { kept++; continue }
     ps.isWatered = false
     ps.wateredAt = 0
     wateredByMap.delete(plantId)
@@ -1507,6 +1602,7 @@ async function resetGarden(): Promise<void> {
   // The garden may still be above threshold — hold the next trigger, then re-check once
   // the hold ends (nothing else calls checkBloomThreshold until the next water).
   bloomCooldownUntil = now + BLOOM_TRIGGER_COOLDOWN_MS
+  bloomArmed = getWateredCount() < currentBloomThreshold()   // armed only if the garden actually dropped
   setTimeout(() => executeTask(async () => { if (!bloomActive) checkBloomThreshold() }), BLOOM_TRIGGER_COOLDOWN_MS)
   console.log(`[Server] Garden reset complete — ${kept} watered plants kept, next bloom possible in ${BLOOM_TRIGGER_COOLDOWN_MS / 1000}s`)
 
@@ -1540,7 +1636,7 @@ function scheduleExpiry(
       console.log(`[Server] Plant expired: ${plantId}`)
       // Pause (not cancel) — preserves elapsed progress; timer resumes when health recovers.
       // Expiry must never start the sustain timer, only pause it.
-      if (getWateredCount() < currentBloomThreshold()) pauseBloomSustain()
+      if (getWateredCount() < currentBloomThreshold()) { bloomArmed = true; pauseBloomSustain() }
     })
   }, delayMs)
 }
@@ -1648,7 +1744,7 @@ function playerJoinSystem(): void {
       await loadPouch(address)
       sendPouch(address)
       // Re-send bloom state to players who join while it is already active
-      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
+      if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration, galleryFlowers: bloomGallery.flowers, galleryBoost: bloomGallery.boost }, { to: [address] })
       for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     if (golden && !golden.gatheredBy.has(address)) sendGolden([address])
       for (const b of boxes.values()) sendBox(b, [address])
@@ -1744,7 +1840,7 @@ export async function server(): Promise<void> {
   }
 
   // ── Message: waterPlant ──────────────────────────────────────
-  onRoomMessage<{ plantId: string }>('waterPlant', async (data, playerAddress) => {
+  onRoomMessage<{ plantId: string; sweet?: boolean }>('waterPlant', async (data, playerAddress) => {
     const { plantId } = data
     const entity      = plantEntities.get(plantId)
 
@@ -1794,7 +1890,9 @@ export async function server(): Promise<void> {
       savePlantStates()
       saveLeaderboard()
       void saveLifetimeFor(playerAddress)
-      const expiresAt = armExpiry(plantId, entity, now)
+      const bonus     = data.sweet === true ? HOLD_SWEET_BONUS : 0   // trusted flag; the bonus is small
+      const expiresAt = armExpiry(plantId, entity, now, bonus)
+      if (bonus > 0) console.log(`[Server] Just-right pour on ${plantId} by ${playerAddress} — watered time +${Math.round(bonus * 100)}%`)
 
       room.send('plantStateUpdate', { plantId, isWatered: true, wateredAt: now, wateredBy: displayName, expiresInMs: expiresAt - now, tier, almanac: almanacRankOf(playerAddress) })
       void markOnboarding(playerAddress, 'watered')
@@ -1882,6 +1980,18 @@ export async function server(): Promise<void> {
       sendNotice(playerAddress, `You're using all ${cap} of your planters — harvest one to plant again`)
       return
     }
+    // Plots: your own bed first, and other people's beds are protected while a free bed exists (shared/beds.ts).
+    // Admin "unlimited" is a test tool and plants anywhere.
+    if (!unlimitedPlanters.has(playerAddress)) {
+      const verdict = checkPlant(beds, bedInfo, playerAddress, b.boxId)
+      if (!verdict.ok) {
+        sendNotice(playerAddress, verdict.reason === 'plot_taken'
+          ? `That is ${verdict.ownerName}'s plot - plant in a free bed (any planter without a name sign)`
+          : `You have a bed with room - plant in Bed ${verdict.bed} first`)
+        sendBox(b, [playerAddress])
+        return
+      }
+    }
     // Admin unlimited: a RANDOM tier every time (test a mixed garden) and no seed needed or used
     const unlimited = unlimitedPlanters.has(playerAddress)
     const tier = unlimited ? Math.floor(Math.random() * RARITY_TIER_COUNT) : data.rarityTier
@@ -1900,6 +2010,7 @@ export async function server(): Promise<void> {
     b.waters    = 0
     b.waterers  = []
     b.lastWaterer = ''
+    b.tends = 0
     scheduleOpen(b)
     console.log(`[Server] ${b.ownerName} planted a tier-${tier} seed in ${b.boxId} (opens in ${formatGrowTime(growMsForTier(tier))})`)
     sendBox(b)
@@ -1947,8 +2058,7 @@ export async function server(): Promise<void> {
     void saveBoxes()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
-    void markOnboarding(playerAddress, 'harvested')
-    sendNotice(playerAddress, `Harvested your ${plantSpeciesById(keepsake.flower)?.name ?? keepsake.flower} — your planter is free again`)
+    void markOnboarding(playerAddress, 'harvested')   // (Notification pass 2026-09-27: the discovery card already says what you harvested)
   })
 
   // ── Message: waterBox (Phase 4 — the quiet social loop) ─────
@@ -1972,6 +2082,24 @@ export async function server(): Promise<void> {
     const left = BOX_WATER_MAX - b.waters
     sendNotice(playerAddress, `You watered ${b.ownerName}'s seed — ${shaveText(growShaveMsForTier(b.rarityTier))} sooner${left > 0 ? `, ${left} more water${left === 1 ? '' : 's'} can help it` : ', and that is all it can take'}`)
     if (isConnected(b.owner)) sendNotice(b.owner, `${name} watered your seed`)
+  })
+
+  // ── Message: tendBox — the OWNER waters their own seedling, once per growth stage ──
+  onRoomMessage<{ boxId: string }>('tendBox', async (data, playerAddress) => {
+    const b = boxes.get(data.boxId)
+    if (!b || !b.owner) return
+    if (b.owner !== playerAddress) return
+    if (b.opened) return
+    const now = Date.now()
+    if (tendsAvailable(b.opensAt, now, b.rarityTier, b.tends) <= 0) { sendNotice(playerAddress, 'It has had all the water it wants for now - tend it again when it grows'); return }
+    const shave = Math.round(growMsForTier(b.rarityTier) * TEND_SHAVE_FRACTION)
+    b.tends += 1
+    b.opensAt = Math.max(now, b.opensAt - shave)
+    scheduleOpen(b)
+    console.log(`[Server] ${b.ownerName} tended ${b.boxId} (${b.tends}, -${Math.round(shave / 1000)}s)`)
+    sendBox(b)
+    void saveBoxes()
+    sendNotice(playerAddress, `Your seed sprouts ${shaveText(shave)} sooner`)
   })
 
   // ── Message: giftFlower (Phase 4 — keepsakes) ───────────────
@@ -2008,20 +2136,20 @@ export async function server(): Promise<void> {
 
   // ── The Avenue: display / recall / inspect ───────────────────
   onRoomMessage<{ slotId: string; flowerIndex: number }>('displayFlower', async (data, playerAddress) => {
-    if (avenue.size === 0) { sendNotice(playerAddress, 'The Avenue is not open yet'); return }
+    if (avenue.size === 0) { sendNotice(playerAddress, 'The Rare Plant Gallery is not open yet'); return }
     const cap = avenueSlotCap()   // every slot when AVENUE_SLOT_CAP is 0 — then only a full wall stops you
-    if (avenueSlotsOwnedBy(playerAddress) >= cap) { sendNotice(playerAddress, cap === 1 ? 'You already have a flower on the Avenue — take it back first' : `You already have ${cap} flowers on the Avenue`); return }
+    if (avenueSlotsOwnedBy(playerAddress) >= cap) { sendNotice(playerAddress, cap === 1 ? 'You already have a flower in the Gallery — take it back first' : `You already have ${cap} flowers in the Gallery`); return }
     const flowers = await loadFlowers(playerAddress)
     const idx = Math.floor(data.flowerIndex)
     const f = flowers[idx]
     if (!f) { sendNotice(playerAddress, 'You no longer have that flower'); return }
-    if (f.rarityTier < AVENUE_MIN_TIER) { sendNotice(playerAddress, `The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`); return }
+    if (f.rarityTier < AVENUE_MIN_TIER) { sendNotice(playerAddress, `The Rare Plant Gallery is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`); return }
     let slot = data.slotId ? avenue.get(data.slotId) : undefined
     if (slot && slot.owner) { sendNotice(playerAddress, `${slot.ownerName}'s flower is on show there`); return }
     if (!slot) slot = [...avenue.values()].find(r => !r.owner)
     if (!slot) {
       const victim = avenueTidyCandidate()
-      if (!victim) { sendNotice(playerAddress, 'The Avenue is full right now — try again later'); return }
+      if (!victim) { sendNotice(playerAddress, 'The Gallery is full right now — try again later'); return }
       await returnAvenueFlower(victim, 'tidy')
       slot = avenue.get(victim.slotId)!
     }
@@ -2037,8 +2165,7 @@ export async function server(): Promise<void> {
     void saveAvenue()
     void savePlayerJson(playerAddress, 'flowers')
     void sendCollection(playerAddress)
-    void markOnboarding(playerAddress, 'avenueUsed')
-    sendNotice(playerAddress, `Your ${plantSpeciesById(f.flower)?.name ?? f.flower} is on the Avenue with your name on it`)
+    void markOnboarding(playerAddress, 'avenueUsed')   // (Notification pass 2026-09-27: it is standing there with your name on it — no echo)
   })
 
   onRoomMessage<{ slotId: string }>('recallFlower', async (data, playerAddress) => {
@@ -2062,14 +2189,15 @@ export async function server(): Promise<void> {
   // Rare+ flowers so the Avenue can be playtested without a genuine harvest chain ──
   onRoomMessage<{ count: number }>('adminFillAvenue', async (data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
-    if (avenue.size === 0) { sendNotice(address, 'The Avenue is not open yet'); return }
+    if (avenue.size === 0) { sendNotice(address, 'The Rare Plant Gallery is not open yet'); return }
     const empties = [...avenue.values()].filter(r => !r.owner)
     const n = Math.max(1, Math.min(empties.length, Math.floor(data?.count) || 8))
     const name = leaderboard.get(address)?.displayName ?? address.slice(0, 8) + '…'
     for (let i = 0; i < n; i++) {
       const slot = empties[i]
+      const tier = rollTierAtLeast(AVENUE_MIN_TIER, GUARANTEED_MAX_TIER)
       const flower: FlowerKeepsake = {
-        flower: rollPlantSpecies(), rarityTier: rollTierAtLeast(AVENUE_MIN_TIER), at: Date.now(),
+        flower: rollPlantSpecies(tier), rarityTier: tier, at: Date.now(),
         grownBy: name, plantedAt: Date.now(), openedAt: Date.now(), helpers: [],
       }
       avenue.set(slot.slotId, { slotId: slot.slotId, owner: address, ownerName: name, keepsake: flower, since: Date.now(), looks: 0 })
@@ -2084,7 +2212,7 @@ export async function server(): Promise<void> {
   onRoomMessage<Record<string, never>>('adminClearAvenue', async (_data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const mine = [...avenue.values()].filter(r => r.owner === address)
-    if (mine.length === 0) { sendNotice(address, 'You have no Avenue slots to clear'); return }
+    if (mine.length === 0) { sendNotice(address, 'You have no Gallery stands to clear'); return }
     for (const r of mine) { avenue.set(r.slotId, emptySlot(r.slotId)); sendAvenue(avenue.get(r.slotId)!) }
     void saveAvenue()
     console.log(`[Server] [Test] cleared ${mine.length} Avenue slot(s) for ${address}`)
@@ -2288,7 +2416,7 @@ export async function server(): Promise<void> {
     sendThreshold([address])
     await loadPouch(address)
     sendPouch(address)
-    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration }, { to: [address] })
+    if (bloomActive) room.send('bloomTriggered', { scale: bloomScale, variant: bloomVariant, elapsedMs: bloomStartedAt ? Date.now() - bloomStartedAt : 0, durationMs: bloomDuration, galleryFlowers: bloomGallery.flowers, galleryBoost: bloomGallery.boost }, { to: [address] })
     for (const seed of remainingSeeds(address)) sendSeed(seed, [address])
     if (golden && !golden.gatheredBy.has(address)) sendGolden([address])
     for (const b of boxes.values()) sendBox(b, [address])
@@ -2301,16 +2429,26 @@ export async function server(): Promise<void> {
     console.log(`[Server] Full sync sent to ${address} (${getWateredCount()}/${currentBloomThreshold()} watered)`)
   })
 
-  // ── Message: markPouchOpened ─────────────────────────────────
-  onRoomMessage<Record<string, never>>('markPouchOpened', async (_data, address) => {
-    await markOnboarding(address, 'pouchOpened')
+  // ── Message: tourProgress (guided tutorial, 2026-09-27) ──────
+  // The client reports each step it enters and when the tour is finished or ended, so a rejoin
+  // resumes where the player was, and a finished/ended tour never auto-starts again.
+  onRoomMessage<{ step: number; done: boolean }>('tourProgress', async (data, address) => {
+    const step = Math.floor(Number(data.step))
+    if (!Number.isFinite(step) || step < 0 || step > 50) return
+    const o = await loadOnboarding(address)
+    if (o.tourStep === step && o.tourDone === !!data.done) return
+    o.tourStep = step
+    o.tourDone = !!data.done
+    void savePlayerJson(address, 'onboarding')
   })
 
   // ── Message: adminResetOnboarding (test panel) ───────────────
   onRoomMessage<Record<string, never>>('adminResetOnboarding', async (_data, address) => {
     if (!isAdmin(address)) { sendNotice(address, 'Test tools: admin wallet only'); return }
     const o = await loadOnboarding(address)
-    o.watered = o.planted = o.harvested = o.gifted = o.pouchOpened = false
+    o.watered = o.planted = o.harvested = o.gifted = false
+    o.tourStep = 0
+    o.tourDone = false
     await savePlayerJson(address, 'onboarding')
     await sendOnboarding(address)
     sendNotice(address, 'Onboarding reset — the tutorial will replay from the first water')

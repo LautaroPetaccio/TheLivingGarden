@@ -93,12 +93,23 @@ function addEmitter(address: string): void {
   emitters.set(address, { parent, emitter })
 }
 
+/** `removeEntityWithChildren` walks the Transform tree starting AT the root, so it removes NOTHING
+ *  when the root has no Transform — and an AvatarAttach anchor doesn't have one. Retired and departed players'
+ *  trail emitters were never removed (2026-09-27).
+ *  Remove the Transform children (and their subtrees), then the anchor itself. */
+function removeAnchor(root: Entity): void {
+  const kids: Entity[] = []
+  for (const [e, t] of engine.getEntitiesWith(Transform)) if (t.parent === root) kids.push(e)
+  for (const k of kids) engine.removeEntityWithChildren(k)
+  engine.removeEntity(root)
+}
+
 /** Stop emitting now; remove once the last sparkles have faded. */
 function retireAllEmitters(): void {
   const retired = [...emitters.values()]
   emitters.clear()
   for (const e of retired) ParticleSystem.getMutable(e.emitter).active = false
-  timers.setTimeout(() => { for (const e of retired) engine.removeEntityWithChildren(e.parent) }, TRAIL_LIFE_S * 1_000)
+  timers.setTimeout(() => { for (const e of retired) removeAnchor(e.parent) }, TRAIL_LIFE_S * 1_000)
 }
 
 function syncRoster(gen: number): void {
@@ -109,7 +120,7 @@ function syncRoster(gen: number): void {
     present.add(id.address.toLowerCase())
   }
   for (const [address, e] of emitters) {
-    if (!present.has(address)) { engine.removeEntityWithChildren(e.parent); emitters.delete(address) }
+    if (!present.has(address)) { removeAnchor(e.parent); emitters.delete(address) }
   }
   for (const address of present) if (!emitters.has(address)) addEmitter(address)
   timers.setTimeout(() => syncRoster(gen), ROSTER_MS)

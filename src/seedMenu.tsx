@@ -16,8 +16,8 @@
 // =============================================================
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
-import { PLANT_SPECIES, RARITY_TIERS, rarityTierById, plantSpeciesById, nextMilestone, milestoneTarget, milestoneTitle, growMsForTier, shortGrowTime, AVENUE_MIN_TIER } from './shared/config'
-import { setPreferredTier, nextSeedTier, getPouch, getFlowers, getDiscovered, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed, displayOnAvenue, armAvenuePlacement } from './playerInventory'
+import { PLANT_SPECIES, RARITY_TIERS, rarityTierById, plantSpeciesById, nextMilestone, milestoneTarget, milestoneTitle, growMsForTier, shortGrowTime, AVENUE_MIN_TIER, stampTotal, nextStampMilestone, stampMilestoneTarget } from './shared/config'
+import { setPreferredTier, nextSeedTier, getPouch, getFlowers, getDiscovered, stampsFound, gardenersHere, giveFlower, getHeld, holdFlower, holdSeed, displayOnAvenue, armAvenuePlacement } from './playerInventory'
 import { showToast } from './notifications'
 
 /** 128 px thumbnails made from each species' asset-pack thumbnail.png (assets/images/plantThumbs). */
@@ -40,6 +40,8 @@ let avenueSlot: string | null = null   // set when opened by tapping an empty Av
 export function isSeedMenuOpen(): boolean { return open }
 export function toggleSeedMenu(): void { open = !open; if (!open) { selectedKey = ''; giftMode = false; giftPage = 0; page = 0; almanacPage = 0; almanacSel = null; tierFilter = null; avenueSlot = null } }
 export function openSeedMenu(): void { open = true }
+/** Opened from the world seed rack's gift board: the Flowers tab, where a kept flower is picked and given. */
+export function openSeedMenuFlowers(): void { open = true; tab = 'flowers'; selectedKey = ''; giftMode = false; page = 0 }
 /** Tapped an empty Avenue planter with nothing in hand: open Flowers so they can pick one for it. */
 export function openSeedMenuForAvenue(slotId: string): void { open = true; tab = 'flowers'; avenueSlot = slotId; selectedKey = ''; giftMode = false; page = 0; armAvenuePlacement(null) }
 
@@ -83,8 +85,8 @@ const FLOWER_MAX_ROWS  = 3
  *  (KJ screenshot 2026-09-21). Normalise once, here, where flowers enter the UI. */
 const safeTier = (t: number): number => (Number.isInteger(t) && t >= 0 && t < RARITY_TIERS.length ? t : 0)
 
-interface Group { key: string; flower: string; rarityTier: number; count: number; lastIndex: number }
-function groupFlowers(): Group[] {
+export interface Group { key: string; flower: string; rarityTier: number; count: number; lastIndex: number }
+export function groupFlowers(): Group[] {
   const map = new Map<string, Group>()
   getFlowers().forEach((raw, i) => {
     const f = { ...raw, rarityTier: safeTier(raw.rarityTier) }
@@ -352,7 +354,7 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
       {/* ── FLOWERS TAB */}
       <UiEntity uiTransform={{ display: tab === 'flowers' ? 'flex' : 'none', width: '100%', flexDirection: 'column' }}>
         <Label value={`${getFlowers().length} kept - ${speciesFound}/${PLANT_SPECIES.length} species discovered`} fontSize={fs(14)} color={DIM} textAlign="middle-left" textWrap="nowrap" uiTransform={{ width: '100%', height: fs(26), margin: { top: px(8), bottom: px(4) } }} />
-        <Label value={avenueSlot === null ? '' : eligible.length > 0 ? `${eligible.length} of your flowers can go on the Avenue` : `None of your flowers qualify yet — ${rarityTierById(AVENUE_MIN_TIER).name} and up only`} fontSize={fs(14)} color={CREAM} textAlign="middle-left" textWrap="wrap" uiTransform={{ display: avenueSlot !== null ? 'flex' : 'none', width: '100%', height: fs(26), margin: { bottom: px(4) } }} />
+        <Label value={avenueSlot === null ? '' : eligible.length > 0 ? `${eligible.length} of your flowers can go in the Gallery` : `None of your flowers qualify yet — ${rarityTierById(AVENUE_MIN_TIER).name} and up only`} fontSize={fs(14)} color={CREAM} textAlign="middle-left" textWrap="wrap" uiTransform={{ display: avenueSlot !== null ? 'flex' : 'none', width: '100%', height: fs(26), margin: { bottom: px(4) } }} />
 
         {/* rarity filters — each on its own colour, so the row doubles as the legend */}
         <UiEntity uiTransform={{ display: ownedTiers.length > 1 ? 'flex' : 'none', width: '100%', flexDirection: 'row', flexWrap: 'wrap', margin: { top: px(6) } }}>
@@ -393,17 +395,17 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
         <UiEntity uiTransform={{ flexGrow: 1, flexBasis: 0, height: px(44), alignItems: 'center', justifyContent: 'center', borderRadius: px(22) }} uiBackground={{ color: sel && sel.rarityTier >= AVENUE_MIN_TIER ? MOSS : RAISED }}
           onMouseDown={() => {
             if (!sel) return
-            if (sel.rarityTier < AVENUE_MIN_TIER) { showToast(`The Avenue is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`, 4_000, false); return }
+            if (sel.rarityTier < AVENUE_MIN_TIER) { showToast(`The Rare Plant Gallery is for ${rarityTierById(AVENUE_MIN_TIER).name} flowers and up`, 4_000, false); return }
             // Opened FROM a slot: straight in, that slot was the choice. Opened from the
             // pouch: arm it and let them tap the spot they want (KJ 2026-09-22).
             if (avenueSlot !== null) { displayOnAvenue(avenueSlot, sel.lastIndex) }
             else {
               armAvenuePlacement(sel.lastIndex)
-              showToast('Now tap the spot on the Avenue wall where you want it', 6_000, false)
+              showToast('Now tap the Gallery stand where you want it', 6_000, false)
             }
             selectedKey = ''; avenueSlot = null; open = false
           }}>
-          <Label value={avenueSlot ? 'Display here' : 'Avenue…'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
+          <Label value={avenueSlot ? 'Display here' : 'Gallery…'} fontSize={fs(17)} color={sel && sel.rarityTier >= AVENUE_MIN_TIER ? CREAM : DIM} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
       </UiEntity>
       </UiEntity>
@@ -449,6 +451,18 @@ export function SeedMenuUi(props: { px: (n: number) => number; fs: (n: number) =
         <UiEntity uiTransform={{ width: '100%', height: px(8), margin: { top: px(2), bottom: px(10) }, borderRadius: px(4) }} uiBackground={{ color: { r: 1, g: 1, b: 1, a: 0.1 } }}>
           <UiEntity uiTransform={{ width: `${Math.round((speciesFound / Math.max(1, PLANT_SPECIES.length)) * 100)}%`, height: '100%', borderRadius: px(3) }} uiBackground={{ color: MOSS }} />
         </UiEntity>
+
+        {/* The long tail: every species in every rarity. Species alone runs out; this does not. */}
+        <Label
+          value={`${stampsFound()} of ${stampTotal()} rarity stamps - each species in each rarity`}
+          fontSize={fs(13)} color={{ ...CREAM, a: 0.7 }} textAlign="middle-left" textWrap="nowrap"
+          uiTransform={{ width: '100%', height: fs(20), margin: { bottom: px(2) } }}
+        />
+        <Label
+          value={(() => { const n = nextStampMilestone(stampsFound()); return n ? `Next: ${n.title} at ${stampMilestoneTarget(n)} stamps - ${stampMilestoneTarget(n) - stampsFound()} to go` : 'Every rarity stamp collected.' })()}
+          fontSize={fs(13)} color={{ ...CREAM, a: 0.85 }} textAlign="middle-left" textWrap="wrap"
+          uiTransform={{ width: '100%', height: fs(22), margin: { bottom: px(6) } }}
+        />
 
         {/* Name the next rung outright. The goal being invisible is the whole reason the
             collection did not scratch (Fin 2026-09-21) — so the Almanac states it. */}

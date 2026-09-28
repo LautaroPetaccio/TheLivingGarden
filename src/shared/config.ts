@@ -3,6 +3,8 @@
 // Imported by both server and client so constants stay in sync.
 // =============================================================
 
+import { hofAvenueSlots, HOF_FRONT_OUT } from './hallOfFame'
+
 /** Daily bloom windows in UTC. Add or remove entries to change the schedule. */
 export const BLOOM_WINDOWS: ReadonlyArray<{ hour: number; minute: number }> = [
   { hour:  5, minute: 30 },   // 05:30 UTC
@@ -44,7 +46,54 @@ const SEEDS_BY_CONTRIBUTORS     = [4, 5, 6, 7, 8, 10]            // TUNING — 1
 const RARE_MULT_BY_CONTRIBUTORS = [1, 1.4, 1.8, 2.2, 2.6, 3]     // TUNING — × SEED_RARE_AT_SOLO
 export const SEED_RARE_AT_SOLO  = 0.10      // TUNING — "mostly normal, occasionally rare"
 export const GUARANTEED_RARE_AT_CONTRIBUTORS = 4   // TUNING — one seed of tier ≥ Rare from here
-export const SEED_FALL_MS       = 5_000     // drift-down duration from spawn height to ground
+/** Press-and-hold watering (skillCheck.tsx). The server applies HOLD_SWEET_BONUS; it only sees the flag. */
+/** Off 2026-09-24 (KJ: "crap, and can be overridden with a tap"); back ON 2026-09-27 as a real skill
+ *  check (KJ: "facing the right way with the camera and pressing for a random amount of time shown
+ *  on the screen"). There is NO tap bypass any more — a pour is the only way to water:
+ *    • the meter fills only while the camera faces the plant (within HOLD_AIM_CONE_DEG), and drains
+ *      at HOLD_DRAIN × the fill speed while you look away;
+ *    • the green window is RANDOM per pour — start in [HOLD_SWEET_MIN_AT, HOLD_SWEET_MAX_AT], width
+ *      in [HOLD_SWEET_W_MIN, HOLD_SWEET_W_MAX] — so a timing can't be memorised;
+ *    • let go below HOLD_MIN_POUR: too little, nothing happens; anywhere else before the red: watered;
+ *      in the green: a perfect pour (+HOLD_SWEET_BONUS watered time, streak +1); in the red
+ *      (HOLD_OVER_GAP past the green) or holding to full: too much, NOT watered. */
+export const HOLD_WATERING_ENABLED = true
+export const HOLD_FILL_MS       = 2_000   // TUNING — empty to full while facing the plant
+export const HOLD_MIN_POUR      = 0.18    // TUNING
+export const HOLD_SWEET_MIN_AT  = 0.35    // TUNING
+export const HOLD_SWEET_MAX_AT  = 0.7     // TUNING
+export const HOLD_SWEET_W_MIN   = 0.12    // TUNING
+export const HOLD_SWEET_W_MAX   = 0.2     // TUNING
+export const HOLD_OVER_GAP      = 0.08    // TUNING
+export const HOLD_AIM_CONE_DEG  = 35      // TUNING — generous: on a phone you tap the plant off-centre
+export const HOLD_DRAIN         = 0.6     // TUNING
+export const HOLD_SWEET_BONUS = 0.4        // TUNING — fraction of the plant's normal watered time added
+export const HOLD_SHOW_AFTER_MS = 250      // shorter than this is a plain tap: no meter
+/** A Bloom keeps the plants watered during it through the reset (2026-09-22). Playtest
+ *  2026-09-24: the garden still sitting healthy after a Bloom made the loop confusing. */
+export const BLOOM_KEEPS_WATERED = false
+/** Seed chase (KJ 2026-09-24): rarer seeds hop away from an approaching gardener, a limited
+ *  number of times, then let themselves be caught. Index = rarity tier (Common .. Unique).
+ *  Cosmetic and client-side — every seed is still gathered through the server. */
+export const SEED_DODGES_BY_TIER: ReadonlyArray<number> = [0, 2, 2, 4, 4, 4, 4, 4]   // TUNING
+export const SEED_DODGES_MOBILE_MAX = 1     // TUNING — the phone joystick is imprecise
+export const SEED_DODGE_TRIGGER_M = 3.0     // m — a dodger hops when you get this close
+export const SEED_HOP_M_LOW  = 2.5          // m per hop, Uncommon / Rare
+export const SEED_HOP_M_HIGH = 3.5          // m per hop, Epic and above
+export const SEED_HOP_MS     = 600          // TUNING
+export const SEED_HOP_ARC_H  = 0.7          // m the hop rises
+export const SEED_HOP_COOLDOWN_MS = 350     // after landing, before it can hop again
+export const SEED_NO_DODGE_LAST_MS = 20_000 // stop dodging this close to a seed's evaporation
+export const SEED_FLIGHT_SPEED  = 4.0       // TUNING — m/s along the ground, so a far seed takes longer and stays visible
+export const SEED_FLIGHT_MIN_MS = 2_600
+export const SEED_FLIGHT_MAX_MS = 5_000
+export const SEED_LAUNCH_STAGGER_MS = 1_200 // TUNING — seeds leave the Bloom one by one over this window
+export const SEED_ARC_H         = 4.0       // TUNING — m the arc rises above the straight line
+export const SEED_FLIGHT_SCALE  = 3.0       // TUNING — seeds are this much bigger at launch, easing to normal on landing
+/** Where seeds pour out of the Bloom: the crown of the flower, measured from Models/Bloom/Bloom.glb
+ *  (node at 5.81, -0.66, 23.91; ~6.5 m wide, top at y≈5.6). Each seed starts within SEED_ORIGIN_SPREAD_M of it. */
+export const BLOOM_SEED_ORIGIN = { x: 5.8, y: 5.3, z: 23.9 } as const
+export const SEED_ORIGIN_SPREAD_M = 1.2
 export const SEED_LIFETIME_MS   = 120_000   // ungathered seeds fade after 2 min (the trickle's last wave lands 1 min before the end)
 export const SEED_GATHER_RADIUS = 2.0       // m — walking this close starts the drift toward you
 export const SEED_COLLECT_RADIUS = 0.7      // m — seed this close is gathered (client sends request)
@@ -63,6 +112,18 @@ export function seedSpawnCount(contributors: number): number {
  *  rollSeedTier for what "above Common" rolls into. */
 export function seedRareChance(contributors: number, rareSeedMult = 1): number {
   return Math.min(1, SEED_RARE_AT_SOLO * byContributors(RARE_MULT_BY_CONTRIBUTORS, contributors) * rareSeedMult)
+}
+/** Rare Plant Gallery → Bloom (KJ 2026-09-27: "still two divorced games"). Every flower on show in
+ *  the Gallery raises the rare-seed chance of EVERY Bloom, for everyone — the rarer the flower, the
+ *  bigger its share. Summed over the Gallery, capped, and applied as ×(1 + boost) on top of the
+ *  gardener and variant multipliers. The server snapshots it when a Bloom triggers. */
+export const GALLERY_BOOST_BY_TIER: ReadonlyArray<number> = [0, 0, 0.02, 0.03, 0.04, 0.05, 0.08, 0.1]   // TUNING — index = rarity tier
+export const GALLERY_BOOST_CAP = 0.5   // TUNING — a packed Gallery at most +50%
+export function galleryBoostOf(tier: number): number {
+  return GALLERY_BOOST_BY_TIER[Math.max(0, Math.min(GALLERY_BOOST_BY_TIER.length - 1, Math.floor(tier)))] ?? 0
+}
+export function galleryBoost(tiers: ReadonlyArray<number>): number {
+  return Math.min(GALLERY_BOOST_CAP, tiers.reduce((sum, t) => sum + galleryBoostOf(t), 0))
 }
 /** How long health must stay ≥ BLOOM_THRESHOLD (cumulatively) before bloom fires.
  *  Shared by server (sustain timer) and client (countdown display). */
@@ -106,6 +167,12 @@ export function bloomDurationMs(contributors: number): number {
  *  before the bloom ends so it can still be gathered in the bloom. */
 export const SEED_WAVE_GAP_MS             = 30_000   // TUNING
 export const SEED_LAST_WAVE_BEFORE_END_MS = 60_000   // TUNING
+/** The Bloom's OpenAction plays at 0.25x speed and it reaches OpenIdle 20 s after the trigger
+ *  (bloomSystem BLOOM_SWITCH_TO_OPEN_MS). Seeds used to leave at t=0, out of a still-closed flower
+ *  (KJ client log 2026-09-24). The opening burst now waits for the flower to be open, and carries
+ *  most of the seeds so it reads as a shower; the rest trickle in afterwards. */
+export const BLOOM_OPEN_MS = 20_000
+export const SEED_BURST_FRACTION = 0.6   // TUNING — share of a bloom's seeds in the opening burst
 
 // ── Scene-wide spatial / asset constants ─────────────────────
 /** World-space centre of the Bloom model — used for sound, sparkles, shockwaves. */
@@ -123,7 +190,9 @@ export const GARDEN_BOUNDS = { xMin: 3, xMax: 14, zMin: 3, zMax: 22 } as const
 // computes the same position from goldenSeedPos, so nothing streams per frame.
 export const GOLDEN_SEED_AT_FRACTION   = 0.3   // TUNING — late enough that bloom-arrivals see it
 /** What a rainbow catch rolls into — the realistic route to Mythic and Unique. */
-const RAINBOW_TIER_WEIGHTS: ReadonlyArray<[number, number]> = [[4, 55], [5, 30], [6, 12], [7, 3]]   // TUNING — [tier, weight]: Legendary / Exotic / Mythic / Unique
+// Legendary / Exotic ONLY. It used to roll Mythic 12% and Unique 3% for EVERY gardener who caught it, which made the hard tiers
+// far easier than the ordinary roll (KJ 2026-09-25: Mythic and Unique must be hard). Mythic and Unique come only from the ordinary roll.
+const RAINBOW_TIER_WEIGHTS: ReadonlyArray<[number, number]> = [[4, 65], [5, 35]]   // TUNING — [tier, weight]
 export function rollRainbowTier(): number {
   let r = Math.random() * RAINBOW_TIER_WEIGHTS.reduce((a, [, w]) => a + w, 0)
   for (const [tier, w] of RAINBOW_TIER_WEIGHTS) { r -= w; if (r <= 0) return tier }
@@ -174,73 +243,131 @@ export function plantDecayMs(plantId: string, gardeners: number): number {
 // ── v2: seed boxes (GDD §3 step 4, §4.1 D1 hook, §4.3 seed appointment) ──
 // A caught seed is planted in a named box in the SHARED garden; it grows on a
 // real-world timer and opens as an unidentified flower (rarity known, identity not).
-// Planter layout — baked 2026-09-18 from KJ's in-preview placement (planterLayoutTool,
-// Storage 'planterDraft'), 96 planters. TEMPORARY positions: KJ will re-lay them out.
-// rot = degrees about Y; 0 = front (sign side) faces +z. Ids are stable: box_1..box_8
-// kept their records (planted seeds moved onto these first eight spots).
-// BAKED from KJ's in-world planter editor (planterLayoutTool). 96 -> 51 (2026-09-21)
-// -> 54 (2026-09-22) -> re-baked 2026-09-22 15:37 from the saved draft (10 planters
-// nudged, none added or removed; Storage draft and KJ's pasted export agreed exactly).
-// KJ is laying ONE SIDE
-// out first and will mirror it across afterwards, so the current list is deliberately
-// lopsided — do not "fix" the asymmetry. A planted planter that leaves this list is not
-// lost: loadBoxes collects it into orphanedBoxes and tidyPlanter returns the contents to
-// its owner at startup.
+// Planter layout — REBAKED 2026-09-25 from KJ's new scene.glb: the five PlanterBox_newMat strips are the planter rows. 96 planters =
+// 24 beds of 4 (design/planter-beds-from-scene-glb.json), one bed per block below, numbered from the shed door outward. Planters sit on each
+// strip's centre line (1.5 m pitch, 1 m between beds), 1 m clear of the shed footprint. world = (8 - glb.x, glb.z + 24). rot: 0 = front faces
+// +z, 90 = +x, 180 = -z, 270 = -x; rows face the door axis. Ids are stable: KJ's four planted planters (box_4, box_6, box_99, box_100) are bed 1,
+// the other 50 old ids are reused, 42 are new. Before this: baked 2026-09-22 from the in-world planter editor.
 export const BOX_POSITIONS: ReadonlyArray<{ id: string; x: number; z: number; rot: number }> = [
-  { id: 'box_1', x: 29.4, z: 19.5, rot: 180 },
-  { id: 'box_2', x: 28.2, z: 19.5, rot: 180 },
-  { id: 'box_3', x: 25.8, z: 19.6, rot: 180 },
-  { id: 'box_4', x: 24.6, z: 19.6, rot: 180 },
-  { id: 'box_6', x: 23.2, z: 21.9, rot: 270 },
-  { id: 'box_50', x: 5.4, z: 9.4, rot: 270 },
-  { id: 'box_51', x: 5.4, z: 8.3, rot: 270 },
-  { id: 'box_52', x: 1.2, z: 6.9, rot: 90 },
-  { id: 'box_53', x: 1.2, z: 5.7, rot: 90 },
-  { id: 'box_54', x: 1.3, z: 2.2, rot: 90 },
-  { id: 'box_55', x: 1.3, z: 1, rot: 90 },
-  { id: 'box_56', x: 6, z: -1.9, rot: 270 },
-  { id: 'box_57', x: 8.2, z: -1.9, rot: 180 },
-  { id: 'box_58', x: 9.3, z: -1.9, rot: 90 },
-  { id: 'box_59', x: 5.2, z: -6.6, rot: 0 },
-  { id: 'box_60', x: 6.3, z: -6.6, rot: 0 },
-  { id: 'box_61', x: 7.4, z: -6.7, rot: 0 },
-  { id: 'box_62', x: 8.5, z: -6.7, rot: 0 },
-  { id: 'box_63', x: 17.7, z: -4.6, rot: 0 },
-  { id: 'box_64', x: 19.5, z: -4.6, rot: 0 },
-  { id: 'box_65', x: 22.8, z: -6.9, rot: 0 },
-  { id: 'box_66', x: 23.9, z: -6.9, rot: 0 },
-  { id: 'box_67', x: 26.2, z: -1.9, rot: 90 },
-  { id: 'box_68', x: 29.8, z: -6.6, rot: 0 },
-  { id: 'box_69', x: 31, z: -6.6, rot: 0 },
-  { id: 'box_70', x: 30.9, z: -0.3, rot: 270 },
-  { id: 'box_71', x: 30.9, z: 1.9, rot: 270 },
-  { id: 'box_72', x: 30.9, z: 3, rot: 270 },
-  { id: 'box_73', x: 26.5, z: 10.4, rot: 180 },
-  { id: 'box_74', x: 30.9, z: 5.4, rot: 270 },
-  { id: 'box_75', x: 30.9, z: 6.5, rot: 270 },
-  { id: 'box_76', x: 25.4, z: 10.4, rot: 180 },
-  { id: 'box_77', x: 30.9, z: 7.9, rot: 270 },
-  { id: 'box_78', x: 21.9, z: 10, rot: 180 },
-  { id: 'box_79', x: 30.9, z: 9, rot: 270 },
-  { id: 'box_80', x: 26.5, z: 11.6, rot: 90 },
-  { id: 'box_81', x: 26.5, z: 12.8, rot: 90 },
-  { id: 'box_82', x: 25.4, z: 14, rot: 0 },
-  { id: 'box_83', x: 30.9, z: 14.9, rot: 270 },
-  { id: 'box_84', x: 30.9, z: 17.6, rot: 270 },
-  { id: 'box_85', x: 22.9, z: -2, rot: 270 },
-  { id: 'box_86', x: 26.1, z: 0, rot: 90 },
-  { id: 'box_87', x: 24.4, z: -1.7, rot: 180 },
-  { id: 'box_88', x: 21.4, z: 14.1, rot: 0 },
-  { id: 'box_89', x: 20.9, z: 12.5, rot: 270 },
-  { id: 'box_90', x: 26.5, z: 14, rot: 0 },
-  { id: 'box_91', x: 6.5, z: 9.4, rot: 0 },
-  { id: 'box_92', x: 7.1, z: -1.9, rot: 180 },
-  { id: 'box_93', x: 30.9, z: 16.3, rot: 270 },
-  { id: 'box_94', x: 30.9, z: -1.5, rot: 270 },
-  { id: 'box_97', x: 6, z: -0.8, rot: 270 },
-  { id: 'box_98', x: 20.9, z: 11.4, rot: 270 },
-  { id: 'box_99', x: 23.2, z: 20.7, rot: 270 },
-  { id: 'box_100', x: 23.2, z: 19.5, rot: 270 },
+  { id: 'box_4', x: -19.22, z: 36.36, rot: 90 },
+  { id: 'box_6', x: -19.22, z: 34.86, rot: 90 },
+  { id: 'box_99', x: -19.22, z: 33.36, rot: 90 },
+  { id: 'box_100', x: -19.22, z: 31.86, rot: 90 },
+
+  { id: 'box_1', x: -9.83, z: 36.36, rot: 270 },
+  { id: 'box_2', x: -9.83, z: 34.86, rot: 270 },
+  { id: 'box_3', x: -9.83, z: 33.36, rot: 270 },
+  { id: 'box_50', x: -9.83, z: 31.86, rot: 270 },
+
+  { id: 'box_51', x: -29.97, z: 35.15, rot: 90 },
+  { id: 'box_52', x: -29.97, z: 33.65, rot: 90 },
+  { id: 'box_53', x: -29.97, z: 32.15, rot: 90 },
+  { id: 'box_54', x: -29.97, z: 30.65, rot: 90 },
+
+  { id: 'box_55', x: -19.22, z: 29.36, rot: 90 },
+  { id: 'box_56', x: -19.22, z: 27.86, rot: 90 },
+  { id: 'box_57', x: -19.22, z: 26.36, rot: 90 },
+  { id: 'box_58', x: -19.22, z: 24.86, rot: 90 },
+
+  { id: 'box_59', x: -1.33, z: 37.11, rot: 270 },
+  { id: 'box_60', x: -1.33, z: 35.61, rot: 270 },
+  { id: 'box_61', x: -1.33, z: 34.11, rot: 270 },
+  { id: 'box_62', x: -1.33, z: 32.61, rot: 270 },
+
+  { id: 'box_63', x: -9.83, z: 29.36, rot: 270 },
+  { id: 'box_64', x: -9.83, z: 27.86, rot: 270 },
+  { id: 'box_65', x: -9.83, z: 26.36, rot: 270 },
+  { id: 'box_66', x: -9.83, z: 24.86, rot: 270 },
+
+  { id: 'box_67', x: -29.97, z: 28.15, rot: 90 },
+  { id: 'box_68', x: -29.97, z: 26.65, rot: 90 },
+  { id: 'box_69', x: -29.97, z: 25.15, rot: 90 },
+  { id: 'box_70', x: -29.97, z: 23.65, rot: 90 },
+
+  { id: 'box_71', x: -1.33, z: 30.11, rot: 270 },
+  { id: 'box_72', x: -1.33, z: 28.61, rot: 270 },
+  { id: 'box_73', x: -1.33, z: 27.11, rot: 270 },
+  { id: 'box_74', x: -1.33, z: 25.61, rot: 270 },
+
+  { id: 'box_75', x: -19.22, z: 22.36, rot: 90 },
+  { id: 'box_76', x: -19.22, z: 20.86, rot: 90 },
+  { id: 'box_77', x: -19.22, z: 19.36, rot: 90 },
+  { id: 'box_78', x: -19.22, z: 17.86, rot: 90 },
+
+  { id: 'box_79', x: -9.83, z: 22.36, rot: 270 },
+  { id: 'box_80', x: -9.83, z: 20.86, rot: 270 },
+  { id: 'box_81', x: -9.83, z: 19.36, rot: 270 },
+  { id: 'box_82', x: -9.83, z: 17.86, rot: 270 },
+
+  { id: 'box_83', x: -29.97, z: 21.15, rot: 90 },
+  { id: 'box_84', x: -29.97, z: 19.65, rot: 90 },
+  { id: 'box_85', x: -29.97, z: 18.15, rot: 90 },
+  { id: 'box_86', x: -29.97, z: 16.65, rot: 90 },
+
+  { id: 'box_87', x: -1.33, z: 23.11, rot: 270 },
+  { id: 'box_88', x: -1.33, z: 21.61, rot: 270 },
+  { id: 'box_89', x: -1.33, z: 20.11, rot: 270 },
+  { id: 'box_90', x: -1.33, z: 18.61, rot: 270 },
+
+  { id: 'box_91', x: -19.22, z: 15.36, rot: 90 },
+  { id: 'box_92', x: -19.22, z: 13.86, rot: 90 },
+  { id: 'box_93', x: -19.22, z: 12.36, rot: 90 },
+  { id: 'box_94', x: -19.22, z: 10.86, rot: 90 },
+
+  { id: 'box_97', x: -9.83, z: 15.36, rot: 270 },
+  { id: 'box_98', x: -9.83, z: 13.86, rot: 270 },
+  { id: 'box_101', x: -9.83, z: 12.36, rot: 270 },
+  { id: 'box_102', x: -9.83, z: 10.86, rot: 270 },
+
+  { id: 'box_103', x: -29.97, z: 14.15, rot: 90 },
+  { id: 'box_104', x: -29.97, z: 12.65, rot: 90 },
+  { id: 'box_105', x: -29.97, z: 11.15, rot: 90 },
+  { id: 'box_106', x: -29.97, z: 9.65, rot: 90 },
+
+  { id: 'box_107', x: -1.33, z: 16.11, rot: 270 },
+  { id: 'box_108', x: -1.33, z: 14.61, rot: 270 },
+  { id: 'box_109', x: -1.33, z: 13.11, rot: 270 },
+  { id: 'box_110', x: -1.33, z: 11.61, rot: 270 },
+
+  { id: 'box_111', x: -19.22, z: 8.36, rot: 90 },
+  { id: 'box_112', x: -19.22, z: 6.86, rot: 90 },
+  { id: 'box_113', x: -19.22, z: 5.36, rot: 90 },
+  { id: 'box_114', x: -19.22, z: 3.86, rot: 90 },
+
+  { id: 'box_115', x: -9.83, z: 8.36, rot: 270 },
+  { id: 'box_116', x: -9.83, z: 6.86, rot: 270 },
+  { id: 'box_117', x: -9.83, z: 5.36, rot: 270 },
+  { id: 'box_118', x: -9.83, z: 3.86, rot: 270 },
+
+  { id: 'box_119', x: -29.97, z: 7.15, rot: 90 },
+  { id: 'box_120', x: -29.97, z: 5.65, rot: 90 },
+  { id: 'box_121', x: -29.97, z: 4.15, rot: 90 },
+  { id: 'box_122', x: -29.97, z: 2.65, rot: 90 },
+
+  { id: 'box_123', x: -1.33, z: 9.11, rot: 270 },
+  { id: 'box_124', x: -1.33, z: 7.61, rot: 270 },
+  { id: 'box_125', x: -1.33, z: 6.11, rot: 270 },
+  { id: 'box_126', x: -1.33, z: 4.61, rot: 270 },
+
+  { id: 'box_127', x: -29.97, z: 0.15, rot: 90 },
+  { id: 'box_128', x: -29.97, z: -1.35, rot: 90 },
+  { id: 'box_129', x: -29.97, z: -2.85, rot: 90 },
+  { id: 'box_130', x: -29.97, z: -4.35, rot: 90 },
+
+  { id: 'box_131', x: -22.69, z: -5.86, rot: 0 },
+  { id: 'box_132', x: -21.19, z: -5.86, rot: 0 },
+  { id: 'box_133', x: -19.69, z: -5.86, rot: 0 },
+  { id: 'box_134', x: -18.19, z: -5.86, rot: 0 },
+
+  { id: 'box_135', x: -15.69, z: -5.86, rot: 0 },
+  { id: 'box_136', x: -14.19, z: -5.86, rot: 0 },
+  { id: 'box_137', x: -12.69, z: -5.86, rot: 0 },
+  { id: 'box_138', x: -11.19, z: -5.86, rot: 0 },
+
+  { id: 'box_139', x: -8.69, z: -5.86, rot: 0 },
+  { id: 'box_140', x: -7.19, z: -5.86, rot: 0 },
+  { id: 'box_141', x: -5.69, z: -5.86, rot: 0 },
+  { id: 'box_142', x: -4.19, z: -5.86, rot: 0 },
 ]
 // ── Onboarding (v2) ──────────────────────────────────────────
 /** KJ's ground arrow (2026-09-20): 20 tris, gold emissive, no texture, lying flat in
@@ -261,7 +388,6 @@ export const ARROW_GROUND_LIFT = 0.05
  *  Tween: the explorer writes every actively-tweened Transform back into the scene every
  *  frame, which is what tanked scene tick fps in the 09-18 perf pass. */
 export const ARROW_BOB_AMPLITUDE = 0.08
-export const ARROW_BOB_PERIOD_MS = 1600
 /** How often the onboarding re-picks which plant to point at (seconds). */
 export const ONBOARDING_REPICK_S = 0.25
 /** Don't point at anything further away than this — better to show nothing than to
@@ -315,8 +441,38 @@ export const ALMANAC_MILESTONES: ReadonlyArray<AlmanacMilestone> = [
   { species: 10, seedTier: 2, planters: 0, title: 'Gardener' },       // TUNING
   { species: 25, seedTier: 3, planters: 1, title: 'Botanist' },
   { species: 50, seedTier: 5, planters: 1, title: 'Curator' },
-  { species: -1, seedTier: 7, planters: 1, title: 'Keeper of the Garden' },
+  { species: -1, seedTier: 5, planters: 1, title: 'Keeper of the Garden' },   // Exotic, NOT Unique: a Unique for every Keeper is a Unique for everyone (KJ 2026-09-25)
 ]
+/** STAMP milestones (KJ 2026-09-25): a second ladder on RARITY STAMPS (each species in each rarity). The species
+ *  ladder above ends within a day or two at a 2-minute growth base, so this one paces the rest of the month. Same
+ *  reward shape; kept separate so the two ladders can never double-pay. -1 = every stamp that exists.
+ *  Planter grants are deliberately few (a planter is faster progress). */
+export interface StampMilestone { stamps: number; seedTier: number; planters: number; title: string }
+export const STAMP_MILESTONES: ReadonlyArray<StampMilestone> = [
+  { stamps: 25,  seedTier: 2, planters: 0, title: 'Collector' },          // TUNING
+  { stamps: 50,  seedTier: 3, planters: 0, title: 'Cataloguer' },
+  { stamps: 100, seedTier: 3, planters: 1, title: 'Archivist' },
+  { stamps: 150, seedTier: 4, planters: 0, title: 'Connoisseur' },
+  { stamps: 200, seedTier: 4, planters: 0, title: 'Rarity Hunter' },
+  { stamps: 300, seedTier: 5, planters: 1, title: 'Grand Collector' },
+  { stamps: 400, seedTier: 5, planters: 0, title: 'Master Collector' },
+  { stamps: -1,  seedTier: 5, planters: 0, title: 'Keeper of Every Bloom' },   // Exotic: the prestige is the title, never a Unique seed
+]
+export function stampMilestoneTarget(m: StampMilestone): number { return m.stamps < 0 ? stampTotal() : m.stamps }
+export function nextStampMilestone(found: number): StampMilestone | null {
+  return STAMP_MILESTONES.find(m => found < stampMilestoneTarget(m)) ?? null
+}
+/** Stamps in a discovered list: one per distinct `${species}|${tier}` entry. A bare species id (the first hours of
+ *  that key) has no rarity, so it is a species but not a stamp. */
+export function stampCount(list: ReadonlyArray<string>): number {
+  const seen = new Set<string>()
+  for (const e of list) {
+    const bar = e.lastIndexOf('|')
+    if (bar > 0 && Number.isInteger(Number(e.slice(bar + 1))) && e.slice(bar + 1) !== '') seen.add(e)
+  }
+  return seen.size
+}
+
 /** How many species this rung actually needs (-1 = every species in the catalogue). */
 export function milestoneTarget(m: AlmanacMilestone): number {
   return m.species < 0 ? PLANT_SPECIES.length : m.species
@@ -352,39 +508,42 @@ export const BEACON_COLOR     = { r: 1, g: 0.85, b: 0.35 }
 export const BEACON_ALPHA     = 0.3
 export const BEACON_INTENSITY = 1.6
 
-/** Stage 1 line, shown under the banner until the server confirms the first water.
- *  Names the floating water-drop marker rather than the plant's pose: the markers are
- *  the affordance the GDD already commits to (§2, §6), they are on every plant that
- *  needs water, and they read the same on all 38 species and on a phone. */
-export const ONBOARDING_WATER_HINT = 'Tap a plant with a water drop'
-/** Stage 2 line, shown from the first seed until the first planting. Names the glowing
- *  planter as the NEAREST one rather than the only one: the player picks where their
- *  flower stands (KJ 2026-09-21, GDD 3.1 - planting is a world tap on a planter of your
- *  choosing), and the reservation is only there so the tutorial has something to point at. */
-export const ONBOARDING_PLANT_HINT = 'Tap any free planter to plant your seed - the glowing one is nearest'
-/** Between the first water and the first seed (KJ 2026-09-22 playtest 2: "the seed should come
- *  from the big bloom" — a starter grant was built and REVERSED the same evening). The hint
- *  names the goal and where seeds come from; the ring shows the progress. */
-export const ONBOARDING_BLOOM_HINT         = 'Keep watering - when the garden is healthy enough it blooms, and seeds fall for you to plant'
-/** Same stage while a bloom is running — the seeds are out right now. */
-export const ONBOARDING_SEEDS_FALLING_HINT = 'The garden is blooming - seeds are falling, walk through one to catch it'
-/** Stage 3 line, shown after the first planting until the seed pouch is opened once. */
-export const ONBOARDING_POUCH_HINT = 'Open your seed pouch below - your seeds and every flower you collect live in there'
-/** Stage 3 — fired once, the moment the first seed is planted: closes the loop by
- *  pointing the player back at the verb that starts the whole thing again. */
-export const ONBOARDING_LOOP_TOAST    = 'Planted! Now water the garden to start a bloom and collect more seeds'
-export const ONBOARDING_LOOP_TOAST_MS = 10_000
-/** First harvest: the three things a kept flower is FOR, in one line (KJ 2026-09-22). */
-export const ONBOARDING_HARVEST_TOAST    = 'Harvested! Open your pouch to hold it, gift it to a gardener, or put a Rare on the Avenue'
-export const ONBOARDING_HARVEST_TOAST_MS = 10_000
-/** Stage 4 — their own flower has opened and is standing in its planter. */
-export const ONBOARDING_HARVEST_HINT  = 'Your flower opened — tap it to keep it, or leave it on show'
-/** Stage 5 — shown only while another gardener is actually here. */
-export const ONBOARDING_GIFT_HINT     = 'Tap a gardener to give them one of your flowers'
-export const ONBOARDING_AVENUE_HINT   = 'You have a flower worthy of the Avenue - tap the glowing spot to put it on show'
-/** One-off toast when the first seed lands in the pouch. */
-export const ONBOARDING_SEED_TOAST = 'You caught a seed — plant it and it opens on a real-world timer'
-export const ONBOARDING_SEED_TOAST_MS = 7_000
+// ── Guided tutorial (KJ 2026-09-27) ──────────────────────────────────────────
+// One linear walk round the garden, each step a centre-screen card (the top pill went
+// unnoticed) with the chevron trail + beacon pointing at where to go. Every step can be
+// closed (X), skipped, or the whole tour ended; the bottom Tutorial button replays it.
+// Positions are world metres read off KJ's scene.glb (world = 8 - x, y, z + 24).
+export interface TutorialPoint { x: number; z: number }
+/** Arches KJ named in scene.glb (2026-09-27 export), centre of each opening. */
+export const ARCH_NORTH      = { x: 0.06,   z: 49.89 }   // garden → nursery
+export const ARCH_SHED       = { x: -17.24, z: 50.44 }   // nursery → potting shed
+export const ARCH_SOUTH      = { x: 31.89,  z: 49.21 }   // garden → Walk of Fame side
+export const ARCH_SOUTH_SOUTH = { x: 31.89, z: -1.21 }
+export const ARCH_FAME       = { x: 44.09,  z: 45.28 }   // into the Walk of Fame
+export const ARCH_FAME_SOUTH = { x: 44.09,  z: 2.56 }    // out of it, the far end
+/** A location step is done within this many metres (XZ) of its last waypoint. TUNING */
+export const TUTORIAL_ARRIVE_M   = 4
+/** Intermediate route waypoints count as passed within this. TUNING */
+export const TUTORIAL_WAYPOINT_M = 3
+export const TUTORIAL_DONE_MS    = 6_000   // the closing "you're set" moment
+
+/** The step cards, in order. `kind` says what finishes the step (onboarding.ts). */
+export const TUTORIAL_TEXT = {
+  water:   { title: 'Water the garden', body: 'Face a plant with a water drop, press and hold to pour, and let go in the green.' },
+  bloom:   { title: 'Wake the Bloom', body: 'Keep the garden above 80% and the giant flower in the centre bursts open.' },
+  seeds:   { title: 'Catch the seeds', body: 'A seed has landed - follow the arrows and walk into it to catch it.' },
+  arch:    { title: 'To the nursery', body: 'Follow the arrows through the arch - that is where seeds are grown.' },
+  shed:    { title: 'The potting shed', body: 'Your seeds live on this rack - the rarer ones glow.' },
+  plot:    { title: 'Your plot', body: 'Tap a free planter in your bed to plant a seed. It opens on a real-world timer.' },
+  plotLook:{ title: 'Your plot', body: 'This is your bed - your planters grow here. Plant a seed whenever you catch one.' },
+  tend:    { title: 'Tend your seedling', body: 'Tap your seedling to water it - each tend makes it grow faster.' },
+  harvest: { title: 'Harvest your flower', body: 'Your flower has opened! Tap it to keep it.' },
+  shelf:   { title: 'Your flowers', body: 'Every flower you harvest stands on this shelf. Hold one, or gift it to another gardener.' },
+  toFame:  { title: 'The Rare Plant Gallery', body: 'Follow the arrows through the arches to the Rare Plant Gallery.' },
+  fame:    { title: 'The Rare Plant Gallery', body: 'Only the rarest plants go on show here - and every one makes every Bloom\'s seeds rarer, for everyone. Tap a stand to display yours.' },
+  loop:    { title: 'Seed shower', body: 'Head back and water the roses again - every Bloom brings a new seed shower.' },
+  done:    { title: 'You know the garden', body: 'Tap Tutorial any time to walk it again' },
+} as const
 /** How long a tutorial planter is held for its player, and how often the client
  *  re-asks while it has no reservation (someone else may have taken the last one). */
 export const PLANTER_RESERVE_TTL_MS   = 4 * 60_000
@@ -399,8 +558,10 @@ export const BOX_MODEL_RIM_Y = 1.1 * BOX_MODEL_SCALE   // where the soil surface
 /** KJ's toon planter (2026-09-20): a 190-tri single-material proxy of planterBox.glb at
  *  ~98% of its bounds, gold and emissive. Worn OVER the real planter, scaled up so it
  *  reads as a rim rather than sitting inside the mesh. */
-export const TOON_HIGHLIGHT_SRC   = 'assets/scene/Models/planterBoxToon/planterBoxToon.glb'
-export const TOON_HIGHLIGHT_SCALE = BOX_MODEL_SCALE * 1.05
+// KJ 2026-09-25: "a softer highlight model (reduce transparency and/or shrink a tiny bit)". planterBoxToonSoft.glb is a COPY of the original
+// with a semi-transparent, muted gold material (the original is untouched); the shell is also a touch tighter (1.05 -> 1.03).
+export const TOON_HIGHLIGHT_SRC   = 'assets/scene/Models/planterBoxToon/planterBoxToonSoft.glb'
+export const TOON_HIGHLIGHT_SCALE = BOX_MODEL_SCALE * 1.03
 
 /** KJ split the balloons out of the box template (2026-09-17) into their own GLB so
  *  they can animate independently — same origin/scale as the box, balloons rise to
@@ -455,6 +616,25 @@ export function growMsForTier(tier: number): number {
  *  10% of a Common was the whole point of the gesture, and the same milliseconds off a
  *  Unique would be a rounding error. Still capped by BOX_WATER_MAX per box. */
 export const BOX_WATER_SHAVE_FRACTION = 0.10   // TUNING
+
+/** Growth stages (a seedling steps up at these fractions of ITS OWN timer) and TENDING: the
+ *  owner may water their own seedling once per stage reached, each worth TEND_SHAVE_FRACTION
+ *  of the whole timer (KJ 2026-09-25: "what can I do instead of waiting?"). 4 stages x 5% =
+ *  at most 20% off — a nudge, never a skip, so the come-back-later hook survives. Shared so
+ *  the server's rule and the client's water drop can never disagree about the stage. */
+export const GROW_STAGE_AT: ReadonlyArray<number> = [0, 0.25, 0.55, 0.8]   // TUNING
+export const TEND_SHAVE_FRACTION = 0.05   // TUNING
+export function growStageOf(opensAt: number, now: number, tier: number): number {
+  const total = growMsForTier(tier)
+  const progress = Math.max(0, Math.min(1, 1 - Math.max(0, opensAt - now) / total))
+  let stage = 0
+  for (let i = 0; i < GROW_STAGE_AT.length; i++) if (progress >= GROW_STAGE_AT[i]) stage = i
+  return stage
+}
+/** Tends the owner can make right now: one per stage reached, minus those already used. */
+export function tendsAvailable(opensAt: number, now: number, tier: number, used: number): number {
+  return growStageOf(opensAt, now, tier) + 1 - used
+}
 export function growShaveMsForTier(tier: number): number {
   return Math.round(growMsForTier(tier) * BOX_WATER_SHAVE_FRACTION)
 }
@@ -614,6 +794,14 @@ export function withArticle(word: string, capital = false): string {
   return `${capital ? art[0].toUpperCase() + art.slice(1) : art} ${word}`
 }
 
+/** Rarity stamps: one per species per rarity tier (KJ 2026-09-25 — the long tail of the collection). */
+export function stampTotal(): number {
+  // Tiers 0..5 pair every regular species; Mythic and Unique pair only their own bespoke plants
+  // (until a pool has plants, that tier still uses the regular catalogue).
+  const regular = PLANT_SPECIES.length * (RARITY_TIERS.length - 2)
+  return regular + (MYTHIC_PLANTS.length || PLANT_SPECIES.length) + (UNIQUE_PLANTS.length || PLANT_SPECIES.length)
+}
+
 export function rarityTierById(id: number): RarityTierDef {
   return RARITY_TIERS[id] ?? RARITY_TIERS[0]
 }
@@ -622,7 +810,9 @@ export function rarityTierById(id: number): RarityTierDef {
  *  see seedRareChance. Mythic/Unique joined the roll 2026-09-19 (KJ) now that their seed
  *  models exist: per seed ≈ Mythic 1 in 2,500 solo → 1 in 840 at 6+ gardeners, Unique
  *  1 in 10,000 → 1 in 3,350. The rainbow seed (rollRainbowTier) is the realistic route. */
-const TIER_ROLL_WEIGHTS: ReadonlyArray<number> = [55, 30, 10, 4, 1, 0.4, 0.1]   // TUNING — tier 1..7
+// Mythic and Unique are meant to be HARD (KJ 2026-09-25). Weights were [.., 0.4, 0.1]; now 0.15 and 0.03,
+// i.e. a share of about 0.15% and 0.03% of the above-Common seeds (was 0.4% / 0.1%). See design/rarity-notes.md.
+const TIER_ROLL_WEIGHTS: ReadonlyArray<number> = [55, 30, 10, 4, 1, 0.15, 0.03]   // TUNING — tier 1..7
 
 /** Rolls a rarity tier for a newly-spawned seed: seedRareChance(...) decides whether
  *  it beats Common at all, then this weights which of Uncommon..Exotic it lands on. */
@@ -632,9 +822,16 @@ export function rollSeedTier(contributors: number, rareSeedMult = 1): number {
 }
 
 /** A tier ≥ `minTier` (1..7) by TIER_ROLL_WEIGHTS — the guaranteed Rare+ seed uses 2. */
-export function rollTierAtLeast(minTier: number): number {
+/** The guaranteed Rare+ seed (4+ gardeners) may roll up to this tier and no higher. KJ 2026-09-25:
+ *  Mythic and Unique must be HARD. Uncapped, that one guaranteed roll made them ~9x easier in a
+ *  populated Bloom than solo (a Mythic about 1 Bloom in 190 instead of 1 in 510). Now Mythic and
+ *  Unique only come from the ordinary roll. */
+export const GUARANTEED_MAX_TIER = 5   // Exotic
+
+export function rollTierAtLeast(minTier: number, maxTier = TIER_ROLL_WEIGHTS.length): number {
   const from    = Math.max(1, Math.min(TIER_ROLL_WEIGHTS.length, minTier))
-  const weights = TIER_ROLL_WEIGHTS.slice(from - 1)
+  const to      = Math.max(from, Math.min(TIER_ROLL_WEIGHTS.length, maxTier))
+  const weights = TIER_ROLL_WEIGHTS.slice(from - 1, to)
   let r = Math.random() * weights.reduce((a, b) => a + b, 0)
   for (let i = 0; i < weights.length; i++) {
     r -= weights[i]
@@ -646,8 +843,20 @@ export function rollTierAtLeast(minTier: number): number {
 /** Rolls a species for a revealed plant — uniform across the committed catalog for now
  *  (all 78 equally likely); rarity tier is a fully separate axis, rolled independently
  *  at the seed stage via rollSeedTier. */
-export function rollPlantSpecies(): string {
-  return PLANT_SPECIES[Math.floor(Math.random() * PLANT_SPECIES.length)].id
+export function rollPlantSpecies(tier = 0): string {
+  const pool = bespokePool(tier)
+  const list = pool.length > 0 ? pool : PLANT_SPECIES
+  return list[Math.floor(Math.random() * list.length)].id
+}
+
+/** BESPOKE plants (KJ 2026-09-25): a Mythic or Unique seed opens into one of these hand-made plants, not a
+ *  regular species with a tint. While a pool is EMPTY that tier falls back to the regular catalogue, so the game
+ *  keeps working until the art lands. To add one: append an entry here (id, name, modelSrc, scale/offsets as for
+ *  PLANT_SPECIES) and drop `assets/images/plantThumbs/<id>.png`. See design/bespoke-plants.md. Plan: 12 Mythic, 6 Unique. */
+export const MYTHIC_PLANTS: ReadonlyArray<PlantSpecies> = []
+export const UNIQUE_PLANTS: ReadonlyArray<PlantSpecies> = []
+export function bespokePool(tier: number): ReadonlyArray<PlantSpecies> {
+  return tier === 6 ? MYTHIC_PLANTS : tier === 7 ? UNIQUE_PLANTS : []
 }
 /** Species retired from the pool, mapped to the one that replaced them. KJ 2026-09-20:
  *  the voxel pack shipped three near-identical grasses (grass_long, grass_long_2,
@@ -660,7 +869,7 @@ const RETIRED_SPECIES: Readonly<Record<string, string>> = {
 }
 export function plantSpeciesById(id: string): PlantSpecies | null {
   const key = RETIRED_SPECIES[id] ?? id
-  return PLANT_SPECIES.find(s => s.id === key) ?? null
+  return PLANT_SPECIES.find(s => s.id === key) ?? MYTHIC_PLANTS.find(s => s.id === key) ?? UNIQUE_PLANTS.find(s => s.id === key) ?? null
 }
 
 /** How long the bloom finale card holds after a bloom ends, and the rarity tier at
@@ -816,6 +1025,37 @@ export const TRIBUTE_MODEL_STANDARD = ''
 /** Planters a player may hold at once — growing AND displaying (GDD §3.1, 2026-09-18:
  *  displaying = leaving an opened flower in its planter). Stored per player (`boxCap`)
  *  so purchasable extra planters can raise it; the effective cap is max(stored, this). */
+/** Beds are numbered outward from here: bed 1 is the group of planters nearest this point. It is now the potting shed's door in KJ's new scene.glb (door.001), so the first
+ *  gardeners sit beside their inventory (design/zone-layout.md). */
+/** The beds of the baked layout, one list of planter ids per bed, numbered from the shed door outward (KJ's scene.glb strips, 2026-09-25).
+ *  Explicit so a bed is always the row that was laid out; shared/beds.ts falls back to greedy grouping for any planter not listed. */
+export const BEDS_EXPLICIT: ReadonlyArray<ReadonlyArray<string>> = [
+  ['box_4', 'box_6', 'box_99', 'box_100'],
+  ['box_1', 'box_2', 'box_3', 'box_50'],
+  ['box_51', 'box_52', 'box_53', 'box_54'],
+  ['box_55', 'box_56', 'box_57', 'box_58'],
+  ['box_59', 'box_60', 'box_61', 'box_62'],
+  ['box_63', 'box_64', 'box_65', 'box_66'],
+  ['box_67', 'box_68', 'box_69', 'box_70'],
+  ['box_71', 'box_72', 'box_73', 'box_74'],
+  ['box_75', 'box_76', 'box_77', 'box_78'],
+  ['box_79', 'box_80', 'box_81', 'box_82'],
+  ['box_83', 'box_84', 'box_85', 'box_86'],
+  ['box_87', 'box_88', 'box_89', 'box_90'],
+  ['box_91', 'box_92', 'box_93', 'box_94'],
+  ['box_97', 'box_98', 'box_101', 'box_102'],
+  ['box_103', 'box_104', 'box_105', 'box_106'],
+  ['box_107', 'box_108', 'box_109', 'box_110'],
+  ['box_111', 'box_112', 'box_113', 'box_114'],
+  ['box_115', 'box_116', 'box_117', 'box_118'],
+  ['box_119', 'box_120', 'box_121', 'box_122'],
+  ['box_123', 'box_124', 'box_125', 'box_126'],
+  ['box_127', 'box_128', 'box_129', 'box_130'],
+  ['box_131', 'box_132', 'box_133', 'box_134'],
+  ['box_135', 'box_136', 'box_137', 'box_138'],
+  ['box_139', 'box_140', 'box_141', 'box_142'],
+]
+export const BED_FILL_ORIGIN = { x: -18.9, z: 50.0 } as const
 export const BOX_CAP_DEFAULT       = 2   // TUNING
 /** Crowding rule (GDD §3.1): keep this many planters free. When fewer are free, the
  *  planter of the owner away longest (not connected, away ≥ PLANTER_TIDY_MIN_AWAY_MS) is
@@ -831,7 +1071,10 @@ export const FLOWER_COLLECTION_CAP = 500
 /** …at most this many times per box, one water per visitor. */
 export const BOX_WATER_MAX         = 5   // TUNING — was 3; week-2 testers wanted "more a day"
 
-// ── The Avenue — communal entrance planters (design/communal-planters.md, 2026-09-22) ──
+// ── The Avenue — communal planters (design/communal-planters.md, 2026-09-22) ──
+// MOVED 2026-09-25: the 72 old wall cubes are gone from the layout; the Avenue is now the 55 Hall of Fame
+// stands from KJ's scene.glb (shared/hallOfFame.ts) — av_1..av_55 in row order, soil-top slots. A stored
+// av_56..av_72 flower is sent home by the server's orphan rule. The notes below on the old wall are history.
 // A gallery, not a garden: harvested flowers only, nothing grows or wilts.
 // BAKED 2026-09-22 from scene.glb itself: the 72 wall planters are part of KJ's entrance
 // model (nodes ExhibitFlowers..ExhibitFlowers.005, identity transforms, geometry baked
@@ -841,96 +1084,16 @@ export const BOX_WATER_MAX         = 5   // TUNING — was 3; week-2 testers wan
 // Two walls: z ≈ 20.5 (rot 0, faces +z into the avenue) and z ≈ 27.5 (rot 180). Three
 // rows (soil y 1.13 / 1.78 / 2.43). Ids run from the gate (x ≈ 47) toward the garden.
 // Re-bake with the same script if the wall moves: cluster horizontal faces at |z| 3.1–3.78.
-export const AVENUE_POSITIONS: ReadonlyArray<{ id: string; x: number; y: number; z: number; rot: number }> = [
-  { id: 'av_1', x: 47.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_2', x: 47.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_3', x: 47.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_4', x: 47.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_5', x: 46.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_6', x: 46.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_7', x: 45.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_8', x: 45.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_9', x: 44.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_10', x: 44.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_11', x: 44.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_12', x: 44.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_13', x: 43.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_14', x: 43.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_15', x: 43.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_16', x: 43.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_17', x: 42.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_18', x: 42.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_19', x: 41.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_20', x: 41.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_21', x: 40.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_22', x: 40.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_23', x: 40.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_24', x: 40.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_25', x: 39.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_26', x: 39.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_27', x: 39.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_28', x: 39.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_29', x: 38.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_30', x: 38.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_31', x: 37.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_32', x: 37.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_33', x: 36.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_34', x: 36.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_35', x: 36.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_36', x: 36.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_37', x: 35.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_38', x: 35.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_39', x: 35.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_40', x: 35.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_41', x: 34.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_42', x: 34.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_43', x: 33.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_44', x: 33.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_45', x: 32.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_46', x: 32.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_47', x: 32.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_48', x: 32.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_49', x: 31.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_50', x: 31.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_51', x: 31.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_52', x: 31.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_53', x: 30.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_54', x: 30.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_55', x: 29.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_56', x: 29.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_57', x: 28.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_58', x: 28.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_59', x: 28.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_60', x: 28.481, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_61', x: 27.157, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_62', x: 27.157, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_63', x: 27.157, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_64', x: 27.157, y: 1.133, z: 27.504, rot: 180 },
-  { id: 'av_65', x: 26.388, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_66', x: 26.388, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_67', x: 25.251, y: 1.78, z: 20.496, rot: 0 },
-  { id: 'av_68', x: 25.251, y: 1.78, z: 27.504, rot: 180 },
-  { id: 'av_69', x: 24.481, y: 2.426, z: 20.496, rot: 0 },
-  { id: 'av_70', x: 24.481, y: 1.133, z: 20.496, rot: 0 },
-  { id: 'av_71', x: 24.481, y: 2.426, z: 27.504, rot: 180 },
-  { id: 'av_72', x: 24.481, y: 1.133, z: 27.504, rot: 180 },
-]
-/** Cube geometry (scene metres) — inner width 0.54, soil face is 0.345 m behind the
- *  cube's front face, cube front is 0.43 m tall. Used for the tap box and the plaque. */
-export const AVENUE_CUBE_FRONT_OFFSET = 0.345
-export const AVENUE_CUBE_HEIGHT       = 0.43
+export const AVENUE_POSITIONS: ReadonlyArray<{ id: string; x: number; y: number; z: number; rot: number }> = hofAvenueSlots()
+/** Stand geometry (scene metres), from the Hall of Fame module: the plain front wall stands
+ *  HOF_FRONT_OUT in front of the soil centre, and its plaque centre is DROP below the soil top. */
+export const AVENUE_CUBE_FRONT_OFFSET = HOF_FRONT_OUT
+export const AVENUE_PLAQUE_OUT        = 0.98   // on the star panel: 0.96 m out from the soil centre + 0.02 proud of the slope
+export const AVENUE_PLAQUE_DROP       = 0.31   // panel centre is 0.33 m below the soil top, +0.02 proud
 /** Species models are normalised to ~0.55 m (PLANT_SPECIES) for a 1.1 m planter; the
  *  Avenue cubes are 0.54 m wide, so shrink a touch. TUNING. */
-export const AVENUE_FLOWER_SCALE = 0.85
-/** Empty-slot filler ("wild bloom", design/communal-planters.md): a real species model
- *  stands in so the wall never reads as unfinished, dimmed so it never reads as someone's
- *  real display — instantly replaced the moment a player plants here (client swaps the
- *  visual the instant avenueState reports an owner; nothing server-side to displace).
- *  Deterministic per slotId (wildSpeciesFor in avenueSystem.ts), so it's the same flower
- *  for every viewer and doesn't shuffle on reload. TUNING — true desaturation needs a
- *  shader; GltfNodeModifiers can only dim the albedo uniformly (see plantVfx.ts's own
- *  note on what that component can and can't retint). */
-export const AVENUE_WILD_TINT = 0.4
+export const AVENUE_FLOWER_SCALE = 1.3   // stands are 1.6 m wide (the old wall cubes were 0.54) — TUNING
+/** Empty-slot filler: a floating gold "?" over the soil (avenueSystem.ts setWildBloom). */
 /** How far out from a slot the onboarding marker arrow floats. Deliberately SHORT: at the
  *  tutorial trail's 1.2 m the arrow hung a metre in front of a 0.54 m cube, so a click
  *  aimed at the arrow projected past the cube edge and hit nothing — which is what "the

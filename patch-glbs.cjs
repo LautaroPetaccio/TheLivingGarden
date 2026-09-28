@@ -160,7 +160,7 @@ function patchVec4Colors(filePath) {
 // explorer's material.freeze() step — check-glb.cjs blocks deploy on this (see its
 // CRASH_EXTENSIONS / specularColorFactor check). This is the automatic fix: clamp each
 // channel to 1.0, the closest valid value, the same "sanitize before deploy" role
-// patchVec4Colors and stripColliderMeshes already play for their own crash classes.
+// patchVec4Colors already plays for its own crash class.
 
 function clampSpecularColorFactor(filePath) {
   const glb = readGlb(filePath)
@@ -179,7 +179,7 @@ function clampSpecularColorFactor(filePath) {
 
   if (patched === 0) return 0
 
-  // JSON-only rebuild (BIN chunk untouched) — same shape as stripColliderMeshes.
+  // JSON-only rebuild (BIN chunk untouched).
   const jsonStr    = JSON.stringify(gltf, null, 0)
   const jsonBuf    = Buffer.from(jsonStr, 'utf8')
   const jsonPadLen = (4 - (jsonBuf.length % 4)) % 4
@@ -218,103 +218,21 @@ function clampSpecularColorFactor(filePath) {
   return patched
 }
 
-// ── Strip _collider meshes ────────────────────────────────────────────────────
+// ── _collider meshes are NOT stripped (removed 2026-09-27) ───────────────────
 //
-// WHY: DCL's production hammurabi-server (worker-bundle.cjs) calls setColliderMask()
-// for every mesh whose name ends with '_collider'. That function assigns a GridMaterial
-// with opacity=0, which sets needAlphaBlending()=true in Babylon.js → mesh enters
-// _renderTransparentSorted → NullEngine has no compiled shader → _effect is undefined
-// → setMatrix() crash → server never reaches room.onReady() → clients hang forever.
-//
-// The local server is protected by hammurabi.mjs which patches UniformBuffer to guard
-// _currentEffect at runtime.  Production has no such guard.
-//
-// Fix: remove all _collider meshes (and the nodes that reference them) from the GLB
-// before deploy.  The production server never sees them, never assigns opacity=0.
-// Physics/pointer collision for plants is handled by visibleMeshesCollisionMask in
-// wateringSystem.ts; bean-bag/pot walk-through is an acceptable trade-off.
-
-function stripColliderMeshes(filePath) {
-  const glb = readGlb(filePath)
-  if (!glb || !glb.jsonData) return 0
-
-  const gltf = glb.jsonData
-
-  const meshes   = gltf.meshes   || []
-  const nodes    = gltf.nodes    || []
-
-  // Find indices of meshes whose name ends with _collider (case-insensitive)
-  const removedMeshIndices = new Set()
-  for (let i = 0; i < meshes.length; i++) {
-    if (meshes[i].name && /_collider$/i.test(meshes[i].name)) {
-      removedMeshIndices.add(i)
-    }
-  }
-
-  if (removedMeshIndices.size === 0) return 0
-
-  // Build a remapping of old mesh index → new mesh index after removal
-  const meshRemap = new Map()
-  let newIdx = 0
-  for (let i = 0; i < meshes.length; i++) {
-    if (!removedMeshIndices.has(i)) {
-      meshRemap.set(i, newIdx++)
-    }
-  }
-
-  // Remove the collider meshes from the meshes array
-  gltf.meshes = meshes.filter((_, i) => !removedMeshIndices.has(i))
-
-  // Update node.mesh references: remap surviving references, delete removed ones
-  for (const node of nodes) {
-    if (node.mesh === undefined) continue
-    if (removedMeshIndices.has(node.mesh)) {
-      delete node.mesh
-    } else {
-      node.mesh = meshRemap.get(node.mesh)
-    }
-  }
-
-  // Rebuild GLB with patched JSON (BIN chunk unchanged — we only remove JSON refs,
-  // the binary data for stripped accessors stays in the buffer but is unreferenced
-  // and ignored by all loaders).
-  const jsonStr    = JSON.stringify(gltf, null, 0)
-  const jsonBuf    = Buffer.from(jsonStr, 'utf8')
-  const jsonPadLen = (4 - (jsonBuf.length % 4)) % 4
-  const jsonPadded = jsonPadLen ? Buffer.concat([jsonBuf, Buffer.alloc(jsonPadLen, 0x20)]) : jsonBuf
-
-  const binPadded = glb.binData
-    ? (() => {
-        const pad = (4 - (glb.binData.length % 4)) % 4
-        return pad ? Buffer.concat([glb.binData, Buffer.alloc(pad)]) : glb.binData
-      })()
-    : null
-
-  const jsonChunkTotal = 8 + jsonPadded.length
-  const binChunkTotal  = binPadded ? 8 + binPadded.length : 0
-  const totalLen       = 12 + jsonChunkTotal + binChunkTotal
-
-  const header = Buffer.allocUnsafe(12)
-  header.writeUInt32LE(0x46546C67, 0)
-  header.writeUInt32LE(2, 4)
-  header.writeUInt32LE(totalLen, 8)
-
-  const jsonHeader = Buffer.allocUnsafe(8)
-  jsonHeader.writeUInt32LE(jsonPadded.length, 0)
-  jsonHeader.writeUInt32LE(0x4E4F534A, 4)
-
-  const parts = [header, jsonHeader, jsonPadded]
-
-  if (binPadded) {
-    const binHeader = Buffer.allocUnsafe(8)
-    binHeader.writeUInt32LE(binPadded.length, 0)
-    binHeader.writeUInt32LE(0x004E4942, 4)
-    parts.push(binHeader, binPadded)
-  }
-
-  fs.writeFileSync(filePath, Buffer.concat(parts))
-  return removedMeshIndices.size
-}
+// This script used to delete every mesh whose MESH name ended in '_collider', on the
+// theory that production hammurabi crashes on them (setColliderMask → opacity-0
+// GridMaterial → transparent pass → NullEngine setMatrix crash). Removed because:
+//   • it deleted KJ's Blender colliders from the exported GLB on every `npm run start`
+//     (StandBottom/StandTop/SolarPanel_collider were lost this way) — colliders are
+//     needed for player AND native camera collision;
+//   • locally it did nothing useful: hammurabi.mjs already guards that crash;
+//   • hammurabi matches the Babylon mesh name, which the glTF loader takes from the
+//     NODE name — so node-named colliders (Blender's usual export) passed straight
+//     through the mesh-name check anyway;
+//   • Clean The Club runs in production with 33 '_collider' nodes in mainstructure.glb
+//     and no stripping. If a Bloom Garden deploy ever hangs at room.onReady(), check
+//     this first — but never fix it by deleting colliders from the source asset.
 
 // ── Main ─────────────────────────────────────────────────────────────────────
 
@@ -330,12 +248,10 @@ function findGlbs(dir, results = []) {
 const glbs = findGlbs(ASSETS_DIR)
 let totalVec4    = 0
 let filesVec4    = 0
-let totalStripped = 0
-let filesStripped = 0
 let totalSpecular = 0
 let filesSpecular = 0
 
-console.log(`[patch-glbs] Scanning ${glbs.length} GLB(s) for VEC4 vertex colors, _collider meshes, and out-of-spec specular...`)
+console.log(`[patch-glbs] Scanning ${glbs.length} GLB(s) for VEC4 vertex colors and out-of-spec specular...`)
 
 for (const glb of glbs) {
   const rel = path.relative(__dirname, glb)
@@ -347,13 +263,6 @@ for (const glb of glbs) {
     filesVec4++
   }
 
-  const stripCount = stripColliderMeshes(glb)
-  if (stripCount > 0) {
-    console.log(`[patch-glbs] ✅ Stripped ${stripCount} _collider mesh(es) from ${rel}`)
-    totalStripped += stripCount
-    filesStripped++
-  }
-
   const specCount = clampSpecularColorFactor(glb)
   if (specCount > 0) {
     console.log(`[patch-glbs] ✅ Clamped specularColorFactor: ${specCount} material(s) in ${rel}`)
@@ -362,10 +271,9 @@ for (const glb of glbs) {
   }
 }
 
-if (filesVec4 === 0 && filesStripped === 0 && filesSpecular === 0) {
+if (filesVec4 === 0 && filesSpecular === 0) {
   console.log('[patch-glbs] All GLBs already clean — nothing to patch.')
 } else {
   if (filesVec4     > 0) console.log(`[patch-glbs] VEC4 done:     ${totalVec4} accessor(s) across ${filesVec4} file(s).`)
-  if (filesStripped > 0) console.log(`[patch-glbs] Collider done: ${totalStripped} mesh(es) stripped across ${filesStripped} file(s).`)
   if (filesSpecular > 0) console.log(`[patch-glbs] Specular done: ${totalSpecular} material(s) clamped across ${filesSpecular} file(s).`)
 }

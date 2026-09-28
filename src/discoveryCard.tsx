@@ -20,14 +20,16 @@
 // =============================================================
 
 import ReactEcs, { UiEntity, Label } from '@dcl/sdk/react-ecs'
-import { PLANT_SPECIES, rarityTierById, plantSpeciesById, DISCOVERY_CARD_MS, MILESTONE_CARD_MS, nextMilestone, milestoneTarget } from './shared/config'
-import { getDiscovered } from './playerInventory'
+import { timers } from '@dcl/sdk/ecs'
+import { PLANT_SPECIES, stampTotal, rarityTierById, plantSpeciesById, DISCOVERY_CARD_MS, MILESTONE_CARD_MS, nextMilestone, milestoneTarget, nextStampMilestone, stampMilestoneTarget } from './shared/config'
+import { getDiscovered, stampsFound } from './playerInventory'
 import { room } from './shared/messages'
 
-interface Discovery { flower: string; tier: number; isNew: boolean; newTier: boolean; found: number }
+interface Discovery { flower: string; tier: number; isNew: boolean; newTier: boolean; found: number; stamps: number }
 
 let card: Discovery | null = null
 let shownAt = 0
+let cardDueAt = 0   // a delayed card is on its way — milestones wait for it
 
 const FADE_MS = 400
 const DARK  = { r: 0.07, g: 0.063, b: 0.055, a: 0.94 }
@@ -59,17 +61,18 @@ function closeButton(px: (n: number) => number, fs: (n: number) => number, a: nu
  *  was a moment ago — which is exactly the question being asked. If the push wins the
  *  race the card simply reads "You discovered" instead of "New species!"; the Almanac
  *  is right either way, because the server owns the set. */
-export function showDiscovery(flower: string, tier: number): void {
-  const seen = getDiscovered()
+export function showDiscovery(flower: string, tier: number, delayMs = 0): void {
+  const seen = getDiscovered()   // snapshotted NOW, even when the card is delayed for the reveal beat
   // Two different "new": a species never seen at all, and a species seen but never at
   // THIS rarity. The headline count is species, so only the former says "New species!".
-  card = { flower, tier, isNew: !seen.has(flower), newTier: !seen.get(flower)?.has(tier), found: seen.size }
-  shownAt = Date.now()
-  console.log(`[Discovery] ${flower} tier=${tier} new=${card.isNew} newTier=${card.newTier} found=${card.found}/${PLANT_SPECIES.length}`)
+  const c = { flower, tier, isNew: !seen.has(flower), newTier: !seen.get(flower)?.has(tier), found: seen.size, stamps: stampsFound() }
+  const show = () => { card = c; shownAt = Date.now(); cardDueAt = 0 }
+  if (delayMs > 0) { cardDueAt = Date.now() + delayMs; timers.setTimeout(show, delayMs) } else show()
+  console.log(`[Discovery] ${flower} tier=${tier} new=${c.isNew} newTier=${c.newTier} found=${c.found}/${PLANT_SPECIES.length}`)
 }
 
 // ── Almanac milestone — the bigger, rarer beat that sits on top of a discovery.
-interface Milestone { title: string; species: number; seedTier: number; planters: number }
+interface Milestone { title: string; species: number; stamps: number; seedTier: number; planters: number }
 let milestone: Milestone | null = null
 let milestoneAt = 0   // when its clock starts — later than now while another card is up
 // A real QUEUE, not one slot: an established gardener's first join backfills a whole
@@ -81,13 +84,14 @@ const milestoneQueue: Milestone[] = []
 /** ⚠️ Registered from index.ts AFTER setupWateringSystem(), which calls room.clear(). */
 export function setupDiscoveryCard(): void {
   room.onMessage('milestoneReached', (data) => {
-    milestoneQueue.push({ title: data.title, species: data.species, seedTier: data.seedTier, planters: data.planters })
-    console.log(`[Milestone] queued ${data.title} at ${data.species} species (tier-${data.seedTier} seed, +${data.planters} planter) — ${milestoneQueue.length} waiting`)
+    milestoneQueue.push({ title: data.title, species: data.species, stamps: data.stamps ?? 0, seedTier: data.seedTier, planters: data.planters })
+    console.log(`[Milestone] queued ${data.title} at ${data.stamps > 0 ? `${data.stamps} stamps` : `${data.species} species`} (tier-${data.seedTier} seed, +${data.planters} planter) — ${milestoneQueue.length} waiting`)
   })
 }
 
 /** Start the next milestone once the current card (and any discovery card) has finished. */
 function pumpMilestones(now: number): void {
+  if (now < cardDueAt) return
   if (milestone && now < milestoneAt + MILESTONE_CARD_MS) return
   const next = milestoneQueue.shift()
   if (!next) return
@@ -106,6 +110,12 @@ function fade(now: number, start: number, life: number): number {
 }
 const alpha = (now: number) => fade(now, shownAt, DISCOVERY_CARD_MS)
 
+/** True while the discovery or milestone card is on screen — the tutorial card gives way (ui.tsx). */
+export function isDiscoveryShowing(): boolean {
+  const now = Date.now()
+  return (card !== null && alpha(now) > 0.02) || (milestone !== null && fade(now, milestoneAt, MILESTONE_CARD_MS) > 0.02)
+}
+
 export function MilestoneCardUi(props: { px: (n: number) => number; fs: (n: number) => number; mobile: boolean }) {
   const now = Date.now()
   pumpMilestones(now)
@@ -115,7 +125,9 @@ export function MilestoneCardUi(props: { px: (n: number) => number; fs: (n: numb
   const { px, fs } = props
   const m = milestone
   const tier = rarityTierById(m.seedTier)
-  const next = nextMilestone(m.species)
+  const isStamp = m.stamps > 0
+  const next = isStamp ? null : nextMilestone(m.species)
+  const nextStamp = isStamp ? nextStampMilestone(m.stamps) : null
   const reward = `A ${tier.name} seed${m.planters > 0 ? ` and ${m.planters === 1 ? 'an extra planter' : `${m.planters} extra planters`}` : ''}`
 
   return (
@@ -126,13 +138,13 @@ export function MilestoneCardUi(props: { px: (n: number) => number; fs: (n: numb
         onMouseDown={dismissMilestone}
       >
         {closeButton(px, fs, a, dismissMilestone)}
-        <Label value={`${m.species} species discovered`} fontSize={fs(15)} color={{ ...DIM, a }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: fs(22) }} />
+        <Label value={isStamp ? `${m.stamps} rarity stamps collected` : `${m.species} species discovered`} fontSize={fs(15)} color={{ ...DIM, a }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: fs(22) }} />
         <Label value={m.title} fontSize={fs(30)} color={{ ...NEW, a }} textAlign="middle-center" textWrap="wrap" uiTransform={{ width: '100%', height: fs(40), margin: { top: px(2) } }} />
         <UiEntity uiTransform={{ height: px(34), padding: { left: px(18), right: px(18) }, margin: { top: px(10) }, alignItems: 'center', justifyContent: 'center', borderRadius: px(17) }} uiBackground={{ color: { ...tier.seedColor, a } }}>
           <Label value={reward} fontSize={fs(14)} color={{ ...INK, a }} textAlign="middle-center" textWrap="nowrap" uiTransform={{ height: '100%' }} />
         </UiEntity>
         <Label
-          value={next ? `Next: ${next.title} at ${milestoneTarget(next)} species` : 'You have found every flower in the garden.'}
+          value={isStamp ? (nextStamp ? `Next: ${nextStamp.title} at ${stampMilestoneTarget(nextStamp)} stamps` : 'You have every rarity stamp in the garden.') : (next ? `Next: ${next.title} at ${milestoneTarget(next)} species` : 'You have found every flower in the garden.')}
           fontSize={fs(13)} color={{ ...DIM, a: a * 0.85 }} textAlign="middle-center" textWrap="wrap"
           uiTransform={{ width: '100%', height: fs(20), margin: { top: px(10) } }}
         />
@@ -186,6 +198,14 @@ export function DiscoveryCardUi(props: { px: (n: number) => number; fs: (n: numb
           textAlign="middle-center"
           textWrap="wrap"
           uiTransform={{ width: '100%', height: fs(20), margin: { top: px(10) } }}
+        />
+        <Label
+          value={`${c.stamps + (c.newTier ? 1 : 0)} of ${stampTotal()} rarity stamps${c.newTier ? '  (+1 new)' : ''}`}
+          fontSize={fs(13)}
+          color={{ ...(c.newTier ? NEW : DIM), a: a * 0.85 }}
+          textAlign="middle-center"
+          textWrap="wrap"
+          uiTransform={{ width: '100%', height: fs(20), margin: { top: px(2) } }}
         />
       </UiEntity>
     </UiEntity>

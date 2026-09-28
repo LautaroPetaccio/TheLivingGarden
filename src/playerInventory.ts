@@ -21,6 +21,7 @@ let pouch: number[] = []      // counts per rarity tier, index = tier id
 let preferredTier   = 0       // which tier to plant next, when the pouch holds more than one
 let flowers: Keepsake[] = []
 let boxCap     = 1
+let boxCapKnown = false   // false until the server has told us: the default of 1 is a placeholder and must never block planting
 
 export function getPouch(): number[] { return pouch }
 export function setPouch(counts: number[]): void {
@@ -58,6 +59,12 @@ export function heldFlowerIndex(): number | null {
  *  hours of this key) still registers the species, just with no rarity against it. */
 let discovered = new Map<string, Set<number>>()
 export function getDiscovered(): ReadonlyMap<string, ReadonlySet<number>> { return discovered }
+/** How many species × rarity stamps have been found (one per tier seen of each species). */
+export function stampsFound(): number {
+  let n = 0
+  discovered.forEach(tiers => { n += tiers.size })
+  return n
+}
 export function setDiscovered(entries: string[]): void {
   const next = new Map<string, Set<number>>()
   for (const e of entries) {
@@ -75,7 +82,8 @@ export function setDiscovered(entries: string[]): void {
 export function getFlowers(): Keepsake[] { return flowers }
 export function setFlowers(list: Keepsake[]): void { flowers = list }
 export function getBoxCap(): number { return boxCap }
-export function setBoxCap(n: number): void { boxCap = n }
+export function setBoxCap(n: number): void { boxCap = n; boxCapKnown = true }
+export function isBoxCapKnown(): boolean { return boxCapKnown }
 
 /** How many MORE flowers this gardener could put on the Avenue right now — server-owned,
  *  refreshed alongside the collection (harvest/gift/display/recall/join). Onboarding uses
@@ -84,16 +92,6 @@ let avenueSlotsFree = 0
 export function getAvenueSlotsFree(): number { return avenueSlotsFree }
 export function setAvenueSlotsFree(n: number): void { avenueSlotsFree = n }
 
-// Onboarding stage 3 (pouch) crosses the same seam as gifting: the tutorial SETS the
-// hint, the HUD reads it, and the HUD calls back the first time the pouch is opened.
-// It lives here rather than the HUD importing onboarding directly, because that would
-// close a ui -> onboarding -> notifications -> ui import cycle.
-let pouchHint = false
-let pouchOpenedCb: (() => void) | null = null
-export function getPouchHint(): boolean { return pouchHint }
-export function setPouchHint(on: boolean): void { pouchHint = on }
-export function registerPouchOpened(fn: () => void): void { pouchOpenedCb = fn }
-export function notePouchOpened(): void { pouchOpenedCb?.() }
 
 // Gifting is owned by giftSystem; it registers itself here so the menu can use it.
 let giftApi: { gardenersHere(): Gardener[]; give(toAddress: string, flowerIndex: number): void; hold(flowerIndex: number): void; holdSeed(rarityTier: number): void } | null = null

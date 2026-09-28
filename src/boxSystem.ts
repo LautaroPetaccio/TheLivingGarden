@@ -42,16 +42,20 @@ import {
   GltfContainerLoadingState,
   Tween,
   TweenSequence,
+  EasingFunction,
+  Billboard, BillboardMode,
   timers, VisibilityComponent } from '@dcl/sdk/ecs'
 import { Quaternion } from '@dcl/sdk/math'
 import { getPlayer } from '@dcl/sdk/players'
 import { room } from './shared/messages'
-import { BOX_POSITIONS, BOX_WATER_MAX, WATER_DROP_MODEL_SRC, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById, withArticle } from './shared/config'
+import { BOX_POSITIONS, BOX_WATER_MAX, WATER_DROP_MODEL_SRC, BOX_MODEL_SRC, BOX_MODEL_SCALE, BOX_MODEL_RIM_Y, BED_FILL_ORIGIN, BEDS_EXPLICIT, growMsForTier, growStageOf, tendsAvailable, BALLOON_MODEL_SRC, BALLOON_ANIM_CLIPS, SEED_MODEL_HEIGHT, seedModelSrc, SEEDLING_MODEL_SRC_NORMAL, SEEDLING_MODEL_SRC_RARE, rarityTierById, plantSpeciesById, withArticle } from './shared/config'
 import { showToast } from './notifications'
+import { makeBeds, bedOwner, checkPlant, Bed } from './shared/beds'
 import { attachPlantVfx, attachSeedlingVfx, detachPlantVfx, setupPlantVfx } from './plantVfx'
 import { setupGiftSystem } from './giftSystem'
 import { showDiscovery } from './discoveryCard'
-import { setPouch, getBoxCap, nextSeedTier } from './playerInventory'
+import { triggerSparkle } from './sparkleSystem'
+import { setPouch, getBoxCap, isBoxCapKnown, nextSeedTier } from './playerInventory'
 import { createSign, moveSign, setupSignSystem, Sign } from './signs'
 import { BALLOON_TEXT_TRACK } from './balloonTextTrack'
 import { playSfx } from './sounds'
@@ -61,13 +65,14 @@ import { playWateringBeat } from './wateringSystem'
 // Config (greybox visuals)
 // ---------------------------------------------------------------
 
-// Text on the planter's own light wooden board (planterBox.glb node Cube.012: centre
-// y 0.988, front face z≈1.048, 0.96 × 0.32 at model scale — × BOX_MODEL_SCALE here).
-// Readers stand on +Z.
+// Text on the planter's own light wooden board (planterBox.glb node Cube.012: centre y 0.988, front face z≈1.048 — × BOX_MODEL_SCALE here).
+// Readers stand on +Z. KJ 2026-09-25: "the planter text needs to be much bigger, to be legible on mobile" — the floating-tag attempt covered
+// the balloons and the bed sign, so the text stays ON the planter. The board itself is only ~0.55 x 0.18 m, but the crate's front face around it
+// is ~1.08 m wide, so the text (with its dark outline) is allowed to spill past the board: ~1 m wide, font ~2.4x the old 0.4.
 const PLAQUE_OFFSET_Z = 1.055 * BOX_MODEL_SCALE
 const PLAQUE_Y        = 0.988 * BOX_MODEL_SCALE
-const PLAQUE_SIZE     = { w: 0.92 * BOX_MODEL_SCALE, h: 0.30 * BOX_MODEL_SCALE }
-const PLAQUE_FONT     = 0.4    // TUNING — two lines on a 0.55 × 0.18 m board
+const PLAQUE_SIZE     = { w: 1.05, h: 0.40 }
+const PLAQUE_FONT     = 0.95   // TUNING — ~0.05 m per character per unit: 17 chars per line across 0.97 m, two lines
 // Plaques are POOLED: signs.ts only ever shows the nearest 8 within 9 m, so 96 per-box
 // plaques meant 88 hidden text entities (+ a 96-text rewrite on every pouch update).
 // PLAQUE_POOL plaques re-home to the nearest planters instead (same idea as the 100-pot test).
@@ -117,9 +122,37 @@ interface BoxView {
   waters:       number
   lastWaterer:  string
   drop:         Entity | null   // water-drop marker: a growing seed of someone else's that I can still help
+  stage:        number          // growth stage shown by the seedling (0..GROW_STAGES.length-1), only ever rises
+  tends:        number          // times the owner has tended this seedling (server-confirmed), one allowed per stage
+  plantedAt:    number          // epoch ms the seed went in — a bed's owner is whoever planted first in it
 }
 
 const views  = new Map<string, BoxView>()
+
+// ---------------------------------------------------------------
+// Beds (shared/beds.ts): four planters that belong to whoever planted in them. Derived from the baked layout
+// (BOX_POSITIONS) so the client and the server compute the same beds; owners come from the planters themselves.
+// ---------------------------------------------------------------
+const beds: Bed[] = makeBeds(BOX_POSITIONS, BED_FILL_ORIGIN, BEDS_EXPLICIT)
+function bedInfo(id: string): { owner: string; ownerName: string; plantedAt: number } | undefined {
+  const v = views.get(id)
+  return v && v.owner ? { owner: v.owner.toLowerCase(), ownerName: v.ownerName, plantedAt: v.plantedAt } : undefined
+}
+const bedByBox = new Map<string, Bed>()
+for (const b of beds) for (const id of b.boxIds) bedByBox.set(id, b)
+function bedOwnerOfBox(boxId: string): { owner: string; ownerName: string; plantedAt: number } | null {
+  const b = bedByBox.get(boxId)
+  return b ? bedOwner(b, bedInfo) : null
+}
+/** The free planters I should be pointed at: my own bed's spare planters, else the lowest-numbered free bed's. Null = no steer. */
+function steeredFreeBoxes(): Set<string> | null {
+  const me = localId()
+  const free = (id: string) => { const v = views.get(id); return !!v && !v.owner && !deleted.has(id) }
+  const mine = beds.filter(b => bedOwner(b, bedInfo)?.owner === me).flatMap(b => b.boxIds).filter(free)
+  if (mine.length > 0) return new Set(mine)
+  const freeBed = beds.find(b => bedOwner(b, bedInfo) === null && b.boxIds.some(free))
+  return freeBed ? new Set(freeBed.boxIds.filter(free)) : null
+}
 /** Live planter layout: BOX_POSITIONS, as edited in preview by the planter editor
  *  (planterLayoutTool). Everything positions planters from HERE, never BOX_POSITIONS. */
 const layout   = new Map<string, PlanterPos>()
@@ -135,8 +168,10 @@ let   tickAccum = 0
 export function nearestFreePlanter(from: { x: number; z: number }): { boxId: string; x: number; z: number; rot: number } | null {
   let best: { boxId: string; x: number; z: number; rot: number } | null = null
   let bestSq = Infinity
+  const steer = steeredFreeBoxes()   // beds: point at my own bed first, else the lowest-numbered free bed
   for (const v of views.values()) {
     if (v.owner || deleted.has(v.boxId)) continue
+    if (steer && steer.size > 0 && !steer.has(v.boxId)) continue
     const p = layout.get(v.boxId)
     if (!p) continue
     const dx = p.x - from.x
@@ -210,6 +245,24 @@ export function freePlanterPos(boxId: string): { x: number; z: number; rot: numb
 
 function localId(): string { return (getPlayer()?.userId ?? '').toLowerCase() }
 function isMine(v: BoxView): boolean { return !!v.owner && v.owner.toLowerCase() === localId() }
+/** For the idle guide (onboarding.ts): how many of MY seeds are still growing, and the
+ *  soonest opening in ms. */
+export function myGrowingStatus(): { count: number; nextMs: number } {
+  const now = Date.now()
+  let count = 0, nextMs = Infinity
+  for (const v of views.values()) if (isMine(v) && !v.opened) { count++; nextMs = Math.min(nextMs, Math.max(0, v.opensLocalAt - now)) }
+  return { count, nextMs }
+}
+export function myPlanterCount(): number { return myBoxCount() }
+/** Tutorial: every tend I have given my own seedlings (server-confirmed, summed) — the step
+ *  watches it rise rather than trusting a one-off flag, so a replay works too. */
+export function myTendsTotal(): number { let n = 0; for (const v of views.values()) if (isMine(v)) n += v.tends; return n }
+/** Tutorial: the centre of the bed I own, or null if I have none yet. */
+export function myBedCentre(): { x: number; z: number } | null {
+  const me = localId()
+  const b = beds.find(b => bedOwner(b, bedInfo)?.owner === me)
+  return b ? { x: b.cx, z: b.cz } : null
+}
 function myBoxCount(): number { let n = 0; for (const v of views.values()) if (isMine(v)) n++; return n }
 
 // ---------------------------------------------------------------
@@ -219,20 +272,18 @@ function myBoxCount(): number { let n = 0; for (const v of views.values()) if (i
 function flowerName(v: BoxView): string { return plantSpeciesById(v.flower)?.name ?? v.flower }
 
 /** Board text. The countdown lives on the balloon (balloonTextFor), so this only changes on events. */
+/** Short lines only, so the big font fits on the planter's front: the OWNER is on the bed sign, so it is left out unless this planter sits in someone else's bed. */
 function labelFor(v: BoxView): string {
   if (!v.owner) {
     const have = pouch.reduce((a, b) => a + b, 0)
-    return have > 0 ? `Empty planter\nTap to plant (${have} seeds)` : 'Empty planter\nCatch a bloom seed'
+    return have > 0 ? `Tap to plant\n${have} seeds` : 'Empty planter\nno seeds yet'
   }
   const tierName = rarityTierById(v.rarityTier).name
-  // Always the owner's NAME, never "Your" (Fin 2026-09-21). The label is read by everyone
-  // standing near the planter, so "KJ's Tulip" is what it says to its owner too; the
-  // server sends ownerName for every box, and 'Your' only survives as a fallback for a
-  // record that somehow arrived without one. Direct-address TOASTS keep "Your".
-  const who = v.ownerName ? `${v.ownerName}'s` : 'Your'
-  if (v.opened) return `${who} ${flowerName(v)}${v.rarityTier > 0 ? `\n${tierName}` : ''}`
-  const watered = v.waters > 0 ? `\nwatered x${v.waters} by ${v.lastWaterer}` : ''
-  return `${who} ${v.rarityTier > 0 ? `${tierName} ` : ''}seed${watered}`
+  const bedOwnerInfo = bedOwnerOfBox(v.boxId)
+  const spill = bedOwnerInfo && bedOwnerInfo.owner !== v.owner.toLowerCase() && v.ownerName ? `${v.ownerName}'s\n` : ''
+  if (v.opened) return `${spill}${flowerName(v)}${v.rarityTier > 0 ? `\n${tierName}` : ''}`
+  const watered = v.waters > 0 ? `\nwatered x${v.waters}` : ''
+  return `${spill}${v.rarityTier > 0 ? `${tierName} ` : ''}seed${watered}`
 }
 
 function countdown(v: BoxView, now: number): string {
@@ -248,7 +299,7 @@ function balloonTextFor(v: BoxView, now: number): string {
 /** Hover prompt for the one tap the box currently offers. */
 function hoverFor(v: BoxView): string {
   if (!v.owner) return 'Plant seed'
-  if (isMine(v)) return v.opened ? 'Harvest (or leave it on show)' : 'Growing…'
+  if (isMine(v)) return v.opened ? 'Harvest' : tendReady(v, Date.now()) ? 'Tend your seed' : 'Growing…'
   if (v.opened) return `${v.ownerName}'s flower`
   return v.waters >= BOX_WATER_MAX ? 'Fully watered' : 'Water'
 }
@@ -285,7 +336,8 @@ function setPlantVisual(v: BoxView, pos: PlanterPos): void {
     // Growing: KJ's seedling model — only a normal/rare tint is baked into art so
     // far (SEEDLING_MODEL_SRC_NORMAL/_RARE), so tier 0 (Common) gets normal and
     // everything above it borrows the rare variant until per-tier seedling art exists.
-    const k = SEEDLING_SCALE
+    v.stage = stageFor(v, Date.now())
+    const k = SEEDLING_SCALE * GROW_STAGES[v.stage].scale
     Transform.create(e, { position: { x: pos.x, y: BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k, z: pos.z }, rotation: planterRotation(pos), scale: { x: k, y: k, z: k } })
     const src = v.rarityTier > 0 ? SEEDLING_MODEL_SRC_RARE : SEEDLING_MODEL_SRC_NORMAL
     GltfContainer.create(e, { src, visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
@@ -394,6 +446,68 @@ function plantRevealSystem(): void {
   pendingPlant.delete(best)
   setPlantVisual(best, layout.get(best.boxId)!)
   best.plantKey = plantKeyFor(best)
+  if (popIn.delete(best.boxId) && best.plant !== null && Transform.has(best.plant)) {
+    const to = { ...Transform.get(best.plant).scale }
+    Tween.setScale(best.plant, { x: 0.001, y: 0.001, z: 0.001 }, to, POP_MS, EasingFunction.EF_EASEOUTBACK)
+  }
+}
+
+// ---------------------------------------------------------------
+// Plant / reveal sequences. Until now planting swapped the model instantly and opening
+// was just the discovery card. Now: seed drops in → seedling pops up; on opening the
+// seedling swells, bursts, the flower pops out, THEN the card. `held` keeps refresh()
+// from swapping the visual while a beat is still playing; `popIn` scales the next-built
+// plant up from nothing. Client-only, live events only (never the join snapshot).
+// ---------------------------------------------------------------
+
+const held  = new Set<string>()
+const popIn = new Set<string>()
+const SEED_DROP_MS   = 550
+const SEED_DROP_H    = 1.6    // m above the rim the seed falls from
+const SEED_WORLD_H   = 0.3    // m — the falling seed's size
+const SWELL_MS       = 1100   // seedling swells before it opens
+const SWELL_MULT     = 1.3
+const POP_MS         = 650
+const CARD_AFTER_MS  = 900    // discovery card lands once the flower has mostly popped
+
+function releaseHold(v: BoxView): void {
+  held.delete(v.boxId)
+  pendingPlant.add(v)
+}
+
+function playPlantBeat(v: BoxView): void {
+  const pos = layout.get(v.boxId)
+  if (!pos) return
+  held.add(v.boxId)
+  const seed = engine.addEntity()
+  const k = SEED_WORLD_H / SEED_MODEL_HEIGHT
+  const rim = BOX_MODEL_RIM_Y + 0.15
+  Transform.create(seed, { position: { x: pos.x, y: rim + SEED_DROP_H, z: pos.z }, scale: { x: k, y: k, z: k } })
+  GltfContainer.create(seed, { src: seedModelSrc(v.rarityTier), visibleMeshesCollisionMask: ColliderLayer.CL_NONE, invisibleMeshesCollisionMask: ColliderLayer.CL_NONE })
+  Tween.setMove(seed, { x: pos.x, y: rim + SEED_DROP_H, z: pos.z }, { x: pos.x, y: rim, z: pos.z }, SEED_DROP_MS, EasingFunction.EF_EASEINQUAD)
+  timers.setTimeout(() => {
+    engine.removeEntity(seed)
+    playSfx('plant', { x: pos.x, y: 1, z: pos.z })
+    popIn.add(v.boxId)
+    releaseHold(v)
+  }, SEED_DROP_MS)
+}
+
+function playRevealBeat(v: BoxView): void {
+  const pos = layout.get(v.boxId)
+  if (!pos) return
+  held.add(v.boxId)
+  if (isMine(v)) showDiscovery(v.flower, v.rarityTier, SWELL_MS + CARD_AFTER_MS)   // state snapshotted now, shown after the beat
+  if (v.plant !== null && Transform.has(v.plant)) {
+    const k = Transform.get(v.plant).scale.x
+    Tween.setScale(v.plant, { x: k, y: k, z: k }, { x: k * SWELL_MULT, y: k * SWELL_MULT, z: k * SWELL_MULT }, SWELL_MS, EasingFunction.EF_EASEINSINE)
+  }
+  timers.setTimeout(() => {
+    triggerSparkle({ x: pos.x, y: BOX_MODEL_RIM_Y, z: pos.z })
+    playSfx('flowerOpen', { x: pos.x, y: 1, z: pos.z })
+    popIn.add(v.boxId)
+    releaseHold(v)
+  }, SWELL_MS)
 }
 
 // Week-2 playtest 2026-09-22 ("add a water drop icon"): the same marker the garden plants
@@ -403,8 +517,14 @@ function plantRevealSystem(): void {
 const wateredByMe = new Set<string>()   // boxIds I watered this session, client-side only
 const SEEDLING_DROP_Y = 0.8             // above the rim, like WATER_DROP_Y over a garden plant
 
+/** My own seedling has reached a stage I have not yet tended (tending = the owner's water, once per stage). */
+function tendReady(v: BoxView, now: number): boolean {
+  return isMine(v) && !!v.owner && !v.opened && tendsAvailable(v.opensLocalAt, now, v.rarityTier, v.tends) > 0
+}
 function wantsDrop(v: BoxView): boolean {
-  return !!v.owner && !v.opened && !isMine(v) && v.waters < BOX_WATER_MAX && !wateredByMe.has(v.boxId)
+  if (!v.owner || v.opened) return false
+  if (isMine(v)) return tendReady(v, Date.now())
+  return v.waters < BOX_WATER_MAX && !wateredByMe.has(v.boxId)
 }
 function removeSeedlingDrop(v: BoxView): void {
   if (v.drop === null) return
@@ -424,7 +544,7 @@ function setSeedlingDrop(v: BoxView, pos: PlanterPos): void {
 function refresh(v: BoxView): void {
   if (deleted.has(v.boxId)) return   // removed in the layout editor — stays hidden until the bake
   const pos = layout.get(v.boxId)!
-  if (plantKeyFor(v) !== v.plantKey) pendingPlant.add(v)   // built by plantRevealSystem
+  if (plantKeyFor(v) !== v.plantKey && !held.has(v.boxId)) pendingPlant.add(v)   // built by plantRevealSystem
   setSeedlingDrop(v, pos)
   setBalloonVisual(v, pos)
   if (v.balloonText !== null) setBalloonText(v, Date.now())
@@ -439,7 +559,16 @@ function refresh(v: BoxView): void {
 
 function tryPlant(v: BoxView): void {
   if (v.owner) return
-  if (myBoxCount() >= getBoxCap()) {
+  if (!adminUnlimited) {
+    const verdict = checkPlant(beds, bedInfo, localId(), v.boxId)
+    if (!verdict.ok) {
+      showToast(verdict.reason === 'plot_taken'
+        ? `That is ${verdict.ownerName}'s plot - plant in a free bed (any planter without a name sign)`
+        : `You have a bed with room - plant in Bed ${verdict.bed} first`, TOAST_MS, false)
+      return
+    }
+  }
+  if (isBoxCapKnown() && myBoxCount() >= getBoxCap()) {   // an unknown cap is only a placeholder: let the server decide
     showToast(`You're using all ${getBoxCap()} of your planters — harvest one to plant again`, TOAST_MS, false)
     return
   }
@@ -458,7 +587,15 @@ function onTap(v: BoxView): void {
   if (!v.owner) { tryPlant(v); return }
   if (isMine(v)) {
     if (v.opened) { console.log(`[Boxes] harvesting ${v.boxId}`); room.send('harvestBox', { boxId: v.boxId }); return }
-    showToast(`Still growing — ready in ${countdown(v, Date.now())}`, TOAST_MS, false)
+    if (tendReady(v, Date.now())) {
+      console.log(`[Boxes] tending ${v.boxId}`)
+      playWateringBeat()
+      room.send('tendBox', { boxId: v.boxId })
+      v.tends += 1          // optimistic; the next boxState carries the server's count
+      removeSeedlingDrop(v)
+      return
+    }
+    showToast(`Still growing — ready in ${countdown(v, Date.now())}. Tend it again when it grows`, TOAST_MS, false)
     return
   }
   if (v.opened) { showToast(`${v.ownerName}'s ${flowerName(v)}, on show`, TOAST_MS, false); return }
@@ -492,7 +629,7 @@ function createBox(p: PlanterPos & { id: string }): BoxView {
   Transform.create(hit, { parent: base, position: PLANTER_COLLIDER_CENTER, scale: PLANTER_COLLIDER_SIZE })
   MeshCollider.setBox(hit, ColliderLayer.CL_POINTER | ColliderLayer.CL_PHYSICS)
 
-  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, balloonLive: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '', drop: null }
+  const v: BoxView = { boxId: p.id, base, hit, labelText: '', plant: null, plantKey: '', balloon: null, balloonText: null, balloonMover: null, balloonPivot: null, balloonAnimPending: false, balloonLive: false, owner: '', ownerName: '', rarityTier: 0, opened: false, flower: '', opensLocalAt: 0, waters: 0, lastWaterer: '', drop: null, stage: 0, tends: 0, plantedAt: 0 }
   pointerEventsSystem.onPointerDown(
     { entity: hit, opts: { button: InputAction.IA_POINTER, hoverText: 'Plant seed', maxDistance: TAP_DISTANCE } },
     () => onTap(v),
@@ -630,12 +767,171 @@ export function demoRevealedFlowers(): void {
 }
 
 /** Once a second: only the balloon countdown moves; the board text is event-driven. */
+// ---------------------------------------------------------------
+// Bed signs: a plaque over each bed saying "Bed N" and who owns it, or "Free plot". A billboard so it reads from any side,
+// shown within BED_SIGN_RANGE metres. Free planters also say whose plot they are in when you hover them.
+// ---------------------------------------------------------------
+interface BedSign { bed: Bed; root: Entity; text: Entity; face: Entity; ring: Entity; text_: string; faceOwner: string; near: boolean }   // + a frame plane, never touched after creation
+const bedSigns: BedSign[] = []
+// 3.2, was 2.2 (KJ 2026-09-27): the 1.3 m plaque spanned 1.55–2.85 m and sat on the balloons (up to ~1.9 m).
+const BED_SIGN_Y     = 3.2
+const BED_SIGN_RANGE = 20
+const BED_TEXT_FREE  = { r: 0.83, g: 0.82, b: 0.78, a: 1 }
+const BED_TEXT_MINE  = { r: 0.98, g: 0.78, b: 0.3, a: 1 }
+const BED_TEXT_OTHER = { r: 0.957, g: 0.918, b: 0.824, a: 1 }
+const CIRCLE_FRAME   = 'assets/images/circleFrame.png'   // white outside a circular hole; tinted plaque-brown, laid OVER the square avatar
+const CIRCLE_RING    = 'assets/images/circleRing.png'    // white annulus, tinted per owner
+const RING_MINE  = { r: 0.98, g: 0.78, b: 0.3 }
+const RING_OTHER = { r: 0.957, g: 0.918, b: 0.824 }
+const RING_FREE  = { r: 0.35, g: 0.62, b: 0.42 }
+
+// The bed plaque matches the 2D UI: the same near-black as the menus (DARK in seedMenu/discoveryCard), rounded corners.
+const PLAQUE_DARK = { r: 0.085, g: 0.078, b: 0.067 }
+const PANEL_TEX   = 'assets/images/roundedPanel.png'
+
+function createBedSigns(): void {
+  for (const bed of beds) {
+    const root = engine.addEntity()
+    Transform.create(root, { position: { x: bed.cx, y: BED_SIGN_Y, z: bed.cz }, scale: { x: 0, y: 0, z: 0 } })
+    Billboard.create(root, { billboardMode: BillboardMode.BM_Y })
+    // Brown plaque, the owner's picture in a circle at the left, the text to its right. The viewer is on the -Z side, so
+    // depth order from the back: panel, avatar (a plain SQUARE — the explorer ignores a separate mask on it), the
+    // brown frame with a circular hole that crops it, then the tinted ring as the outline.
+    const panel = engine.addEntity()
+    Transform.create(panel, { parent: root, position: { x: 0, y: 0, z: 0.02 }, scale: { x: 4.3, y: 1.3, z: 1 } })
+    MeshRenderer.setPlane(panel)
+    Material.setPbrMaterial(panel, {
+      texture: Material.Texture.Common({ src: PANEL_TEX }), alphaTexture: Material.Texture.Common({ src: PANEL_TEX }),
+      albedoColor: { ...PLAQUE_DARK, a: 1 }, emissiveColor: PLAQUE_DARK, emissiveIntensity: 0.35,
+      transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND, castShadows: false,
+    })
+    const face = engine.addEntity()
+    Transform.create(face, { parent: root, position: { x: -1.55, y: 0, z: 0.0 }, scale: { x: 0, y: 0, z: 0 } })
+    MeshRenderer.setPlane(face)
+    const frame = engine.addEntity()
+    Transform.create(frame, { parent: root, position: { x: -1.55, y: 0, z: -0.006 }, scale: { x: 1.15, y: 1.15, z: 1.15 } })
+    MeshRenderer.setPlane(frame)
+    Material.setPbrMaterial(frame, {
+      texture: Material.Texture.Common({ src: CIRCLE_FRAME }), alphaTexture: Material.Texture.Common({ src: CIRCLE_FRAME }),
+      albedoColor: { ...PLAQUE_DARK, a: 1 }, emissiveColor: PLAQUE_DARK, emissiveIntensity: 0.35,
+      transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND, castShadows: false,
+    })
+    const ring = engine.addEntity()
+    Transform.create(ring, { parent: root, position: { x: -1.55, y: 0, z: -0.012 }, scale: { x: 1.15, y: 1.15, z: 1.15 } })
+    MeshRenderer.setPlane(ring)
+    const text = engine.addEntity()
+    // A TextShape's position is the CENTRE of its box, not its left edge: the box spans x -0.6 .. 2.0: a 0.4 m gap after the picture's ring.
+    // Font units are small: fontSize 1.15 came out ~0.06 m per character, so 3.4 makes "KJwalker3D's" ~2.4 m wide.
+    Transform.create(text, { parent: root, position: { x: 0.7, y: 0, z: -0.01 } })
+    TextShape.create(text, {
+      text: '', fontSize: 3.0, textColor: BED_TEXT_FREE, textAlign: TextAlignMode.TAM_MIDDLE_LEFT,
+      width: 2.6, height: 1.2, textWrapping: true, outlineWidth: 0.12, outlineColor: { r: 0.1, g: 0.06, b: 0.03 },
+    })
+    bedSigns.push({ bed, root, text, face, ring, text_: '', faceOwner: '\u0000', near: false })
+  }
+}
+
+/** The outline: gold for my plot, cream for someone else's, green for a free one. */
+function setBedRing(ring: Entity, c: { r: number; g: number; b: number }): void {
+  Material.setPbrMaterial(ring, {
+    texture: Material.Texture.Common({ src: CIRCLE_RING }), alphaTexture: Material.Texture.Common({ src: CIRCLE_RING }),
+    albedoColor: { ...c, a: 1 }, emissiveColor: c, emissiveIntensity: 0.8,
+    transparencyMode: MaterialTransparencyMode.MTM_ALPHA_BLEND, castShadows: false,
+  })
+}
+
+function updateBeds(): void {
+  const me = localId()
+  const pos = Transform.getOrNull(engine.PlayerEntity)?.position
+  for (const bs of bedSigns) {
+    const owner = bedOwner(bs.bed, bedInfo)
+    const mine = !!owner && owner.owner === me
+    // "Name's plot" for everyone, including me (KJ 2026-09-25: my name, not "Your plot")
+    const text = owner ? `${owner.ownerName}'s\nplot` : 'Free plot'
+    if (text !== bs.text_) {
+      bs.text_ = text
+      const ts = TextShape.getMutable(bs.text)
+      ts.text = text
+      ts.textColor = mine ? BED_TEXT_MINE : owner ? BED_TEXT_OTHER : BED_TEXT_FREE
+    }
+    // Profile picture in a circle (the owner's avatar face); a green disc when the plot is free
+    const who = owner ? owner.owner : ''
+    if (who !== bs.faceOwner) {
+      bs.faceOwner = who
+      const tex = who ? Material.Texture.Avatar({ userId: who }) : null
+      Material.setPbrMaterial(bs.face, tex
+        ? { texture: tex, emissiveTexture: tex, emissiveColor: { r: 1, g: 1, b: 1 }, emissiveIntensity: 0.9, castShadows: false }
+        : { albedoColor: { ...RING_FREE, a: 1 }, emissiveColor: RING_FREE, emissiveIntensity: 0.4, metallic: 0, roughness: 1 })   // free plot: a plain green disc behind the hole
+      Transform.getMutable(bs.face).scale = { x: 1.04, y: 1.04, z: 1.04 }
+      setBedRing(bs.ring, mine ? RING_MINE : owner ? RING_OTHER : RING_FREE)
+    }
+    // Only POPULATED beds get a sign (KJ 2026-09-25: hide the name tags of empty beds)
+    const near = !!owner && !!pos && Math.hypot(pos.x - bs.bed.cx, pos.z - bs.bed.cz) <= BED_SIGN_RANGE
+    if (near !== bs.near) { bs.near = near; Transform.getMutable(bs.root).scale = near ? { x: 1, y: 1, z: 1 } : { x: 0, y: 0, z: 0 } }
+    // Hover on each FREE planter in this bed says whose plot it is, so the protection is not a surprise on tap
+    for (const id of bs.bed.boxIds) {
+      const v = views.get(id)
+      if (!v || v.owner) continue
+      const verdict = checkPlant(beds, bedInfo, me, id)
+      setHoverText(v, verdict.ok ? 'Plant seed' : verdict.reason === 'plot_taken' ? `${verdict.ownerName}'s plot` : `Plant in Bed ${verdict.bed}`)
+    }
+  }
+}
+function setHoverText(v: BoxView, text: string): void {
+  const pe = PointerEvents.getMutableOrNull(v.hit)?.pointerEvents[0]?.eventInfo
+  if (pe && pe.hoverText !== text) pe.hoverText = text
+}
+
 function boxTickSystem(dt: number): void {
   tickAccum += dt * 1_000
   if (tickAccum < LABEL_TICK_MS) return
   tickAccum = 0
   const now = Date.now()
-  for (const v of views.values()) if (v.balloonLive) setBalloonText(v, now)
+  updateBeds()
+  for (const v of views.values()) {
+    if (v.balloonLive) setBalloonText(v, now)
+    if (v.owner && !v.opened && v.plant !== null && !held.has(v.boxId)) {
+      const s = stageFor(v, now)
+      if (s > v.stage) growTo(v, s)
+    }
+    if (isMine(v) && v.owner && !v.opened) {   // a new stage means a new tend: the drop and hover follow the clock, not just boxState
+      const pos = layout.get(v.boxId)
+      if (pos) setSeedlingDrop(v, pos)
+      const pe = PointerEvents.getMutableOrNull(v.hit)?.pointerEvents[0]?.eventInfo
+      if (pe) pe.hoverText = hoverFor(v)
+    }
+  }
+}
+
+// ---------------------------------------------------------------
+// Growth stages (playtest 2026-09-24: "we could have a lot more progression here"). The
+// seedling used to sit at one size until the flower opened. Now it steps through four
+// stages by how much of ITS OWN timer has elapsed (a Rare's 6-minute wait and a Common's
+// 2-minute wait both read as seed → sprout → seedling → bud), popping at each step.
+// Progress is elapsed/total, so a visitor's watering shave makes the next pop come sooner.
+// ---------------------------------------------------------------
+const GROW_STAGES: ReadonlyArray<{ scale: number }> = [   // WHEN each stage starts is GROW_STAGE_AT in config
+  { scale: 0.5  },   // seed just in the soil
+  { scale: 0.7  },   // sprout
+  { scale: 0.9  },   // seedling
+  { scale: 1.15 },   // bud, about to open
+]   // TUNING
+const GROW_POP_MS = 600
+
+function stageFor(v: BoxView, now: number): number {
+  return growStageOf(v.opensLocalAt, now, v.rarityTier)
+}
+
+function growTo(v: BoxView, stage: number): void {
+  const pos = layout.get(v.boxId)
+  if (!pos || v.plant === null || !Transform.has(v.plant)) return
+  const from = Transform.get(v.plant).scale.x
+  const k = SEEDLING_SCALE * GROW_STAGES[stage].scale
+  v.stage = stage
+  // Keep the base in the soil: the seedling's geometry starts SEEDLING_MODEL_MIN_Y*k above its origin.
+  Transform.getMutable(v.plant).position.y = BOX_MODEL_RIM_Y - SEEDLING_MODEL_MIN_Y * k
+  Tween.setScale(v.plant, { x: from, y: from, z: from }, { x: k, y: k, z: k }, GROW_POP_MS, EasingFunction.EF_EASEOUTBACK)
+  if (isMine(v)) triggerSparkle({ x: pos.x, y: BOX_MODEL_RIM_Y, z: pos.z })
 }
 
 /** Write a balloon's text only when it changed ("Ready to Harvest" never does; a countdown
@@ -773,6 +1069,7 @@ function plaqueHomeSystem(dt: number): void {
 export function setupBoxSystem(): void {
   for (let i = 0; i < PLAQUE_POOL; i++) plaques.push({ sign: createSign({ x: 0, y: -50, z: 0 }, 0, PLAQUE_SIZE, PLAQUE_FONT, false), boxId: null })
   for (const p of BOX_POSITIONS) { layout.set(p.id, { x: p.x, z: p.z, rot: p.rot }); views.set(p.id, createBox(p)) }
+  createBedSigns()
 
   room.onMessage('boxState', (data) => {
     const v = views.get(data.boxId)
@@ -789,24 +1086,23 @@ export function setupBoxSystem(): void {
     v.flower    = data.flower
     v.waters      = data.waters
     v.lastWaterer = data.lastWaterer
+    v.tends       = data.tends ?? 0
+    v.plantedAt   = Number(data.plantedAt)
     // Countdown from the server's own clock delta — clockSync is unreliable here
     v.opensLocalAt = Date.now() + (Number(data.opensAt) - Number(data.serverNow))
+    const planting  = live && !wasOwned && !!v.owner && !v.opened
+    const revealing = live && !wasOpened && v.opened && !!v.owner
+    if (planting || revealing) held.add(v.boxId)   // before refresh(): keep the old visual for the beat
     refresh(v)
-    // Sounds (sounds.ts): planting + opening play AT the planter so neighbours hear them too
-    const p = layout.get(v.boxId)
-    const at = p ? { x: p.x, y: 1, z: p.z } : undefined
-    if (live && !wasOwned && v.owner) playSfx('plant', at)
-    if (live && !wasOpened && v.opened) playSfx('flowerOpen', at)
+    // planting + opening sounds are played by the beats below, AT the planter so neighbours hear them too
+    if (planting) playPlantBeat(v)
+    if (revealing) playRevealBeat(v)
     if (live && wasMine && wasOpened && !v.owner) playSfx('harvest')
     // `live` matters here: the join/resync snapshot arrives with opened=true and
     // wasOpened=false for every planter already standing open, so an ungated branch
     // replays the whole beat on every rejoin. It was only a toast before; as a card it
     // would be a faceful of "you discovered" for flowers opened days ago.
-    if (live && !wasOpened && v.opened && isMine(v)) {
-      showDiscovery(v.flower, v.rarityTier)
-    } else if (live && !wasMine && isMine(v) && !v.opened) {
-      showToast('Seed planted — come back when it opens', TOAST_MS, false)
-    }
+    // (Notification pass 2026-09-27: no "Seed planted" toast — the seed drops in and the balloon's countdown starts)
   })
 
   setupGiftSystem()   // same post-room.clear() window as this system

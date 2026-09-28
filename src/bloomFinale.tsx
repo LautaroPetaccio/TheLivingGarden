@@ -24,6 +24,7 @@ import { BLOOM_FINALE_MS } from './shared/config'
 interface Summary {
   gardeners: number; waters: number; seeds: number; rares: number
   youWaters: number; youSeeds: number; youRares: number
+  galleryFlowers: number; galleryBoost: number; galleryStar: string
 }
 
 let summary: Summary | null = null
@@ -42,6 +43,7 @@ export function setupBloomFinale(): void {
     summary = {
       gardeners: data.gardeners, waters: data.waters, seeds: data.seeds, rares: data.rares,
       youWaters: data.youWaters, youSeeds: data.youSeeds, youRares: data.youRares,
+      galleryFlowers: data.galleryFlowers ?? 0, galleryBoost: data.galleryBoost ?? 0, galleryStar: data.galleryStar ?? '',
     }
     shownAt = Date.now()
     console.log(`[Finale] ${data.gardeners} gardener(s), ${data.waters} waters, ${data.seeds} seeds (${data.rares} rare+) · you ${data.youWaters}/${data.youSeeds}`)
@@ -56,6 +58,9 @@ function alpha(now: number): number {
   return Math.min(1, age / FADE_MS, left / FADE_MS)
 }
 
+/** True while the finale card is on screen — the tutorial card gives way to it (ui.tsx). */
+export function isBloomFinaleShowing(): boolean { return summary !== null && alpha(Date.now()) > 0.02 }
+
 export function BloomFinaleUi(props: { px: (n: number) => number; fs: (n: number) => number }) {
   if (!summary) return null
   const a = alpha(Date.now())
@@ -66,6 +71,10 @@ export function BloomFinaleUi(props: { px: (n: number) => number; fs: (n: number
   const communal = `${plural(s.gardeners, 'gardener')} · ${plural(s.waters, 'water')}${s.rares > 0 ? ` · ${plural(s.rares, 'rare')}` : ''}`
   const didSomething = s.youWaters > 0 || s.youSeeds > 0
   const personal = `You: ${plural(s.youWaters, 'water')}, ${plural(s.youSeeds, 'seed')}${s.youRares > 0 ? `, ${plural(s.youRares, 'rare')}` : ''}`
+  // The Rare Plant Gallery's part (2026-09-27): what was on show made this Bloom's seeds rarer.
+  const gallery = s.galleryFlowers > 0
+    ? `Boosted by ${plural(s.galleryFlowers, 'Gallery flower')}: rare seeds +${Math.round(s.galleryBoost * 100)}%`
+    : ''
 
   return (
     <UiEntity uiTransform={{ positionType: 'absolute', position: { top: '22%', left: 0 }, width: '100%', flexDirection: 'row', justifyContent: 'center' }}>
@@ -82,6 +91,8 @@ export function BloomFinaleUi(props: { px: (n: number) => number; fs: (n: number
           textAlign="middle-center"
           uiTransform={{ display: didSomething ? 'flex' : 'none', height: fs(28), margin: { top: px(4) } }}
         />
+        <Label value={gallery} fontSize={fs(16)} color={{ ...GOLD, a }} textAlign="middle-center" uiTransform={{ display: gallery ? 'flex' : 'none', height: fs(24), margin: { top: px(6) } }} />
+        <Label value={s.galleryStar ? `Star of the Gallery: ${s.galleryStar}` : ''} fontSize={fs(14)} color={{ ...DIM, a }} textAlign="middle-center" uiTransform={{ display: gallery && s.galleryStar ? 'flex' : 'none', height: fs(22) }} />
       </UiEntity>
     </UiEntity>
   )

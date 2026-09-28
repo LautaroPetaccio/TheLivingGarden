@@ -94,7 +94,9 @@ export function setPerfOff(t: PerfToggle, isOff: boolean): void {
       if (!g) return
       const mask = on ? (ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER) : ColliderLayer.CL_NONE
       g.visibleMeshesCollisionMask = mask
-      g.invisibleMeshesCollisionMask = on ? ColliderLayer.CL_PHYSICS : ColliderLayer.CL_NONE
+      // PHYSICS|POINTER, matching main.composite: physics-only colliders land on the explorer's
+      // CharacterOnly layer, which blocks the avatar but not the camera (2026-09-27).
+      g.invisibleMeshesCollisionMask = on ? ColliderLayer.CL_PHYSICS | ColliderLayer.CL_POINTER : ColliderLayer.CL_NONE
       break
     }
     case 'plants':   setAllPlantsVisible(on); break
