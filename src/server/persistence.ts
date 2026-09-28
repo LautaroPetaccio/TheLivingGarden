@@ -184,7 +184,12 @@ function createWriter(label: string, version: number, write: (value: unknown) =>
     } catch (error) {
       if (!(error instanceof TypeError)) return 'failed'
       console.error(`[Persistence] ${label}: save refused, snapshot dropped — ${error.message}`)
-      saveProblemListener?.(label, error.message)
+      try {
+        saveProblemListener?.(label, error.message)
+      } catch (listenerError) {
+        // A throw here would leave the flush loop marked as writing, and this key would never save again.
+        console.error(`[Persistence] ${label}: save-problem listener threw`, listenerError)
+      }
       return 'refused'
     }
   }

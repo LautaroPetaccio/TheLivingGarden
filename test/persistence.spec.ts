@@ -355,6 +355,38 @@ describe('when saving through a key writer', () => {
       })
     })
   })
+
+  describe('and the save-problem listener throws', () => {
+    let writer: KeyWriter
+    let errors: jest.SpyInstance
+
+    beforeEach(async () => {
+      errors = jest.spyOn(console, 'error').mockImplementation(() => undefined)
+      persistence.onSaveProblem(() => { throw new Error('listener broke') })
+      mockPlayerSet
+        .mockRejectedValueOnce(new TypeError('Storage.player.set(): address must be a 0x-prefixed 20-byte hex address.'))
+        .mockResolvedValue(true)
+      writer = persistence.createPlayerWriter('guest', 'seeds', 1)
+      writer.enable()
+      writer.save({ common: 1 })
+      await writer.idle()
+      writer.save({ common: 2 })
+      await writer.idle()
+    })
+
+    afterEach(() => {
+      errors.mockRestore()
+      persistence.onSaveProblem(undefined)
+    })
+
+    it('should still write the next snapshot', () => {
+      expect(mockPlayerSet).toHaveBeenLastCalledWith('guest', 'seeds', { v: 1, d: { common: 2 } })
+    })
+
+    it('should log that the listener threw', () => {
+      expect(errors).toHaveBeenCalledWith(expect.stringContaining('seeds@guest: save-problem listener threw'), expect.any(Error))
+    })
+  })
   describe('and a newer snapshot arrives while an earlier one is failing', () => {
     let writer: KeyWriter
 

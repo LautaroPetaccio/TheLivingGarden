@@ -1067,7 +1067,7 @@ const loadBoxCap  = (a: string) => loadPlayerJson<{ cap: number }>(a, 'boxCap', 
 /** Admins with the test panel's "Unlimited planters" on (in memory only). */
 const unlimitedPlanters = new Set<string>()
 const UNLIMITED_CAP = 999
-const RARITY_TIER_COUNT = 8   // Common..Unique
+const RARITY_TIER_COUNT = RARITY_TIERS.length   // Common..Unique; the pouch has one slot per tier
 /** Effective planter cap: a stored cap (e.g. bought planters) never drops below the default. */
 async function planterCap(address: string): Promise<number> {
   if (unlimitedPlanters.has(address)) return UNLIMITED_CAP
